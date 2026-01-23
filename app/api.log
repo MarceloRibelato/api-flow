@@ -76982,3 +76982,49 @@
 2026-01-22 20:29:28,832 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
 2026-01-22 20:29:28,838 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
 2026-01-22 20:29:28,844 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-01-22 21:12:51,717 - app - INFO - Logging configured successfully.
+2026-01-22 21:12:51,717 - __main__ - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-01-22 21:12:51,717 - __main__ - INFO - Recriando tabelas do banco de dados...
+2026-01-22 21:12:52,066 - __main__ - INFO - Tabelas removidas com sucesso
+2026-01-22 21:12:52,298 - __main__ - INFO - Tabelas criadas com sucesso
+2026-01-22 21:12:52,298 - __main__ - INFO - Inicializando aplicação FastAPI...
+2026-01-22 21:12:52,298 - __main__ - INFO - Configurando CORS middleware...
+2026-01-22 21:12:52,300 - __main__ - INFO - Registrando rotas...
+2026-01-22 21:12:52,315 - __main__ - INFO - Rota de autenticação registrada: /auth
+2026-01-22 21:12:52,323 - __main__ - INFO - Rota de fluxo registrada: /flow
+2026-01-22 21:12:52,334 - __main__ - INFO - Rota de projetos registrada: /projects
+2026-01-22 21:12:52,347 - __main__ - INFO - Rota de histórico registrada: /history
+2026-01-22 21:12:52,351 - __main__ - INFO - Rota de ambientes registrada: /environments
+2026-01-22 21:12:52,361 - __main__ - INFO - Rota de variáveis registrada: /variables
+2026-01-22 21:12:52,362 - __main__ - INFO - === INICIANDO SERVIDOR UVICORN ===
+2026-01-22 21:12:52,362 - __main__ - INFO - Servidor disponível em: http://127.0.0.1:8000
+2026-01-22 21:12:52,362 - __main__ - INFO - Documentação: http://127.0.0.1:8000/docs
+2026-01-22 21:12:52,363 - __main__ - INFO - Logs serão salvos em: api.log
+2026-01-22 21:12:54,032 - app - INFO - Logging configured successfully.
+2026-01-22 21:12:54,033 - __mp_main__ - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-01-22 21:12:54,033 - __mp_main__ - INFO - Recriando tabelas do banco de dados...
+2026-01-22 21:12:54,197 - __mp_main__ - INFO - Tabelas removidas com sucesso
+2026-01-22 21:12:54,371 - __mp_main__ - INFO - Tabelas criadas com sucesso
+2026-01-22 21:12:54,371 - __mp_main__ - INFO - Inicializando aplicação FastAPI...
+2026-01-22 21:12:54,371 - __mp_main__ - INFO - Configurando CORS middleware...
+2026-01-22 21:12:54,372 - __mp_main__ - INFO - Registrando rotas...
+2026-01-22 21:12:54,381 - __mp_main__ - INFO - Rota de autenticação registrada: /auth
+2026-01-22 21:12:54,385 - __mp_main__ - INFO - Rota de fluxo registrada: /flow
+2026-01-22 21:12:54,394 - __mp_main__ - INFO - Rota de projetos registrada: /projects
+2026-01-22 21:12:54,406 - __mp_main__ - INFO - Rota de histórico registrada: /history
+2026-01-22 21:12:54,409 - __mp_main__ - INFO - Rota de ambientes registrada: /environments
+2026-01-22 21:12:54,417 - __mp_main__ - INFO - Rota de variáveis registrada: /variables
+2026-01-22 21:12:54,533 - app - INFO - Logging configured successfully.
+2026-01-22 21:12:54,533 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-01-22 21:12:54,533 - app.main - INFO - Recriando tabelas do banco de dados...
+2026-01-22 21:12:54,659 - app.main - INFO - Tabelas removidas com sucesso
+2026-01-22 21:12:54,825 - app.main - INFO - Tabelas criadas com sucesso
+2026-01-22 21:12:54,825 - app.main - INFO - Inicializando aplicação FastAPI...
+2026-01-22 21:12:54,825 - app.main - INFO - Configurando CORS middleware...
+2026-01-22 21:12:54,825 - app.main - INFO - Registrando rotas...
+2026-01-22 21:12:54,836 - app.main - INFO - Rota de autenticação registrada: /auth
+2026-01-22 21:12:54,841 - app.main - INFO - Rota de fluxo registrada: /flow
+2026-01-22 21:12:54,853 - app.main - INFO - Rota de projetos registrada: /projects
+2026-01-22 21:12:54,875 - app.main - INFO - Rota de histórico registrada: /history
+2026-01-22 21:12:54,882 - app.main - INFO - Rota de ambientes registrada: /environments
+2026-01-22 21:12:54,909 - app.main - INFO - Rota de variáveis registrada: /variables
