@@ -79332,3 +79332,117 @@
 2026-01-23 22:01:31,952 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/8 - Status: 200
 2026-01-23 22:01:31,955 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/8
 2026-01-23 22:01:31,960 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/8 - Status: 200
+2026-01-23 22:02:58,231 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:02:58,243 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:02:58,251 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:02:58,265 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:02:59,858 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:02:59,864 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:02:59,868 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:02:59,875 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:01,479 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/8
+2026-01-23 22:03:01,482 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/8 - Status: 200
+2026-01-23 22:03:01,484 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/8
+2026-01-23 22:03:01,488 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/8 - Status: 200
+2026-01-23 22:03:04,026 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:04,041 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:04,046 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:04,057 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:07,484 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:07,487 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:07,487 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:07,489 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:07,492 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:07,494 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:07,509 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:07,512 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:09,880 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/8
+2026-01-23 22:03:09,884 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/8 - Status: 200
+2026-01-23 22:03:09,887 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/8
+2026-01-23 22:03:09,889 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/8 - Status: 200
+2026-01-23 22:03:12,092 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:12,105 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:12,109 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:12,118 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:12,633 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:03:12,643 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:03:12,648 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:03:12,658 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:03:14,263 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:14,274 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:14,278 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:14,286 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:22,122 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:03:22,135 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:03:22,143 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:03:22,157 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:03:32,881 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:32,892 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:32,894 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:03:32,901 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:03:49,481 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:03:49,496 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:03:49,503 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:03:49,510 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:04:56,234 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:04:56,250 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:04:56,259 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:04:56,275 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:05:20,206 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-01-23 22:05:20,208 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:05:20,211 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-01-23 22:05:20,212 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:05:20,215 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:05:20,224 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:05:20,227 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:05:20,237 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:05:25,727 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:05:25,733 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:05:25,737 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:05:25,743 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:05:28,645 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:05:28,651 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:05:28,655 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:05:28,659 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:05:33,623 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/8
+2026-01-23 22:05:33,626 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/8 - Status: 200
+2026-01-23 22:05:33,630 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/8
+2026-01-23 22:05:33,635 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/8 - Status: 200
+2026-01-23 22:05:36,906 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:05:36,916 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:05:36,920 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:05:36,925 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:05:41,070 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:05:41,076 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:05:41,080 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:05:41,084 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:06:20,874 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:06:20,894 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:06:20,906 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:06:20,929 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:07:04,805 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/reorder
+2026-01-23 22:07:04,806 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/reorder - Status: 200
+2026-01-23 22:07:04,810 - app.main - INFO - REQUEST: PUT http://localhost:8000/features/reorder
+2026-01-23 22:07:04,826 - app.main - INFO - RESPONSE: PUT http://localhost:8000/features/reorder - Status: 200
+2026-01-23 22:07:29,875 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:07:29,880 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:07:29,883 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:07:29,889 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:07:32,765 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:07:32,780 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:07:32,782 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:07:32,793 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:07:41,062 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:07:41,074 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:07:41,082 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-01-23 22:07:41,095 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-01-23 22:07:56,629 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:07:56,636 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:07:56,639 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-01-23 22:07:56,644 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-01-23 22:08:18,911 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/1
+2026-01-23 22:08:18,913 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/1 - Status: 200
+2026-01-23 22:08:18,923 - app.main - INFO - REQUEST: PUT http://localhost:8000/features/1
+2026-01-23 22:08:18,975 - app.main - INFO - RESPONSE: PUT http://localhost:8000/features/1 - Status: 200
+2026-01-23 22:08:31,536 - app.main - INFO - REQUEST: PUT http://localhost:8000/features/1
+2026-01-23 22:08:31,548 - app.main - INFO - RESPONSE: PUT http://localhost:8000/features/1 - Status: 200
