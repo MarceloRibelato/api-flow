@@ -147,7 +147,6 @@ class FlowService:
             node_data = node.data.model_dump()
             
             db_node = FlowNodeDB(
-                id=node.id, # Using client ID as PK string
                 flow_id=flow_id,
                 client_id=node.id,
                 type=node.type,

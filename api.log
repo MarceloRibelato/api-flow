@@ -1,0 +1,236 @@
+2026-01-22 22:46:32,882 - app - INFO - Logging configured successfully.
+2026-01-22 22:46:32,883 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-01-22 22:46:32,883 - app.main - INFO - Recriando tabelas do banco de dados...
+2026-01-22 22:46:33,405 - app.main - INFO - Tabelas removidas com sucesso
+2026-01-22 22:46:33,698 - app.main - INFO - Tabelas criadas com sucesso
+2026-01-22 22:46:33,698 - app.main - INFO - Inicializando aplicação FastAPI...
+2026-01-22 22:46:33,700 - app.main - INFO - Configurando CORS middleware...
+2026-01-22 22:46:33,705 - app.main - INFO - Registrando rotas...
+2026-01-22 22:46:33,722 - app.main - INFO - Rota de autenticação registrada: /auth
+2026-01-22 22:46:33,731 - app.main - INFO - Rota de fluxo registrada: /flow
+2026-01-22 22:46:33,747 - app.main - INFO - Rota de funcionalidades registrada: /features
+2026-01-22 22:46:33,775 - app.main - INFO - Rota de histórico registrada: /history
+2026-01-22 22:46:33,781 - app.main - INFO - Rota de ambientes registrada: /environments
+2026-01-22 22:46:33,801 - app.main - INFO - Rota de variáveis registrada: /variables
+2026-01-22 22:46:34,082 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:46:34,091 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:46:34,323 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:46:34,324 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:46:34,325 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:46:34,327 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:46:34,341 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:46:34,341 - app.routes.auth_routes - INFO - Username attempt: emptyuser
+2026-01-22 22:46:34,454 - app.routes.auth_routes - INFO - Login successful for user: emptyuser
+2026-01-22 22:46:34,454 - app.routes.auth_routes - INFO - Access token generated for: emptyuser
+2026-01-22 22:46:34,499 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:46:34,501 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:46:34,503 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:46:34,504 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:46:34,505 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:46:35,143 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:46:35,146 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:46:35,249 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:46:35,249 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:46:35,251 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:46:35,253 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:46:35,260 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:46:35,261 - app.routes.auth_routes - INFO - Username attempt: orphanuser
+2026-01-22 22:46:35,361 - app.routes.auth_routes - INFO - Login successful for user: orphanuser
+2026-01-22 22:46:35,362 - app.routes.auth_routes - INFO - Access token generated for: orphanuser
+2026-01-22 22:46:35,364 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:46:35,365 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:46:35,367 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:46:35,368 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:46:35,369 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:46:35,406 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:46:35,409 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:46:35,507 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:46:35,508 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:46:35,509 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:46:35,511 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:46:35,518 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:46:35,518 - app.routes.auth_routes - INFO - Username attempt: dupnodeuser
+2026-01-22 22:46:35,622 - app.routes.auth_routes - INFO - Login successful for user: dupnodeuser
+2026-01-22 22:46:35,623 - app.routes.auth_routes - INFO - Access token generated for: dupnodeuser
+2026-01-22 22:46:35,624 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:46:35,626 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:46:35,629 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:46:35,630 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:46:35,632 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:47:09,522 - app - INFO - Logging configured successfully.
+2026-01-22 22:47:09,522 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-01-22 22:47:09,523 - app.main - INFO - Recriando tabelas do banco de dados...
+2026-01-22 22:47:09,882 - app.main - INFO - Tabelas removidas com sucesso
+2026-01-22 22:47:10,127 - app.main - INFO - Tabelas criadas com sucesso
+2026-01-22 22:47:10,128 - app.main - INFO - Inicializando aplicação FastAPI...
+2026-01-22 22:47:10,129 - app.main - INFO - Configurando CORS middleware...
+2026-01-22 22:47:10,131 - app.main - INFO - Registrando rotas...
+2026-01-22 22:47:10,145 - app.main - INFO - Rota de autenticação registrada: /auth
+2026-01-22 22:47:10,153 - app.main - INFO - Rota de fluxo registrada: /flow
+2026-01-22 22:47:10,168 - app.main - INFO - Rota de funcionalidades registrada: /features
+2026-01-22 22:47:10,186 - app.main - INFO - Rota de histórico registrada: /history
+2026-01-22 22:47:10,191 - app.main - INFO - Rota de ambientes registrada: /environments
+2026-01-22 22:47:10,206 - app.main - INFO - Rota de variáveis registrada: /variables
+2026-01-22 22:47:10,339 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:47:10,345 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:47:10,560 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:47:10,561 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:47:10,564 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:47:10,566 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:47:10,577 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:47:10,577 - app.routes.auth_routes - INFO - Username attempt: emptyuser
+2026-01-22 22:47:10,703 - app.routes.auth_routes - INFO - Login successful for user: emptyuser
+2026-01-22 22:47:10,703 - app.routes.auth_routes - INFO - Access token generated for: emptyuser
+2026-01-22 22:47:10,722 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:47:10,724 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:47:10,726 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:47:10,727 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:47:10,728 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:47:11,497 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:47:11,504 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:47:11,645 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:47:11,646 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:47:11,648 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:47:11,650 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:47:11,662 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:47:11,662 - app.routes.auth_routes - INFO - Username attempt: orphanuser
+2026-01-22 22:47:11,838 - app.routes.auth_routes - INFO - Login successful for user: orphanuser
+2026-01-22 22:47:11,838 - app.routes.auth_routes - INFO - Access token generated for: orphanuser
+2026-01-22 22:47:11,841 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:47:11,845 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:47:11,848 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:47:11,849 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:47:11,851 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:47:11,953 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:47:11,957 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:47:12,094 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:47:12,095 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:47:12,097 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:47:12,100 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:47:12,110 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:47:12,110 - app.routes.auth_routes - INFO - Username attempt: dupnodeuser
+2026-01-22 22:47:12,249 - app.routes.auth_routes - INFO - Login successful for user: dupnodeuser
+2026-01-22 22:47:12,249 - app.routes.auth_routes - INFO - Access token generated for: dupnodeuser
+2026-01-22 22:47:12,250 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:47:12,252 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:47:12,254 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:47:12,255 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:47:12,256 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:47:44,237 - app - INFO - Logging configured successfully.
+2026-01-22 22:47:44,238 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-01-22 22:47:44,238 - app.main - INFO - Recriando tabelas do banco de dados...
+2026-01-22 22:47:44,582 - app.main - INFO - Tabelas removidas com sucesso
+2026-01-22 22:47:44,825 - app.main - INFO - Tabelas criadas com sucesso
+2026-01-22 22:47:44,826 - app.main - INFO - Inicializando aplicação FastAPI...
+2026-01-22 22:47:44,826 - app.main - INFO - Configurando CORS middleware...
+2026-01-22 22:47:44,829 - app.main - INFO - Registrando rotas...
+2026-01-22 22:47:44,842 - app.main - INFO - Rota de autenticação registrada: /auth
+2026-01-22 22:47:44,849 - app.main - INFO - Rota de fluxo registrada: /flow
+2026-01-22 22:47:44,861 - app.main - INFO - Rota de funcionalidades registrada: /features
+2026-01-22 22:47:44,884 - app.main - INFO - Rota de histórico registrada: /history
+2026-01-22 22:47:44,889 - app.main - INFO - Rota de ambientes registrada: /environments
+2026-01-22 22:47:44,905 - app.main - INFO - Rota de variáveis registrada: /variables
+2026-01-22 22:47:45,065 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:47:45,070 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:47:45,292 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:47:45,294 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:47:45,296 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:47:45,299 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:47:45,312 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:47:45,312 - app.routes.auth_routes - INFO - Username attempt: emptyuser
+2026-01-22 22:47:45,552 - app.routes.auth_routes - INFO - Login successful for user: emptyuser
+2026-01-22 22:47:45,552 - app.routes.auth_routes - INFO - Access token generated for: emptyuser
+2026-01-22 22:47:45,566 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:47:45,568 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:47:45,571 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:47:45,572 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:47:45,573 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:47:46,117 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:47:46,174 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:47:46,390 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:47:46,408 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:47:46,410 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:47:46,413 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:47:46,423 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:47:46,424 - app.routes.auth_routes - INFO - Username attempt: orphanuser
+2026-01-22 22:47:46,630 - app.routes.auth_routes - INFO - Login successful for user: orphanuser
+2026-01-22 22:47:46,631 - app.routes.auth_routes - INFO - Access token generated for: orphanuser
+2026-01-22 22:47:46,633 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:47:46,635 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:47:46,644 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:47:46,645 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:47:46,647 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:47:46,834 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:47:46,841 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:47:47,024 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:47:47,026 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:47:47,029 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:47:47,031 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:47:47,042 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:47:47,043 - app.routes.auth_routes - INFO - Username attempt: dupnodeuser
+2026-01-22 22:47:47,169 - app.routes.auth_routes - INFO - Login successful for user: dupnodeuser
+2026-01-22 22:47:47,169 - app.routes.auth_routes - INFO - Access token generated for: dupnodeuser
+2026-01-22 22:47:47,171 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:47:47,173 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:47:47,175 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:47:47,177 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:47:47,178 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:52:40,070 - app - INFO - Logging configured successfully.
+2026-01-22 22:52:40,071 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-01-22 22:52:40,071 - app.main - INFO - Recriando tabelas do banco de dados...
+2026-01-22 22:52:40,367 - app.main - INFO - Tabelas removidas com sucesso
+2026-01-22 22:52:40,586 - app.main - INFO - Tabelas criadas com sucesso
+2026-01-22 22:52:40,586 - app.main - INFO - Inicializando aplicação FastAPI...
+2026-01-22 22:52:40,587 - app.main - INFO - Configurando CORS middleware...
+2026-01-22 22:52:40,590 - app.main - INFO - Registrando rotas...
+2026-01-22 22:52:40,606 - app.main - INFO - Rota de autenticação registrada: /auth
+2026-01-22 22:52:40,618 - app.main - INFO - Rota de fluxo registrada: /flow
+2026-01-22 22:52:40,635 - app.main - INFO - Rota de funcionalidades registrada: /features
+2026-01-22 22:52:40,659 - app.main - INFO - Rota de histórico registrada: /history
+2026-01-22 22:52:40,665 - app.main - INFO - Rota de ambientes registrada: /environments
+2026-01-22 22:52:40,682 - app.main - INFO - Rota de variáveis registrada: /variables
+2026-01-22 22:52:40,859 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:52:40,865 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:52:41,126 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:52:41,128 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:52:41,130 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:52:41,133 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:52:41,146 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:52:41,146 - app.routes.auth_routes - INFO - Username attempt: emptyuser
+2026-01-22 22:52:41,294 - app.routes.auth_routes - INFO - Login successful for user: emptyuser
+2026-01-22 22:52:41,294 - app.routes.auth_routes - INFO - Access token generated for: emptyuser
+2026-01-22 22:52:41,311 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:52:41,313 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:52:41,315 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:52:41,316 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:52:41,317 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:52:41,801 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:52:41,805 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:52:41,962 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:52:41,964 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:52:41,965 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:52:41,967 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:52:41,980 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:52:41,981 - app.routes.auth_routes - INFO - Username attempt: orphanuser
+2026-01-22 22:52:42,135 - app.routes.auth_routes - INFO - Login successful for user: orphanuser
+2026-01-22 22:52:42,136 - app.routes.auth_routes - INFO - Access token generated for: orphanuser
+2026-01-22 22:52:42,138 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:52:42,140 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:52:42,142 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:52:42,143 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:52:42,144 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"
+2026-01-22 22:52:42,206 - app.main - INFO - REQUEST: POST http://testserver/auth/create
+2026-01-22 22:52:42,211 - app.routes.auth_routes - INFO - === REGISTER REQUEST RECEIVED ===
+2026-01-22 22:52:42,367 - app.routes.auth_routes - INFO - User successfully saved to database. ID: 1
+2026-01-22 22:52:42,368 - app.main - INFO - RESPONSE: POST http://testserver/auth/create - Status: 200
+2026-01-22 22:52:42,370 - httpx - INFO - HTTP Request: POST http://testserver/auth/create "HTTP/1.1 200 OK"
+2026-01-22 22:52:42,373 - app.main - INFO - REQUEST: POST http://testserver/auth/login
+2026-01-22 22:52:42,386 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-01-22 22:52:42,386 - app.routes.auth_routes - INFO - Username attempt: dupnodeuser
+2026-01-22 22:52:42,536 - app.routes.auth_routes - INFO - Login successful for user: dupnodeuser
+2026-01-22 22:52:42,536 - app.routes.auth_routes - INFO - Access token generated for: dupnodeuser
+2026-01-22 22:52:42,538 - app.main - INFO - RESPONSE: POST http://testserver/auth/login - Status: 200
+2026-01-22 22:52:42,540 - httpx - INFO - HTTP Request: POST http://testserver/auth/login "HTTP/1.1 200 OK"
+2026-01-22 22:52:42,542 - app.main - INFO - REQUEST: POST http://testserver/projects/
+2026-01-22 22:52:42,543 - app.main - INFO - RESPONSE: POST http://testserver/projects/ - Status: 404
+2026-01-22 22:52:42,544 - httpx - INFO - HTTP Request: POST http://testserver/projects/ "HTTP/1.1 404 Not Found"

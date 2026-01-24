@@ -8,10 +8,11 @@ from app.routes.api_test_history_routes import router as history_router
 from app.routes.auth_routes import router as auth_router
 from app.routes.environment_routes import router as environment_router
 from app.routes.flow_routes import router as flow_router
-from app.routes.project_routes import router as project_router
+from app.routes.feature_routes import router as feature_router
+from app.routes.product_routes import router as product_router
 from app.routes.variable_routes import router as variable_router
 from app.utils.logger import setup_logging
-from app.models.project_models import ProjectModel
+from app.models.feature_models import FeatureModel
 from app.models.environment_model import Environment
 from app.database import SessionLocal
 
@@ -62,14 +63,21 @@ app.add_middleware(
 from fastapi.middleware.gzip import GZipMiddleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+from app.routes.product_routes import router as product_router
+
+# ... (Logging config kept in same order, inserting imports above or router below)
+# Easier to just insert the router include call 
+
 # Incluir rotas
 logger.info("Registrando rotas...")
 app.include_router(auth_router)
 logger.info("Rota de autenticação registrada: /auth")
+app.include_router(product_router)
+logger.info("Rota de produtos registrada: /products")
 app.include_router(flow_router)
 logger.info("Rota de fluxo registrada: /flow")
-app.include_router(project_router)
-logger.info("Rota de projetos registrada: /projects")
+app.include_router(feature_router)
+logger.info("Rota de funcionalidades registrada: /features")
 app.include_router(history_router)
 logger.info("Rota de histórico registrada: /history")
 

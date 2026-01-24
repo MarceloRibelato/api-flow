@@ -29,19 +29,10 @@ class FlowDB(Base):
 
 class FlowNodeDB(Base):
     __tablename__ = "flow_nodes"
-    id = Column(String(255), primary_key=True)  # Using String ID from frontend (e.g. "node-1")
-    flow_id = Column(Integer, ForeignKey("flow_data.id"), primary_key=True) # Composite PK might be better or just use flow_id + id as logical unique
-    # Note: Frontend Ids might not be globally unique, so composite PK (flow_id, id) is safer.
-    # But SQLAlchemy limitations with composite PKs on relationships can be tricky.
-    # Let's use a synthetic Int ID? No, validation relies on string IDs.
-    # Let's make "uuid" primary key and string "node_id" a column?
-    # Or just trust (flow_id, id) composite.
-    
-    # Let's go with single PK using a surrogate key to avoid issues, 
-    # OR composite PK (flow_id, client_node_id).
-    
-    # Simplified: Surrogate ID for DB, keep client_id.
+    # Surrogate ID for DB to ensure clean relationships and easy referencing
     db_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    
+    # The ID coming from the frontend (e.g., "node-1", "dndnode_0")
     client_id = Column(String(255), index=True)
     
     flow_id = Column(Integer, ForeignKey("flow_data.id"), index=True)

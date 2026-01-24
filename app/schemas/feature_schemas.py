@@ -4,20 +4,21 @@ from typing import List, Optional
 from pydantic import BaseModel, ConfigDict
 
 
-class ProjectBase(BaseModel):
+class FeatureBase(BaseModel):
     name: str
     description: Optional[str] = None
     image_url: Optional[str] = None
+    product_id: Optional[int] = None
 
-
-class ProjectCreate(ProjectBase):
+class FeatureCreate(FeatureBase):
     pass
 
-
-class ProjectResponse(ProjectBase):
+class FeatureResponse(FeatureBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    position: Optional[int] = 0
+    product_id: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 
