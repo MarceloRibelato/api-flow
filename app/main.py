@@ -1,4 +1,5 @@
 import logging
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -86,6 +87,22 @@ logger.info("Rota de ambientes registrada: /environments")
 app.include_router(variable_router)
 logger.info("Rota de variáveis registrada: /variables")
 
+from app.routes.schedule_routes import router as schedule_router
+app.include_router(schedule_router, prefix="/schedules", tags=["Schedules"])
+logger.info("Rota de agendamento registrada: /schedules")
+
+from app.services.scheduler_service import scheduler_service
+# Models import for creation
+from app.models.schedule_models import ScheduleModel
+
+@app.on_event("startup")
+def start_scheduler():
+    logger.info("Iniciando scheduler...")
+    scheduler_service.start()
+    db = SessionLocal()
+    scheduler_service.sync_jobs(db)
+    db.close()
+
 
 # Rota de verificação de saúde (Health Check)
 @app.get("/", tags=["Root"])
@@ -147,7 +164,9 @@ if __name__ == "__main__":
 
     import uvicorn
 
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 8000))
     # Executa o servidor se o arquivo for chamado diretamente
     uvicorn.run(
-        "app.main:app", host="127.0.0.1", port=8000, reload=True, log_level="info"
+        "app.main:app", host=host, port=port, reload=True, log_level="info"
     )

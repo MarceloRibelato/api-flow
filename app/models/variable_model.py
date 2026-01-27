@@ -19,8 +19,8 @@ class Variable(Base):
     json_path = Column(String(255), nullable=True)
     api_id = Column(BigInteger, nullable=True)
 
-    project_id = Column(Integer, nullable=False, index=True)
-    flow_id = Column(Integer, nullable=True)
+    project_id = Column(BigInteger, nullable=False, index=True)
+    flow_id = Column(BigInteger, nullable=True)
     environment_id = Column(Integer, ForeignKey("environments.id"), nullable=True, index=True)
 
     environment = relationship("Environment", back_populates="variables")

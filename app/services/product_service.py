@@ -5,7 +5,7 @@ from app.schemas.product_schemas import ProductCreate
 class ProductService:
     @staticmethod
     def list(db: Session, skip: int = 0, limit: int = 100):
-        return db.query(ProductModel).order_by(ProductModel.name).offset(skip).limit(limit).all()
+        return db.query(ProductModel).order_by(ProductModel.created_at.asc()).offset(skip).limit(limit).all()
 
     @staticmethod
     def create(db: Session, product: ProductCreate):

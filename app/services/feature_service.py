@@ -18,7 +18,7 @@ class FeatureService:
         query = db.query(FeatureModel)
         if product_id:
             query = query.filter(FeatureModel.product_id == product_id)
-        return query.order_by(FeatureModel.position.asc()).all()
+        return query.order_by(FeatureModel.position.asc(), FeatureModel.created_at.asc()).all()
 
     @staticmethod
     def get_by_id(db: Session, feature_id: int):

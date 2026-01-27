@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.models.flow_models import FlowDB
 from app.schemas.flow_schemas import FlowSaveSchema
+from app.models.feature_models import FeatureModel
 
 
 class FlowService:
@@ -40,7 +41,7 @@ class FlowService:
 
         if not flow:
             print(f"❌ FlowService.load: Flow not found for project_id={project_id}, flow_id={flow_id}")
-            return {"nodes": [], "edges": [], "cardData": {}, "id": None, "name": ""}
+            return {"nodes": [], "edges": [], "cardData": {}, "id": None, "name": "", "project_id": project_id}
 
         print(f"✅ FlowService.load: Loaded Flow ID={flow.id} Name='{flow.name}'")
 
@@ -92,8 +93,16 @@ class FlowService:
                 "envData": card.env_data or {}
             }
 
+        # Fetch Product ID from Feature/Project
+        product_id = None
+        feature = db.query(FeatureModel).filter(FeatureModel.id == flow.project_id).first()
+        if feature:
+             product_id = feature.product_id
+
         return {
             "id": flow.id,
+            "project_id": flow.project_id,
+            "product_id": product_id, # Return Product ID
             "name": flow.name,
             "nodes": formatted_nodes,
             "edges": formatted_edges,
