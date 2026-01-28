@@ -46,6 +46,7 @@ def get_execution_history(
     project_id: Optional[int] = None,
     flow_id: Optional[int] = None,
     environment_id: Optional[int] = None,
+    schedule_id: Optional[int] = None,  # Added filter
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     method: Optional[str] = None,
@@ -64,6 +65,7 @@ def get_execution_history(
             project_id,
             flow_id,
             environment_id,
+            schedule_id,  # Passed to service
             start_date,
             end_date,
             method,

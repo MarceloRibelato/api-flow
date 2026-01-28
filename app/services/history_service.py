@@ -33,6 +33,7 @@ class HistoryService:
             api_id=history.api_id,
             api_name=history.api_name,  # Added mapping
             project_id=history.project_id,
+            schedule_id=history.schedule_id,  # Ensure this is saved
             flow_id=history.flow_id,
             node_name=history.node_name,
             method=history.method,
@@ -70,7 +71,9 @@ class HistoryService:
         api_id: Optional[int] = None,
         project_id: Optional[int] = None,
         flow_id: Optional[int] = None,
+
         environment_id: Optional[int] = None,
+        schedule_id: Optional[int] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         method: Optional[str] = None,
@@ -88,6 +91,8 @@ class HistoryService:
             query = query.filter(ApiExecutionHistory.flow_id == flow_id)
         if environment_id is not None:
             query = query.filter(ApiExecutionHistory.environment_id == environment_id)
+        if schedule_id is not None:
+            query = query.filter(ApiExecutionHistory.schedule_id == schedule_id)
 
         if method:
             query = query.filter(ApiExecutionHistory.method == method.upper())
