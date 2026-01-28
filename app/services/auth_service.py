@@ -33,9 +33,20 @@ class AuthService:
 
         hashed_pwd = get_password_hash(user.password)
 
-        # Multi-Tenant Logic
+        # Count existing users to determine if this is the first user (System Admin)
+        user_count = db.query(UserDB).count()
+        is_first_user = user_count == 0
+
+        # Multi-Tenant Logic (Company)
         company_id = None
-        role = "viewer" # Default for joining? Or make 'admin' if creating?
+        
+        # Default Role/Status
+        if is_first_user:
+            role = "admin"
+            status = "active"
+        else:
+            role = "viewer"
+            status = "pending"
 
         if user.company:
             from app.models.company_models import CompanyDB
@@ -43,7 +54,10 @@ class AuthService:
             
             if existing_company:
                 company_id = existing_company.id
-                role = "editor" # Auto-join as editor
+                # If not first user, keeping default role (viewer/pending)
+                # Unless we want to auto-approve joining existing companies? 
+                # User request: "as outra devem gerar uma aprovação para o ADM aprovar e escolher o perfil"
+                # So stays pending.
             else:
                 # Create new company
                 new_company = CompanyDB(
@@ -53,8 +67,15 @@ class AuthService:
                 db.add(new_company)
                 db.flush() # Get ID
                 company_id = new_company.id
-                role = "admin" # Creator is admin
-
+                # Even if creating a company, if not first user, stays pending?
+                # Usually if you create a company you are admin of it. 
+                # But requirement says "First account created is ADM, others need approval".
+                # Let's stick to strict requirement: First User = System Admin. Others = Pending.
+                
+                if not is_first_user:
+                     role = "viewer"  # Will be "admin" of company eventually, but needs approval? 
+                     # Let's assume strict First User rule for now.
+        
         db_user = UserDB(
             username=user.username,
             email=user.email,
@@ -64,6 +85,7 @@ class AuthService:
             old_company_name=user.company, # Legacy text field
             company_id=company_id,
             role=role,
+            status=status,
             cnpj=cnpj_clean,
             phone=phone_clean,
         )
@@ -102,7 +124,7 @@ class AuthService:
 
     @staticmethod
     def create_token_response(user: UserDB):
-        access_token = create_access_token(data={"sub": user.username})
+        access_token = create_access_token(data={"sub": user.username, "version": user.token_version})
         return {
             "access_token": access_token,
             "token_type": "bearer",

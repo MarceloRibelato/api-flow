@@ -22,6 +22,8 @@ class UserDB(Base):
     # New Multi-Tenant Fields
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
     role = Column(String(50), default="viewer") # admin, editor, viewer
+    token_version = Column(Integer, default=1, nullable=False) # Invalidate tokens on change
+    status = Column(String(20), default="pending") # active, pending, blocked
 
     # Relationship
     from app.models.company_models import CompanyDB # Late import might be needed or just string ref

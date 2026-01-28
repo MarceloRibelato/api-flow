@@ -30,6 +30,7 @@ class UserResponse(UserBase):
     id: int
     company_id: Optional[int] = None
     role: Optional[str] = None
+    status: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -37,3 +38,7 @@ class UserResponse(UserBase):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+class UserApprove(BaseModel):
+    role: str
+    status: str = "active"

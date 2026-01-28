@@ -25,10 +25,14 @@ def get_password_hash(password):
     return pwd_context.hash(password)
 
 
+import uuid
+from .models.auth_models import BlacklistedToken
+
 def create_access_token(data: dict):
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
+    # Generate unique JTI
+    to_encode.update({"exp": expire, "jti": str(uuid.uuid4())})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -38,11 +42,21 @@ def get_current_user(
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
+        jti: str = payload.get("jti")
+
         if username is None:
             raise HTTPException(status_code=401, detail="Token inválido")
+            
+        # Check Blacklist
+        if jti:
+            blacklisted = db.query(BlacklistedToken).filter(BlacklistedToken.jti == jti).first()
+            if blacklisted:
+                raise HTTPException(status_code=401, detail="Sessão encerrada (Token invalidado)")
+
         user = db.query(UserDB).filter(UserDB.username == username).first()
         if user is None:
             raise HTTPException(status_code=401, detail="Usuário não encontrado")
+             
         return user
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido ou expirado")

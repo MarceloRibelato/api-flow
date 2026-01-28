@@ -72,6 +72,10 @@ from app.routes.product_routes import router as product_router
 
 # Incluir rotas
 logger.info("Registrando rotas...")
+from app.routes.admin_routes import router as admin_router
+app.include_router(admin_router)
+logger.info("Rota de admin registrada: /admin")
+
 app.include_router(auth_router)
 logger.info("Rota de autenticação registrada: /auth")
 app.include_router(product_router)

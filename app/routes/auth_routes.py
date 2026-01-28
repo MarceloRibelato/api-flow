@@ -16,6 +16,44 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+
+from datetime import datetime
+from jose import jwt
+from app.auth import SECRET_KEY, ALGORITHM, oauth2_scheme
+from app.models.auth_models import BlacklistedToken
+
+@router.post("/logout")
+def logout(
+    current_user: UserDB = Depends(get_current_user), 
+    token: str = Depends(oauth2_scheme), 
+    db: Session = Depends(get_db)
+):
+    """
+    Invalida o token atual adicionando-o à blacklist.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        jti = payload.get("jti")
+        exp = payload.get("exp")
+        
+        if jti and exp:
+            expiration_dt = datetime.fromtimestamp(exp)
+            blacklisted = BlacklistedToken(
+                jti=jti,
+                user_id=current_user.id,
+                expiration=expiration_dt
+            )
+            db.add(blacklisted)
+            db.commit()
+            logger.info(f"Token {jti} blacklisted for user {current_user.username}")
+            
+    except Exception as e:
+        logger.error(f"Error blacklisting token: {e}")
+        # Even if error, we return success to frontend so it clears local state
+        
+    return {"msg": "Logout realizado com sucesso"}
+
+
 @router.post("/login", response_model=Token)
 def login(
     form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
@@ -34,6 +72,13 @@ def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Usuário ou senha incorretos",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        
+    if user.status != 'active':
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cadastro pendente de aprovação. Contate o administrador.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -61,6 +106,14 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         if existing_email:
             raise HTTPException(status_code=400, detail="Email já existe")
 
+    # Verifica CPF
+    if user.cpf:
+        import re
+        cpf_clean = re.sub(r"[.-]", "", user.cpf)
+        existing_cpf = db.query(UserDB).filter(UserDB.cpf == cpf_clean).first()
+        if existing_cpf:
+            raise HTTPException(status_code=400, detail="CPF já cadastrado")
+
     try:
         new_user = AuthService.create_user(db, user)
         logger.info(f"User successfully saved to database. ID: {new_user.id}")
@@ -72,18 +125,25 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
             "email": new_user.email,
             "full_name": new_user.full_name,
             "cpf": AuthService.format_cpf(new_user.cpf),
-            "company": new_user.old_company_name, # or use company_id name? new_user.company_rel.name if loaded
+            "company": new_user.old_company_name, 
             "company_id": new_user.company_id,
             "role": new_user.role,
             "cnpj": AuthService.format_cnpj(new_user.cnpj),
             "phone": AuthService.format_phone(new_user.phone),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
-        error_msg = f"Database error: {str(e)}"
-        logger.error(error_msg)
-        raise HTTPException(status_code=500, detail=error_msg)
+        error_msg = str(e)
+        if "unique constraint" in error_msg.lower() or "integrityerror" in error_msg.lower():
+             # Basic handling for other constraints not caught above
+             logger.warning(f"Integrity Error: {error_msg}")
+             raise HTTPException(status_code=400, detail="Dados duplicados (Usuário, Email ou CPF já existem).")
+        
+        logger.error(f"Database error: {error_msg}")
+        raise HTTPException(status_code=500, detail="Erro interno do servidor")
 
 
 @router.get("/profile")
