@@ -19,7 +19,13 @@ def create_feature(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    return FeatureService.create(db, feature)
+    if current_user.role == 'viewer':
+        raise HTTPException(status_code=403, detail="Sem permissão")
+        
+    created = FeatureService.create(db, feature, company_id=current_user.company_id)
+    if not created:
+         raise HTTPException(status_code=403, detail="Produto não pertence à sua empresa")
+    return created
 
 
 @router.put("/reorder")
@@ -28,7 +34,10 @@ def reorder_features(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    success = FeatureService.reorder(db, data)
+    if current_user.role == 'viewer':
+         raise HTTPException(status_code=403, detail="Sem permissão")
+
+    success = FeatureService.reorder(db, data, company_id=current_user.company_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to reorder features")
     return {"status": "success"}
@@ -40,7 +49,7 @@ def read_features(
     db: Session = Depends(get_db), 
     current_user: UserDB = Depends(get_current_user)
 ):
-    return FeatureService.get_all(db, product_id)
+    return FeatureService.get_all(db, product_id=product_id, company_id=current_user.company_id)
 
 
 @router.get("/{feature_id}", response_model=FeatureResponse)
@@ -49,7 +58,7 @@ def read_feature(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    feature = FeatureService.get_by_id(db, feature_id)
+    feature = FeatureService.get_by_id(db, feature_id, company_id=current_user.company_id)
     if not feature:
         raise HTTPException(status_code=404, detail="Funcionalidade não encontrada")
     return feature
@@ -62,7 +71,10 @@ def update_feature(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    updated_feature = FeatureService.update(db, feature_id, feature_update)
+    if current_user.role == 'viewer':
+         raise HTTPException(status_code=403, detail="Sem permissão")
+
+    updated_feature = FeatureService.update(db, feature_id, feature_update, company_id=current_user.company_id)
     if not updated_feature:
         raise HTTPException(status_code=404, detail="Funcionalidade não encontrada")
     return updated_feature
@@ -74,7 +86,10 @@ def delete_feature(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    success = FeatureService.delete(db, feature_id)
+    if current_user.role == 'viewer':
+         raise HTTPException(status_code=403, detail="Sem permissão")
+
+    success = FeatureService.delete(db, feature_id, company_id=current_user.company_id)
     if not success:
         raise HTTPException(status_code=404, detail="Funcionalidade não encontrada")
     return {"message": f"Funcionalidade {feature_id} removida com sucesso"}

@@ -22,6 +22,7 @@ setup_logging()
 
 # Criar logger para este módulo
 logger = logging.getLogger(__name__)
+# Force Reload Trigger
 logger.info("=== INICIANDO API QA-WORKFLOW ===")
 
 # Reset e Criação das tabelas

@@ -7,9 +7,23 @@ from app.schemas.flow_schemas import FlowSaveSchema
 from app.models.feature_models import FeatureModel
 
 
+from app.models.product_models import ProductModel
+
 class FlowService:
     @staticmethod
-    def list_by_project(db: Session, project_id: int):
+    def _verify_project_ownership(db: Session, project_id: int, company_id: int):
+        # project_id == feature_id
+        feature = db.query(FeatureModel).join(ProductModel).filter(
+            FeatureModel.id == project_id, 
+            ProductModel.company_id == company_id
+        ).first()
+        return feature is not None
+
+    @staticmethod
+    def list_by_project(db: Session, project_id: int, company_id: int):
+        if not FlowService._verify_project_ownership(db, project_id, company_id):
+            return []
+            
         flows = db.query(FlowDB).filter(FlowDB.project_id == project_id).order_by(FlowDB.updated_at.desc()).all()
         return [
             {
@@ -24,7 +38,10 @@ class FlowService:
         ]
 
     @staticmethod
-    def create(db: Session, project_id: int, name: str):
+    def create(db: Session, project_id: int, name: str, company_id: int):
+        if not FlowService._verify_project_ownership(db, project_id, company_id):
+            return None
+
         new_flow = FlowDB(project_id=project_id, name=name)
         db.add(new_flow)
         db.commit()
@@ -32,7 +49,10 @@ class FlowService:
         return new_flow
 
     @staticmethod
-    def load(db: Session, project_id: int, flow_id: int = None):
+    def load(db: Session, project_id: int, company_id: int, flow_id: int = None):
+        if not FlowService._verify_project_ownership(db, project_id, company_id):  
+             return {"nodes": [], "edges": [], "cardData": {}, "id": None, "name": "", "project_id": project_id}
+
         if flow_id:
             flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
         else:
@@ -110,7 +130,10 @@ class FlowService:
         }
 
     @staticmethod
-    def save(db: Session, data: FlowSaveSchema):
+    def save(db: Session, data: FlowSaveSchema, company_id: int):
+        if not FlowService._verify_project_ownership(db, data.projectId, company_id):
+             raise ValueError("Projeto não pertence à sua empresa")
+
         project_id = data.projectId
         flow_id = data.flowId
         nodes = data.nodes
@@ -265,8 +288,11 @@ class FlowService:
         }
 
     @staticmethod
-    def delete(db: Session, project_id: int):
-         # DELETE ALL FLOWS FOR PROJECT
+    def delete(db: Session, project_id: int, company_id: int):
+        if not FlowService._verify_project_ownership(db, project_id, company_id):
+            return False
+
+        # DELETE ALL FLOWS FOR PROJECT
         flows = db.query(FlowDB).filter(FlowDB.project_id == project_id).all()
         if not flows:
             return False

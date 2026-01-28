@@ -19,6 +19,7 @@ class ExecutionHistoryBase(BaseModel):
     api_name: Optional[str] = None  # Added api_name
     project_id: Optional[int] = None
     flow_id: Optional[int] = None
+    schedule_id: Optional[int] = None  # Added schedule_id
     node_name: Optional[str] = None  # Added node_name for functional grouping
     method: str
     url: str

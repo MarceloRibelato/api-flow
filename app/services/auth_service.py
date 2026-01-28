@@ -33,13 +33,37 @@ class AuthService:
 
         hashed_pwd = get_password_hash(user.password)
 
+        # Multi-Tenant Logic
+        company_id = None
+        role = "viewer" # Default for joining? Or make 'admin' if creating?
+
+        if user.company:
+            from app.models.company_models import CompanyDB
+            existing_company = db.query(CompanyDB).filter(CompanyDB.name == user.company).first()
+            
+            if existing_company:
+                company_id = existing_company.id
+                role = "editor" # Auto-join as editor
+            else:
+                # Create new company
+                new_company = CompanyDB(
+                    name=user.company,
+                    cnpj=cnpj_clean # Assign CNPJ to company
+                )
+                db.add(new_company)
+                db.flush() # Get ID
+                company_id = new_company.id
+                role = "admin" # Creator is admin
+
         db_user = UserDB(
             username=user.username,
             email=user.email,
             hashed_password=hashed_pwd,
             full_name=user.full_name,
             cpf=cpf_clean,
-            company=user.company,
+            old_company_name=user.company, # Legacy text field
+            company_id=company_id,
+            role=role,
             cnpj=cnpj_clean,
             phone=phone_clean,
         )

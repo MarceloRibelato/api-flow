@@ -4,15 +4,16 @@ from app.schemas.product_schemas import ProductCreate
 
 class ProductService:
     @staticmethod
-    def list(db: Session, skip: int = 0, limit: int = 100):
-        return db.query(ProductModel).order_by(ProductModel.created_at.asc()).offset(skip).limit(limit).all()
+    def list(db: Session, company_id: int, skip: int = 0, limit: int = 100):
+        return db.query(ProductModel).filter(ProductModel.company_id == company_id).order_by(ProductModel.created_at.asc()).offset(skip).limit(limit).all()
 
     @staticmethod
-    def create(db: Session, product: ProductCreate):
+    def create(db: Session, product: ProductCreate, company_id: int):
         db_product = ProductModel(
             name=product.name,
             description=product.description,
-            image_url=product.image_url
+            image_url=product.image_url,
+            company_id=company_id
         )
         db.add(db_product)
         db.commit()
@@ -20,12 +21,12 @@ class ProductService:
         return db_product
 
     @staticmethod
-    def get(db: Session, product_id: int):
-        return db.query(ProductModel).filter(ProductModel.id == product_id).first()
+    def get(db: Session, product_id: int, company_id: int):
+        return db.query(ProductModel).filter(ProductModel.id == product_id, ProductModel.company_id == company_id).first()
 
     @staticmethod
-    def delete(db: Session, product_id: int):
-        db_product = db.query(ProductModel).filter(ProductModel.id == product_id).first()
+    def delete(db: Session, product_id: int, company_id: int):
+        db_product = db.query(ProductModel).filter(ProductModel.id == product_id, ProductModel.company_id == company_id).first()
         if db_product:
             db.delete(db_product)
             db.commit()
@@ -33,8 +34,8 @@ class ProductService:
         return False
 
     @staticmethod
-    def update(db: Session, product_id: int, product_data: ProductCreate):
-        db_product = db.query(ProductModel).filter(ProductModel.id == product_id).first()
+    def update(db: Session, product_id: int, product_data: ProductCreate, company_id: int):
+        db_product = db.query(ProductModel).filter(ProductModel.id == product_id, ProductModel.company_id == company_id).first()
         if db_product:
             db_product.name = product_data.name
             db_product.description = product_data.description

@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.orm import relationship
 
 from app.database import Base
 
@@ -12,6 +13,20 @@ class UserDB(Base):
     hashed_password = Column(String)
     full_name = Column(String, nullable=True)
     cpf = Column(String, unique=True, index=True, nullable=True)
-    company = Column(String, nullable=True)
-    cnpj = Column(String, unique=True, index=True, nullable=True)
+    
+    # Legacy fields (optional to keep)
+    old_company_name = Column(String, nullable=True, name="company") # Rename logic or just keep old column
+    cnpj = Column(String, index=True, nullable=True)
     phone = Column(String, nullable=True)
+
+    # New Multi-Tenant Fields
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
+    role = Column(String(50), default="viewer") # admin, editor, viewer
+
+    # Relationship
+    from app.models.company_models import CompanyDB # Late import might be needed or just string ref
+    company_rel = relationship("CompanyDB", back_populates="users", foreign_keys=[company_id]) # Use primaryjoin if needed, but FK is better.
+    
+    # Let's verify if I can add ForeignKey safely. Yes, usually.
+    # Updated definition below:
+

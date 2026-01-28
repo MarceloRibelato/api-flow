@@ -72,7 +72,9 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
             "email": new_user.email,
             "full_name": new_user.full_name,
             "cpf": AuthService.format_cpf(new_user.cpf),
-            "company": new_user.company,
+            "company": new_user.old_company_name, # or use company_id name? new_user.company_rel.name if loaded
+            "company_id": new_user.company_id,
+            "role": new_user.role,
             "cnpj": AuthService.format_cnpj(new_user.cnpj),
             "phone": AuthService.format_phone(new_user.phone),
         }
@@ -95,7 +97,9 @@ def get_profile(current_user: UserDB = Depends(get_current_user)):
         "email": current_user.email,
         "full_name": current_user.full_name,
         "cpf": current_user.cpf,
-        "company": current_user.company,
+        "company": current_user.old_company_name,
+        "company_id": current_user.company_id,
+        "role": current_user.role,
         "cnpj": current_user.cnpj,
         "phone": current_user.phone,
     }

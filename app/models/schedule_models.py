@@ -19,8 +19,14 @@ class ScheduleModel(Base):
     
     status = Column(String(20), default="active")  # 'active', 'paused', 'completed'
     last_run = Column(DateTime, nullable=True)
+    last_run_status = Column(String(20), nullable=True)  # 'success', 'failure'
     next_run = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
+    # Multi-tenancy
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
+
     # Relationship
-    environment = relationship("Environment", back_populates="schedules") # Changed to match actual class name
+    environment = relationship("Environment", back_populates="schedules")
+    company_rel = relationship("CompanyDB", back_populates="schedules") # Need to add backref in CompanyDB or just define here
+

@@ -28,6 +28,8 @@ class UserUpdate(BaseModel):
 
 class UserResponse(UserBase):
     id: int
+    company_id: Optional[int] = None
+    role: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

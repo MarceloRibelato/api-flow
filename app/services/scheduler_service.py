@@ -111,12 +111,15 @@ def execute_job(schedule_id: int):
                                 raise req_ex
                             duration = int((time.time() - start_time) * 1000)
                             
+                            duration = int((time.time() - start_time) * 1000)
+                            
                             # Save History
                             hist = ExecutionHistoryCreate(
                                 api_id=api_call.get('id'),
                                 api_name=api_call.get('name'),
                                 project_id=product_id,
                                 flow_id=flow_meta['id'],
+                                schedule_id=schedule.id,  # Link to Schedule
                                 node_name=card.get('name'),
                                 method=method,
                                 url=url,
@@ -136,8 +139,10 @@ def execute_job(schedule_id: int):
                             logger.info(f"      -> {method} {url} [{resp.status_code}]")
                         except Exception as ex:
                              logger.error(f"Failed to execute API call in card {card.get('name')}: {ex}")
+                return True
             except Exception as e:
                 logger.error(f"Error executing flow {flow_meta['id']}: {e}")
+                return False
 
         # Helper to prepare variables
         def get_merged_variables(product_id, env_id):
@@ -164,13 +169,27 @@ def execute_job(schedule_id: int):
                 return
 
             # Fix: list_by_project uses project_id which corresponds to Feature ID in FlowDB
-            flows = FlowService.list_by_project(db, feature.id)
+            flows = FlowService.list_by_project(db, feature.id, schedule.company_id)
             
             # Prepare variables
             variables = get_merged_variables(feature.product_id, env_id)
 
+            success_count = 0
+            fail_count = 0
             for flow_meta in flows:
-                execute_flow_logic(flow_meta, feature.product_id, env_id, variables)
+                if execute_flow_logic(flow_meta, feature.product_id, env_id, variables):
+                    success_count += 1
+                else:
+                    fail_count += 1
+            
+            # Determine overall status
+            if fail_count > 0:
+                schedule.last_run_status = 'failure'
+            else:
+                schedule.last_run_status = 'success'
+            
+            logger.info(f"Feature execution completed. Success: {success_count}, Fail: {fail_count}. Status: {schedule.last_run_status}")
+            db.commit()
 
         elif schedule.type == 'suite':
             product_id = schedule.target_id
@@ -190,18 +209,42 @@ def execute_job(schedule_id: int):
             variables = get_merged_variables(product_id, env_id)
 
             # 3. Iterate features and execute their flows
+            success_count = 0
+            fail_count = 0
+
             for feature in features:
                 logger.info(f"  📂 Processing Feature: {feature.name} (ID: {feature.id})")
-                flows = FlowService.list_by_project(db, feature.id)
+                flows = FlowService.list_by_project(db, feature.id, schedule.company_id)
                 
                 if not flows:
                     logger.info(f"     (No flows found)")
                     continue
 
                 for flow_meta in flows:
-                    execute_flow_logic(flow_meta, product_id, env_id, variables)
+                    if execute_flow_logic(flow_meta, product_id, env_id, variables):
+                        success_count += 1
+                    else:
+                        fail_count += 1
+            
+            # Update Schedule Status (Last Run Status)
+            if fail_count > 0:
+                schedule.last_run_status = 'failure'
+            else:
+                schedule.last_run_status = 'success'
+            
+            logger.info(f"Suite execution completed. Success: {success_count}, Fail: {fail_count}. Status: {schedule.last_run_status}")
+            db.commit()
+
+    except Exception as outer_e:
+        logger.error(f"Critical error in execute_job {schedule_id}: {outer_e}")
+        # Try to set status to failure if DB session is still viable
+        try:
+             schedule.last_run_status = 'failure'
+             db.commit()
+        except: pass
     finally:
         # Close the session to free resources
+
         if 'session' in locals():
             session.close()
         db.close()
