@@ -61,21 +61,24 @@ def execute_job(schedule_id: int):
             if not text or not isinstance(text, str): return text
             def replacer(match):
                 var_name = match.group(1).strip().upper() # Normalize to UPPER
-                # Find variable in dict (keys might be mixed case, so we search values)
-                # variables is { name: VariableDB/Object }
                 
-                found_val = None
-                # Direct lookup if key matches
-                if var_name in variables and hasattr(variables[var_name], 'value'):
-                     found_val = variables[var_name].value
-                else:
-                     # Fallback search
-                     for v in variables.values():
-                         if v.name.upper() == var_name:
-                             found_val = v.value
-                             break
+                # 1. Direct Lookup (Fastest)
+                if var_name in variables:
+                    val = variables[var_name]
+                    # If it's a DB Object (has .value)
+                    if hasattr(val, 'value'):
+                        return str(val.value)
+                    # If it's a direct value (extracted string)
+                    return str(val)
+
+                # 2. Fallback Search (Slower - for case mismatch handling or object scanning)
+                # Only iterate objects that have 'name' attribute
+                for v in variables.values():
+                    if hasattr(v, 'name') and v.name.upper() == var_name:
+                        return str(v.value)
                 
-                return str(found_val) if found_val is not None else match.group(0)
+                # 3. Not Found - Return original placeholder
+                return match.group(0)
 
             return re.sub(r'\{\{([\w\.\-_]+)\}\}', replacer, text)
 
@@ -177,6 +180,115 @@ def execute_job(schedule_id: int):
                                 except ValueError:
                                     resp_json = None
 
+                                # --- Assertion Evaluation Logic ---
+                                assertions = api_call.get('assertions', [])
+                                assertion_results = []
+                                assertions_passed = True
+                                
+                                if assertions:
+                                    logger.info(f"      Evaluating {len(assertions)} assertions...")
+                                    for assertion in assertions:
+                                        try:
+                                            # Normalize assertion structure
+                                            src = assertion.get('type') or assertion.get('source') or 'statusCode'
+                                            operator = assertion.get('operator', 'equals')
+                                            target = assertion.get('value')
+                                            if target is None: target = assertion.get('target')
+                                            
+                                            prop = assertion.get('property') or assertion.get('path')
+
+                                            actual_val = None
+                                            is_success = False
+                                            
+                                            if src == 'statusCode':
+                                                actual_val = resp.status_code
+                                                try:
+                                                    target_int = int(str(target).strip())
+                                                    if operator == 'equals': is_success = (actual_val == target_int)
+                                                    elif operator == 'notesquals': is_success = (actual_val != target_int)
+                                                    elif operator == 'gt': is_success = (actual_val > target_int)
+                                                    elif operator == 'lt': is_success = (actual_val < target_int)
+                                                    else: is_success = (actual_val == target_int) # Default
+                                                except:
+                                                    is_success = False
+                                            
+                                            elif src == 'responseTime':
+                                                actual_val = duration
+                                                try:
+                                                    target_int = int(str(target).strip())
+                                                    if operator == 'lt': is_success = (actual_val < target_int)
+                                                    elif operator == 'gt': is_success = (actual_val > target_int)
+                                                    else: is_success = (actual_val < target_int)
+                                                except:
+                                                    is_success = False
+
+                                            elif src == 'header':
+                                                actual_val = resp.headers.get(prop, '')
+                                                if operator == 'equals': is_success = (str(actual_val) == str(target))
+                                                elif operator == 'contains': is_success = (str(target) in str(actual_val))
+                                                elif operator == 'notesquals': is_success = (str(actual_val) != str(target))
+                                                else: is_success = (str(actual_val) == str(target))
+
+                                            elif src == 'body':
+                                                if resp_json:
+                                                    parts = str(prop).split('.')
+                                                    current = resp_json
+                                                    for part in parts:
+                                                        if isinstance(current, dict) and part in current:
+                                                            current = current[part]
+                                                        else:
+                                                            current = None
+                                                            break
+                                                    actual_val = current
+                                                    
+                                                    # Comparison
+                                                    str_actual = str(actual_val) if actual_val is not None else ""
+                                                    str_target = str(target)
+                                                    
+                                                    if operator == 'equals': is_success = (str_actual == str_target)
+                                                    elif operator == 'contains': is_success = (str_target in str_actual)
+                                                    elif operator == 'notesquals': is_success = (str_actual != str_target)
+                                                    else: is_success = (str_actual == str_target)
+                                                else:
+                                                    actual_val = None
+                                                    is_success = False
+
+                                            assertion_results.append({
+                                                "source": src,
+                                                "operator": operator,
+                                                "target": str(target),
+                                                "actual": str(actual_val),
+                                                "success": is_success
+                                            })
+                                            
+                                            if not is_success:
+                                                assertions_passed = False
+
+                                        except Exception as e:
+                                            logger.error(f"Assertion Error: {e}")
+                                            assertion_results.append({
+                                                "source": src,
+                                                "operator": operator,
+                                                "target": str(target),
+                                                "actual": "Error",
+                                                "success": False,
+                                                "error_message": str(e)
+                                            })
+                                            assertions_passed = False
+
+                                # Determine Final Status
+                                # If assertions exist, they determine success.
+                                # If NO assertions, fallback to status code check.
+                                final_error_message = None
+                                if assertions:
+                                    if not assertions_passed:
+                                        final_error_message = "Assertions Failed"
+                                else:
+                                    if resp.status_code >= 400:
+                                        final_error_message = f"HTTP Error {resp.status_code}"
+
+                                # -------------------------------------
+
                                 # --- Automatic Variable Extraction ---
                                 extracts = api_call.get('extracts', [])
                                 if extracts:
@@ -233,7 +345,9 @@ def execute_job(schedule_id: int):
                                     response_time=duration,
                                     environment_id=env_id,
                                     environment_name=str(env_id),
-                                    variables_used={}
+                                    variables_used={},
+                                    assertions=assertion_results, # Save Assertions
+                                    error_message=final_error_message # Explicit Success/Fail Status
                                 )
                                 user_id_to_save = schedule.user_id if schedule.user_id else 1
                                 logger.info(f"💾 Saving history for Schedule {schedule.id}, User {user_id_to_save}")

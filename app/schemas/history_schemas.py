@@ -68,6 +68,7 @@ class ExecutionHistorySummary(BaseModel):
     node_name: Optional[str] = None  # Added node_name
     api_name: Optional[str] = None  # RESTORED: Critical for matching in frontend
     success: bool # Read directly from Model property
+    assertions: Optional[List[AssertionResult]] = None # Added assertions for report summary
     
     model_config = ConfigDict(from_attributes=True)
 

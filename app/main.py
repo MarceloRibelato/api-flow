@@ -26,12 +26,13 @@ logger = logging.getLogger(__name__)
 logger.info("=== INICIANDO API QA-WORKFLOW ===")
 
 # Reset e Criação das tabelas
-logger.info("Recriando tabelas do banco de dados...")
-try:
-    Base.metadata.drop_all(bind=engine)
-    logger.info("Tabelas removidas com sucesso")
-except Exception as e:
-    logger.error(f"Erro ao remover tabelas: {e}")
+# logger.info("Recriando tabelas do banco de dados...")
+# try:
+#     # Base.metadata.drop_all(bind=engine)
+#     # logger.info("Tabelas removidas com sucesso")
+#     pass
+# except Exception as e:
+#     logger.error(f"Erro ao remover tabelas: {e}")
 
 try:
     Base.metadata.create_all(bind=engine)

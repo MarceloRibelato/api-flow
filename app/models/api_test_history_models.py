@@ -67,9 +67,9 @@ class ApiExecutionHistory(Base):
 
     @property
     def success(self):
-        # Se houver asserções, o sucesso depende delas
-        if self.assertions and isinstance(self.assertions, list) and len(self.assertions) > 0:
-            return all(a.get('success', False) for a in self.assertions)
-        
-        # Fallback: Status code 2xx
-        return 200 <= self.status_code < 300
+        # The scheduler service explicitly sets error_message if:
+        # 1. Assertions failed
+        # 2. No assertions and status_code >= 400
+        # 3. Exception occurred
+        # So providing error_message is the Source of Truth for failure.
+        return not bool(self.error_message)
