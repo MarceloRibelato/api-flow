@@ -10,9 +10,15 @@ class AssertionRule(BaseModel):
     target: Any
 
 
+class ExtractionRule(BaseModel):
+    source: str  # body, header
+    property: Optional[str] = None  # path (e.g. "data.token") or header key
+    variable: str  # Variable name to save (e.g. "AUTH_TOKEN")
+
+
 class ApiCallSchema(BaseModel):
     id: str
-    name: Optional[str] = "Nova Requisição"  # Added name field
+    name: Optional[str] = "Nova Requisição"
     method: str
     url: str
     headers: List[Dict[str, str]] = []
@@ -21,6 +27,8 @@ class ApiCallSchema(BaseModel):
     description: str = ""
     timeout: int = 30000
     assertions: List[AssertionRule] = []
+    extracts: List[ExtractionRule] = []
+
 
 
 class NodeDataBasic(BaseModel):

@@ -213,11 +213,15 @@ class FlowService:
         # 5. Insert Card Data
         for cid, cinfo in card_data.items():
             # cinfo is CardDataSchema
+            # cinfo is CardDataSchema
             # Prepare API calls list
             api_calls_payload = [api.model_dump() for api in cinfo.apiCalls]
             print(f"🛠️ Saving Card {cid}: APICalls Count={len(api_calls_payload)}")
             if len(api_calls_payload) > 0:
                 print(f"   -> First API Call: {api_calls_payload[0].get('name')} (ID: {api_calls_payload[0].get('id')})")
+                print(f"   -> Extracts Count: {len(api_calls_payload[0].get('extracts', []))}") # DEBUG LOG
+                if api_calls_payload[0].get('extracts'):
+                     print(f"   -> First Extract: {api_calls_payload[0]['extracts'][0]}")
 
             db_card = FlowCardDataDB(
                 node_id=cid,

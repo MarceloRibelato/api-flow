@@ -56,12 +56,28 @@ def execute_job(schedule_id: int):
         session.trust_env = False
 
         # Helper method for replacing variables - simplified version
+        import re
         def replace_vars(text, variables):
             if not text or not isinstance(text, str): return text
-            for k, v in variables.items():
-                if v and v.value:
-                    text = text.replace(f"{{{{{v.name}}}}}", str(v.value))
-            return text
+            def replacer(match):
+                var_name = match.group(1).strip().upper() # Normalize to UPPER
+                # Find variable in dict (keys might be mixed case, so we search values)
+                # variables is { name: VariableDB/Object }
+                
+                found_val = None
+                # Direct lookup if key matches
+                if var_name in variables and hasattr(variables[var_name], 'value'):
+                     found_val = variables[var_name].value
+                else:
+                     # Fallback search
+                     for v in variables.values():
+                         if v.name.upper() == var_name:
+                             found_val = v.value
+                             break
+                
+                return str(found_val) if found_val is not None else match.group(0)
+
+            return re.sub(r'\{\{([\w\.\-_]+)\}\}', replacer, text)
 
         # Helper to execute a single flow
         def execute_flow_logic(flow_meta, product_id, env_id, variables_dict):
@@ -69,76 +85,174 @@ def execute_job(schedule_id: int):
                 # Load full flow data with cards
                 flow_data = FlowService.load(db, flow_meta['project_id'], flow_meta['id'])
                 cards = flow_data.get('cardData', {})
+                nodes = flow_data.get('nodes', [])
+                edges = flow_data.get('edges', [])
                 
                 logger.info(f"   ► Executing Flow: {flow_meta.get('name', 'Unknown')} (ID: {flow_meta['id']}) - {len(cards)} cards")
 
-                for card_id, card in cards.items():
-                    api_calls = card.get('apiCalls', [])
-                    for api_call in api_calls:
-                        try:
-                            # Prepare Request
-                            method = api_call.get('method', 'GET')
-                            url = replace_vars(api_call.get('url', ''), variables_dict)
-                            
-                            # FORCE FIX: Replace localhost with 127.0.0.1
-                            if 'localhost' in url:
-                                url = url.replace('localhost', '127.0.0.1')
-                            
-                            headers_raw = api_call.get('headers', {})
-                            if isinstance(headers_raw, list):
-                                mapping = {}
-                                for h in headers_raw:
-                                     if isinstance(h, dict):
-                                         if 'key' in h and 'value' in h:
-                                             mapping[h['key']] = h['value']
-                                         else:
-                                             mapping.update(h)
-                                headers_raw = mapping
+                # Build Graph (Adjacency List)
+                adj = {n['id']: [] for n in nodes}
+                in_degree = {n['id']: 0 for n in nodes}
+                
+                # Filter valid edges (where both source and target exist)
+                node_ids = set(n['id'] for n in nodes)
+                valid_edges = [e for e in edges if e['source'] in node_ids and e['target'] in node_ids]
 
-                            headers_json_str = json.dumps(headers_raw)
-                            headers = json.loads(replace_vars(headers_json_str, variables_dict))
-                            
-                            if isinstance(headers, list): headers = {}
-                            if not isinstance(headers, dict) and headers is not None: headers = {}
+                for edge in valid_edges:
+                    src, tgt = edge['source'], edge['target']
+                    adj[src].append(tgt)
+                    in_degree[tgt] += 1
 
-                            body = replace_vars(api_call.get('body', ''), variables_dict)
-                            
-                            start_time = time.time()
+                # BFS / Kahn's Algorithm for Topological Sort/Traversal
+                # Start with nodes having in_degree 0 (Roots)
+                queue = [n['id'] for n in nodes if in_degree[n['id']] == 0]
+                
+                # Sort roots by position.x to respect visual order
+                def get_x_pos(nid):
+                    n = next((x for x in nodes if x['id'] == nid), None)
+                    return n['position']['x'] if n else 0
+                
+                queue.sort(key=get_x_pos)
+                
+                # Use a shared session for the entire flow to persist Cookies (Auth)
+                flow_session = requests.Session()
+
+                visited = set()
+                
+                while queue:
+                    current_id = queue.pop(0)
+                    
+                    if current_id in visited:
+                        continue
+                    visited.add(current_id)
+
+                    # Execute Card for this Node if exists
+                    card = cards.get(current_id)
+                    if card:
+                        api_calls = card.get('apiCalls', [])
+                        logger.info(f"      Running Node: {card.get('name')} ({len(api_calls)} calls)")
+                        
+                        for api_call in api_calls:
                             try:
-                                resp = session.request(method, url, headers=headers, data=body)
-                            except Exception as req_ex:
-                                logger.error(f"Request failed: {req_ex}")
-                                raise req_ex
-                            duration = int((time.time() - start_time) * 1000)
+                                # Prepare Request
+                                method = api_call.get('method', 'GET')
+                                url = replace_vars(api_call.get('url', ''), variables_dict)
+                                
+                                # FORCE FIX: Replace localhost with 127.0.0.1
+                                if 'localhost' in url:
+                                    url = url.replace('localhost', '127.0.0.1')
+                                
+                                headers_raw = api_call.get('headers', {})
+                                if isinstance(headers_raw, list):
+                                    mapping = {}
+                                    for h in headers_raw:
+                                         if isinstance(h, dict):
+                                             if 'key' in h and 'value' in h:
+                                                 mapping[h['key']] = h['value']
+                                             else:
+                                                 mapping.update(h)
+                                    headers_raw = mapping
+
+                                headers_json_str = json.dumps(headers_raw)
+                                headers = json.loads(replace_vars(headers_json_str, variables_dict))
+                                
+                                if isinstance(headers, list): headers = {}
+                                if not isinstance(headers, dict) and headers is not None: headers = {}
+
+                                body = replace_vars(api_call.get('body', ''), variables_dict)
+                                
+                                start_time = time.time()
+                                try:
+                                    # Use flow_session instead of new session
+                                    resp = flow_session.request(method, url, headers=headers, data=body)
+                                except Exception as req_ex:
+                                    logger.error(f"Request failed: {req_ex}")
+                                    # Don't break flow logic, but log error
+                                    raise req_ex
+
+                                duration = int((time.time() - start_time) * 1000)
+
+                                try:
+                                    resp_json = resp.json()
+                                except ValueError:
+                                    resp_json = None
+
+                                # --- Automatic Variable Extraction ---
+                                extracts = api_call.get('extracts', [])
+                                if extracts:
+                                    logger.info(f"      Processing {len(extracts)} extraction rules...")
+                                    for rule in extracts:
+                                        try:
+                                            # Normalize rule structure (it might be dict or object depending on serialization)
+                                            r_source = rule.get('source') if isinstance(rule, dict) else getattr(rule, 'source', None)
+                                            r_property = rule.get('property') if isinstance(rule, dict) else getattr(rule, 'property', '')
+                                            r_variable = rule.get('variable') if isinstance(rule, dict) else getattr(rule, 'variable', '')
+
+                                            value = None
+                                            if r_source == 'header':
+                                                # Header extraction (case-insensitive)
+                                                value = next((v for k, v in resp.headers.items() if k.lower() == str(r_property).lower()), None)
+                                            elif r_source == 'body' and resp_json:
+                                                # Body extraction (simple dot notation)
+                                                parts = str(r_property).split('.')
+                                                current = resp_json
+                                                for part in parts:
+                                                    if isinstance(current, dict) and part in current:
+                                                        current = current[part]
+                                                    else:
+                                                        current = None
+                                                        break
+                                                value = current
+                                            
+                                            if value is not None:
+                                                var_name = str(r_variable).strip().upper()
+                                                if var_name:
+                                                    variables_dict[var_name] = str(value)   # Update persistence dict
+                                                    logger.info(f"      ✅ Extracted: {var_name} = {value}")
+
+                                        except Exception as e:
+                                            logger.error(f"      ❌ Extraction Error for {rule}: {str(e)}")
+                                # -------------------------------------
+                                
+                                # Save History
+                                hist = ExecutionHistoryCreate(
+                                    api_id=api_call.get('id'),
+                                    api_name=api_call.get('name'),
+                                    project_id=product_id,
+                                    flow_id=flow_meta['id'],
+                                    schedule_id=schedule.id,  # Link to Schedule
+                                    node_name=card.get('name'),
+                                    method=method,
+                                    url=url,
+                                    request_headers=headers,
+                                    request_body=body,
+                                    status_code=resp.status_code,
+                                    status_text=resp.reason,
+                                    response_headers=dict(resp.headers),
+                                    response_body=resp.text,
+                                    response_time=duration,
+                                    environment_id=env_id,
+                                    environment_name=str(env_id),
+                                    variables_used={}
+                                )
+                                user_id_to_save = schedule.user_id if schedule.user_id else 1
+                                logger.info(f"💾 Saving history for Schedule {schedule.id}, User {user_id_to_save}")
+                                HistoryService.save(db, hist, user_id=user_id_to_save)
+                                logger.info(f"      -> {method} {url} [{resp.status_code}]")
                             
-                            duration = int((time.time() - start_time) * 1000)
-                            
-                            # Save History
-                            hist = ExecutionHistoryCreate(
-                                api_id=api_call.get('id'),
-                                api_name=api_call.get('name'),
-                                project_id=product_id,
-                                flow_id=flow_meta['id'],
-                                schedule_id=schedule.id,  # Link to Schedule
-                                node_name=card.get('name'),
-                                method=method,
-                                url=url,
-                                request_headers=headers,
-                                request_body=body,
-                                status_code=resp.status_code,
-                                status_text=resp.reason,
-                                response_headers=dict(resp.headers),
-                                response_body=resp.text,
-                                response_time=duration,
-                                environment_id=env_id,
-                                environment_name=str(env_id),
-                                variables_used={}
-                            )
-                            user_id_to_save = schedule.user_id if schedule.user_id else 1
-                            HistoryService.save(db, hist, user_id=user_id_to_save)
-                            logger.info(f"      -> {method} {url} [{resp.status_code}]")
-                        except Exception as ex:
-                             logger.error(f"Failed to execute API call in card {card.get('name')}: {ex}")
+                            except Exception as ex:
+                                logger.error(f"Failed to execute API call in card {card.get('name')}: {ex}")
+
+                    # Add neighbors to queue
+                    # Sort neighbors by X position for consistent flow
+                    neighbors = adj.get(current_id, [])
+                    neighbors.sort(key=get_x_pos)
+                    
+                    for neighbor in neighbors:
+                         in_degree[neighbor] -= 1
+                         if in_degree[neighbor] == 0:
+                             queue.append(neighbor)
+
                 return True
             except Exception as e:
                 logger.error(f"Error executing flow {flow_meta['id']}: {e}")
@@ -163,7 +277,7 @@ def execute_job(schedule_id: int):
             env_id = schedule.environment_id
             logger.info(f"🚀 Running Scheduled Feature {feature_id} in Env {env_id}")
 
-            feature = FeatureService.get_by_id(db, feature_id)
+            feature = FeatureService.get_by_id(db, feature_id, schedule.company_id)
             if not feature:
                 logger.error(f"Feature {feature_id} not found")
                 return

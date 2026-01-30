@@ -92,6 +92,7 @@ class HistoryService:
         if environment_id is not None:
             query = query.filter(ApiExecutionHistory.environment_id == environment_id)
         if schedule_id is not None:
+            # logger.info(f"🔍 Filtering History by Schedule ID: {schedule_id}")
             query = query.filter(ApiExecutionHistory.schedule_id == schedule_id)
 
         if method:
