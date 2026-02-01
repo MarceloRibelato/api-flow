@@ -220,6 +220,7 @@ class FlowService:
             if len(api_calls_payload) > 0:
                 print(f"   -> First API Call: {api_calls_payload[0].get('name')} (ID: {api_calls_payload[0].get('id')})")
                 print(f"   -> Extracts Count: {len(api_calls_payload[0].get('extracts', []))}") # DEBUG LOG
+                print(f"   -> Assertions Count: {len(api_calls_payload[0].get('assertions', []))}") # DEBUG LOG
                 if api_calls_payload[0].get('extracts'):
                      print(f"   -> First Extract: {api_calls_payload[0]['extracts'][0]}")
 

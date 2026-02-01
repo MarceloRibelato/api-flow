@@ -7,12 +7,22 @@ def setup_logging():
     Configura o sistema de logs da aplicação.
     Define formato, handlers (Console e Arquivo) e nível de log.
     """
+    # Configuração de rotação de logs (5MB, 3 backups)
+    from logging.handlers import RotatingFileHandler
+    
+    file_handler = RotatingFileHandler(
+        "api.log", 
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=3, 
+        encoding="utf-8"
+    )
+    
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[
             logging.StreamHandler(sys.stdout),  # Log no console (stdout)
-            logging.FileHandler("api.log", encoding="utf-8"),  # Log em arquivo
+            file_handler,  # Log em arquivo rotativo
         ],
     )
 

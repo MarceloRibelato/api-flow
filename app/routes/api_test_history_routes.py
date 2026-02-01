@@ -58,7 +58,7 @@ def get_execution_history(
     try:
         return HistoryService.get_all(
             db,
-            current_user.id,
+            current_user.company_id,  # Updated: company_id
             page,
             limit,
             api_id,
@@ -81,7 +81,7 @@ def get_execution_detail(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    history = HistoryService.get_by_id(db, execution_id, current_user.id)
+    history = HistoryService.get_by_id(db, execution_id, current_user.company_id) # Updated
     if not history:
         raise HTTPException(status_code=404, detail="Não encontrado")
     return history
@@ -93,7 +93,7 @@ def delete_execution_history(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    success = HistoryService.delete(db, execution_id, current_user.id)
+    success = HistoryService.delete(db, execution_id, current_user.company_id) # Updated
     if not success:
         raise HTTPException(status_code=404, detail="Não encontrado")
     return {"message": "Removido"}
@@ -108,7 +108,7 @@ def clear_execution_history(
     if not confirm:
         raise HTTPException(status_code=400, detail="Confirmação necessária")
 
-    HistoryService.clear_all(db, current_user.id)
+    HistoryService.clear_all(db, current_user.company_id) # Updated
     return {"message": "Histórico limpo"}
 
 
@@ -118,5 +118,5 @@ def get_unique_apis(
     current_user: UserDB = Depends(get_current_user),
 ):
     """Retorna lista única de APIs (método/url) para filtros"""
-    return HistoryService.get_unique_apis(db, current_user.id)
+    return HistoryService.get_unique_apis(db, current_user.company_id) # Updated
 

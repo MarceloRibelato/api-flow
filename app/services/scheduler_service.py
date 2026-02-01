@@ -191,44 +191,80 @@ def execute_job(schedule_id: int):
                                         try:
                                             # Normalize assertion structure
                                             src = assertion.get('type') or assertion.get('source') or 'statusCode'
-                                            operator = assertion.get('operator', 'equals')
+                                            raw_operator = assertion.get('operator', 'equals')
                                             target = assertion.get('value')
                                             if target is None: target = assertion.get('target')
                                             
                                             prop = assertion.get('property') or assertion.get('path')
 
+                                            # Normalize Operator
+                                            op = str(raw_operator).lower()
+                                            # Map to standard set
+                                            if op in ['equals', '==', 'eq']: op = 'equals'
+                                            elif op in ['notequals', '!=', 'notesquals', 'neq', 'not_equals']: op = 'notequals'
+                                            elif op in ['contains', 'in']: op = 'contains'
+                                            elif op in ['notcontains', 'not_contains']: op = 'notcontains'
+                                            elif op in ['greaterthan', 'gt', '>']: op = 'gt'
+                                            elif op in ['lessthan', 'lt', '<']: op = 'lt'
+                                            elif op in ['exists']: op = 'exists'
+                                            elif op in ['notexists', 'not_exists']: op = 'notexists'
+
                                             actual_val = None
                                             is_success = False
                                             
+                                            # --- Status Code ---
                                             if src == 'statusCode':
                                                 actual_val = resp.status_code
-                                                try:
-                                                    target_int = int(str(target).strip())
-                                                    if operator == 'equals': is_success = (actual_val == target_int)
-                                                    elif operator == 'notesquals': is_success = (actual_val != target_int)
-                                                    elif operator == 'gt': is_success = (actual_val > target_int)
-                                                    elif operator == 'lt': is_success = (actual_val < target_int)
-                                                    else: is_success = (actual_val == target_int) # Default
-                                                except:
+                                                if op == 'exists':
+                                                    is_success = True
+                                                elif op == 'notexists':
                                                     is_success = False
+                                                else:
+                                                    try:
+                                                        target_int = int(str(target).strip())
+                                                        if op == 'equals': is_success = (actual_val == target_int)
+                                                        elif op == 'notequals': is_success = (actual_val != target_int)
+                                                        elif op == 'gt': is_success = (actual_val > target_int)
+                                                        elif op == 'lt': is_success = (actual_val < target_int)
+                                                        else: is_success = (actual_val == target_int)
+                                                    except ValueError:
+                                                        is_success = False
                                             
+                                            # --- Response Time ---
                                             elif src == 'responseTime':
                                                 actual_val = duration
-                                                try:
-                                                    target_int = int(str(target).strip())
-                                                    if operator == 'lt': is_success = (actual_val < target_int)
-                                                    elif operator == 'gt': is_success = (actual_val > target_int)
-                                                    else: is_success = (actual_val < target_int)
-                                                except:
+                                                if op == 'exists':
+                                                    is_success = True
+                                                elif op == 'notexists':
                                                     is_success = False
+                                                else:
+                                                    try:
+                                                        target_int = int(str(target).strip())
+                                                        if op == 'lt': is_success = (actual_val < target_int)
+                                                        elif op == 'gt': is_success = (actual_val > target_int)
+                                                        elif op == 'equals': is_success = (actual_val == target_int) # Less common but possible
+                                                        else: is_success = (actual_val < target_int) # Default fallback
+                                                    except ValueError:
+                                                        is_success = False
 
+                                            # --- Header ---
                                             elif src == 'header':
-                                                actual_val = resp.headers.get(prop, '')
-                                                if operator == 'equals': is_success = (str(actual_val) == str(target))
-                                                elif operator == 'contains': is_success = (str(target) in str(actual_val))
-                                                elif operator == 'notesquals': is_success = (str(actual_val) != str(target))
-                                                else: is_success = (str(actual_val) == str(target))
+                                                found_key = next((k for k in resp.headers.keys() if k.lower() == str(prop).lower()), None)
+                                                actual_val = resp.headers[found_key] if found_key else None
+                                                
+                                                if op == 'exists': 
+                                                    is_success = (actual_val is not None)
+                                                elif op == 'notexists': 
+                                                    is_success = (actual_val is None)
+                                                else:
+                                                    val_to_compare = str(actual_val) if actual_val is not None else ""
+                                                    if op == 'equals': is_success = (val_to_compare == str(target))
+                                                    elif op == 'contains': is_success = (str(target) in val_to_compare)
+                                                    elif op == 'notequals': is_success = (val_to_compare != str(target))
+                                                    elif op == 'notcontains': is_success = (str(target) not in val_to_compare)
+                                                    else: is_success = (val_to_compare == str(target))
 
+                                            # --- Body ---
                                             elif src == 'body':
                                                 if resp_json:
                                                     parts = str(prop).split('.')
@@ -240,24 +276,28 @@ def execute_job(schedule_id: int):
                                                             current = None
                                                             break
                                                     actual_val = current
-                                                    
-                                                    # Comparison
+                                                else:
+                                                    actual_val = None
+
+                                                if op == 'exists':
+                                                    is_success = (actual_val is not None)
+                                                elif op == 'notexists':
+                                                    is_success = (actual_val is None)
+                                                else:
                                                     str_actual = str(actual_val) if actual_val is not None else ""
                                                     str_target = str(target)
                                                     
-                                                    if operator == 'equals': is_success = (str_actual == str_target)
-                                                    elif operator == 'contains': is_success = (str_target in str_actual)
-                                                    elif operator == 'notesquals': is_success = (str_actual != str_target)
+                                                    if op == 'equals': is_success = (str_actual == str_target)
+                                                    elif op == 'contains': is_success = (str_target in str_actual)
+                                                    elif op == 'notequals': is_success = (str_actual != str_target)
+                                                    elif op == 'notcontains': is_success = (str_target not in str_actual)
                                                     else: is_success = (str_actual == str_target)
-                                                else:
-                                                    actual_val = None
-                                                    is_success = False
 
                                             assertion_results.append({
                                                 "source": src,
-                                                "operator": operator,
-                                                "target": str(target),
-                                                "actual": str(actual_val),
+                                                "operator": raw_operator,
+                                                "target": str(target) if target is not None else "",
+                                                "actual": str(actual_val) if actual_val is not None else "None",
                                                 "success": is_success
                                             })
                                             
@@ -268,7 +308,7 @@ def execute_job(schedule_id: int):
                                             logger.error(f"Assertion Error: {e}")
                                             assertion_results.append({
                                                 "source": src,
-                                                "operator": operator,
+                                                "operator": raw_operator,
                                                 "target": str(target),
                                                 "actual": "Error",
                                                 "success": False,
