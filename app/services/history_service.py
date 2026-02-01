@@ -12,7 +12,7 @@ from app.schemas.history_schemas import ExecutionHistoryCreate
 
 class HistoryService:
     @staticmethod
-    def save(db: Session, history: ExecutionHistoryCreate, user_id: int):
+    def save(db: Session, history: ExecutionHistoryCreate, user_id: int, commit: bool = True):
         execution_id = f"exec_{uuid.uuid4().hex[:10]}_{int(datetime.now().timestamp())}"
 
         # Filtro de variáveis: Salva apenas as que realmente aparecem no request
@@ -59,8 +59,9 @@ class HistoryService:
         )
 
         db.add(db_history)
-        db.commit()
-        db.refresh(db_history)
+        if commit:
+            db.commit()
+            db.refresh(db_history)
         return db_history
 
     @staticmethod

@@ -9864,3 +9864,627 @@ LINE 1: ...r_id, cron_expression, run_at, notification_urls, notificati...
 2026-02-01 16:05:49,596 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
 2026-02-01 16:05:49,607 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
 2026-02-01 16:05:49,622 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:10:07,378 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-02-01 16:10:07,380 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-02-01 16:10:07,381 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:10:07,382 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:10:07,383 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:10:07,387 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:10:07,400 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:10:07,405 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:10:07,411 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:10:07,415 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:10:07,427 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:10:07,433 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:10:07,437 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:10:07,441 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:10:07,452 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:10:07,454 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:10:07,460 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:10:07,468 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:10:07,473 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:10:07,478 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:10:09,683 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/flow/load/1
+2026-02-01 16:10:09,684 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:10:09,685 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:10:09,686 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/flow/load/1
+2026-02-01 16:10:09,689 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:10:09,692 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:10:09,702 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:10:09,709 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:10:09,721 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:10:09,722 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:10:09,739 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:10:09,742 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:10:09,750 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:10:09,752 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:10:09,762 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:10:09,777 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:21:23,272 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/profile
+2026-02-01 16:21:23,278 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/flow/load/1
+2026-02-01 16:21:23,279 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/flow/load/1
+2026-02-01 16:21:23,280 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/profile
+2026-02-01 16:21:23,283 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:23,286 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:21:23,288 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:21:23,290 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:23,298 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/profile
+2026-02-01 16:21:23,301 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/profile
+2026-02-01 16:21:23,306 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:21:23,307 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:21:23,308 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:23,318 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:23,330 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:21:23,331 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:21:23,368 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:23,393 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:23,414 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:21:23,441 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:21:23,453 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:23,457 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:21:23,464 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:23,545 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:21:27,353 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/
+2026-02-01 16:21:27,356 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:21:27,359 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/
+2026-02-01 16:21:27,359 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/ - Status: 200
+2026-02-01 16:21:27,362 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/ - Status: 200
+2026-02-01 16:21:27,365 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:21:27,376 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:27,380 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:21:27,384 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:21:27,389 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:21:27,395 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:27,400 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:21:27,412 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:21:27,414 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:27,419 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:21:27,426 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:21:39,564 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/1
+2026-02-01 16:21:39,566 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/1
+2026-02-01 16:21:39,567 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:21:39,569 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:21:39,571 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:21:39,583 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:21:39,587 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:21:39,590 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-02-01 16:21:39,592 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:21:39,598 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:21:39,607 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:21:39,616 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:21:39,619 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:21:39,624 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/environments?project_id=1
+2026-02-01 16:21:39,625 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:21:39,630 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:21:39,640 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:21:39,640 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:21:39,647 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:21:39,657 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:21:41,100 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/history/?project_id=1&page=1&limit=50&sort_by=created_at&order=desc&_=1769973701093
+2026-02-01 16:21:41,101 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/history/?project_id=1&page=1&limit=50&sort_by=created_at&order=desc&_=1769973701093 - Status: 200
+2026-02-01 16:21:41,105 - app.main - INFO - REQUEST: GET http://localhost:8000/history/?project_id=1&page=1&limit=50&sort_by=created_at&order=desc&_=1769973701093
+2026-02-01 16:21:41,137 - app.main - INFO - RESPONSE: GET http://localhost:8000/history/?project_id=1&page=1&limit=50&sort_by=created_at&order=desc&_=1769973701093 - Status: 200
+2026-02-01 16:24:57,594 - app.main - INFO - Desligando aplicação...
+2026-02-01 16:25:00,096 - app - INFO - Logging configured successfully.
+2026-02-01 16:25:00,261 - app - INFO - Logging configured successfully.
+2026-02-01 16:25:00,328 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-02-01 16:25:00,427 - app.main - INFO - Tabelas verificadas/criadas com sucesso
+2026-02-01 16:25:00,427 - app.main - INFO - Iniciando scheduler...
+2026-02-01 16:25:00,431 - apscheduler.scheduler - INFO - Scheduler started
+2026-02-01 16:25:00,432 - app.services.scheduler_service - INFO - APScheduler started
+2026-02-01 16:25:00,475 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:25:00,477 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 14:02:00 -03], next run at: 2026-02-01 14:02:00 -03)" was missed by 2:23:00.477772
+2026-02-01 16:25:00,478 - apscheduler.scheduler - INFO - Removed job 41
+2026-02-01 16:25:00,484 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:25:00,485 - apscheduler.scheduler - INFO - Removed job 43
+2026-02-01 16:25:00,485 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 16:01:00 -03], next run at: 2026-02-01 16:01:00 -03)" was missed by 0:24:00.485188
+2026-02-01 16:27:42,845 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:27:42,919 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:27:42,926 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:27:42,942 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:27:42,947 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:27:42,977 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:27:42,981 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:27:42,995 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:27:42,998 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:27:43,011 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:27:43,014 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:27:43,019 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:27:45,314 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:27:45,317 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:27:45,332 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:27:45,335 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:27:45,343 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:27:45,347 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:27:45,355 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:27:45,359 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:27:45,365 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:27:45,453 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:27:45,458 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:27:45,472 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:27:50,182 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:27:50,201 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:27:50,209 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:27:50,217 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:27:50,230 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:27:50,242 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:27:50,246 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:27:50,250 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:27:50,258 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:27:50,262 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:27:50,265 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:27:50,269 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:27:51,741 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables/?project_id=1
+2026-02-01 16:27:51,742 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables/?project_id=1 - Status: 200
+2026-02-01 16:27:51,747 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1
+2026-02-01 16:27:51,749 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1 - Status: 307
+2026-02-01 16:27:51,755 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables?project_id=1
+2026-02-01 16:27:51,756 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables?project_id=1 - Status: 200
+2026-02-01 16:27:51,760 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1
+2026-02-01 16:27:51,780 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1 - Status: 200
+2026-02-01 16:27:51,790 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:27:51,791 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:27:51,795 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:27:51,797 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:27:51,811 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:27:51,812 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:27:51,817 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:27:51,833 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:27:51,842 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:27:51,921 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:27:51,933 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:27:51,934 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:27:51,956 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:27:51,966 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:27:51,978 - app.main - INFO - REQUEST: POST http://localhost:8000/auth/login
+2026-02-01 16:27:51,989 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-02-01 16:27:51,989 - app.routes.auth_routes - INFO - Username attempt: mribelato@gmail.com
+2026-02-01 16:27:52,211 - app.routes.auth_routes - INFO - Login successful for user: mribelato@gmail.com
+2026-02-01 16:27:52,211 - app.routes.auth_routes - INFO - Access token generated for: mribelato@gmail.com
+2026-02-01 16:27:52,213 - app.main - INFO - RESPONSE: POST http://localhost:8000/auth/login - Status: 200
+2026-02-01 16:27:52,224 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables/2
+2026-02-01 16:27:52,225 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables/2 - Status: 200
+2026-02-01 16:27:52,228 - app.main - INFO - REQUEST: PUT http://localhost:8000/variables/2
+2026-02-01 16:27:52,254 - app.main - INFO - RESPONSE: PUT http://localhost:8000/variables/2 - Status: 200
+2026-02-01 16:27:52,264 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/history/
+2026-02-01 16:27:52,265 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/history/ - Status: 200
+2026-02-01 16:27:52,268 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:27:52,331 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:27:52,559 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:27:52,561 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:27:52,575 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:27:52,593 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:27:52,615 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:27:52,637 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:27:52,658 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:27:52,733 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:27:52,957 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:27:52,961 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:27:52,975 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:27:52,993 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:27:53,013 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/logout
+2026-02-01 16:27:53,016 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/logout - Status: 200
+2026-02-01 16:27:53,026 - app.main - INFO - REQUEST: POST http://localhost:8000/auth/logout
+2026-02-01 16:27:53,077 - app.routes.auth_routes - INFO - Token 212a5d79-61d3-4e2f-b92f-c89ba11d9ab6 blacklisted for user mribelato@gmail.com
+2026-02-01 16:27:53,079 - app.main - INFO - RESPONSE: POST http://localhost:8000/auth/logout - Status: 200
+2026-02-01 16:27:53,099 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:27:53,184 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:27:53,404 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:27:53,407 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:27:53,419 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:27:53,436 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:27:53,454 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:27:53,471 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 401
+2026-02-01 16:27:53,489 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:27:53,544 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:27:54,767 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/flow/load/3
+2026-02-01 16:27:54,768 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/flow/load/3 - Status: 200
+2026-02-01 16:27:54,772 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/3
+2026-02-01 16:27:54,794 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/3 - Status: 200
+2026-02-01 16:27:54,803 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:27:54,803 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:27:54,812 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:27:54,816 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:27:54,821 - app.main - INFO - REQUEST: POST http://localhost:8000/auth/login
+2026-02-01 16:27:54,825 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-02-01 16:27:54,825 - app.routes.auth_routes - INFO - Username attempt: mribelato@gmail.com
+2026-02-01 16:27:54,982 - app.routes.auth_routes - INFO - Login successful for user: mribelato@gmail.com
+2026-02-01 16:27:54,983 - app.routes.auth_routes - INFO - Access token generated for: mribelato@gmail.com
+2026-02-01 16:27:54,985 - app.main - INFO - RESPONSE: POST http://localhost:8000/auth/login - Status: 200
+2026-02-01 16:27:54,996 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:27:55,034 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:27:56,354 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/history/?limit=1000&environment_id=1
+2026-02-01 16:27:56,356 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/history/?limit=1000&environment_id=1
+2026-02-01 16:27:56,356 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/history/?limit=1000&environment_id=1 - Status: 200
+2026-02-01 16:27:56,358 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/history/?limit=1000&environment_id=1 - Status: 200
+2026-02-01 16:27:56,361 - app.main - INFO - REQUEST: GET http://localhost:8000/history/?limit=1000&environment_id=1
+2026-02-01 16:27:56,413 - app.main - INFO - RESPONSE: GET http://localhost:8000/history/?limit=1000&environment_id=1 - Status: 200
+2026-02-01 16:27:56,417 - app.main - INFO - REQUEST: GET http://localhost:8000/history/?limit=1000&environment_id=1
+2026-02-01 16:27:56,470 - app.main - INFO - RESPONSE: GET http://localhost:8000/history/?limit=1000&environment_id=1 - Status: 200
+2026-02-01 16:30:10,176 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/schedules/
+2026-02-01 16:30:10,177 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/schedules/ - Status: 200
+2026-02-01 16:30:10,182 - app.main - INFO - REQUEST: POST http://localhost:8000/schedules/
+2026-02-01 16:30:10,225 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:30:10,236 - app.main - INFO - RESPONSE: POST http://localhost:8000/schedules/ - Status: 200
+2026-02-01 16:31:00,006 - apscheduler.scheduler - INFO - Removed job 44
+2026-02-01 16:31:00,008 - apscheduler.executors.default - INFO - Running job "execute_job (trigger: date[2026-02-01 16:31:00 -03], next run at: 2026-02-01 16:31:00 -03)" (scheduled at 2026-02-01 16:31:00-03:00)
+2026-02-01 16:31:00,009 - app.services.scheduler_service - INFO - Executing scheduled job: 44
+2026-02-01 16:31:00,310 - app.services.scheduler_service - INFO - 🚀 Running Scheduled Suite (Product) 1 in Env 1
+2026-02-01 16:31:00,318 - app.services.scheduler_service - INFO - Found 2 features for product 1
+2026-02-01 16:31:00,326 - app.services.scheduler_service - INFO -   📂 Processing Feature: Login (ID: 1)
+2026-02-01 16:31:00,411 - app.services.scheduler_service - INFO -     ▶ Executing Flow: Fluxo Principal (ID: 1) - Cards: 4
+2026-02-01 16:31:00,412 - app.services.scheduler_service - INFO -    ► Executing Flow: Fluxo Principal (ID: 1) - 4 cards
+2026-02-01 16:31:00,413 - app.services.scheduler_service - INFO -       Running Node: Login (1 calls)
+2026-02-01 16:31:00,436 - app.main - INFO - REQUEST: POST http://127.0.0.1:8000/auth/login
+2026-02-01 16:31:00,445 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-02-01 16:31:00,445 - app.routes.auth_routes - INFO - Username attempt: mribelato@gmail.com
+2026-02-01 16:31:00,678 - app.routes.auth_routes - INFO - Login successful for user: mribelato@gmail.com
+2026-02-01 16:31:00,679 - app.routes.auth_routes - INFO - Access token generated for: mribelato@gmail.com
+2026-02-01 16:31:00,680 - app.main - INFO - RESPONSE: POST http://127.0.0.1:8000/auth/login - Status: 200
+2026-02-01 16:31:00,683 - app.services.scheduler_service - INFO -       Evaluating 3 assertions...
+2026-02-01 16:31:00,684 - app.services.scheduler_service - INFO -       Processing 1 extraction rules...
+2026-02-01 16:31:00,684 - app.services.scheduler_service - INFO -       ✅ Extracted: TOKEN = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJtcmliZWxhdG9AZ21haWwuY29tIiwidmVyc2lvbiI6MSwiZXhwIjoxNzcwMDYwNjYwLCJqdGkiOiI3NDVjMTlkMS1iYjk0LTQ1OGQtODk1NC1jNDllY2E2ZmNmM2EifQ.MTvEjHfdt5V3XyZaGUAACnKEf0XnLswU6U2jmFCs8wo
+2026-02-01 16:31:00,685 - app.services.scheduler_service - INFO - 💾 Saving history for Schedule 44, User 1
+2026-02-01 16:31:00,686 - app.services.scheduler_service - INFO -       -> POST http://127.0.0.1:8000/auth/login [200]
+2026-02-01 16:31:00,687 - app.services.scheduler_service - INFO -       Running Node: Profile  (1 calls)
+2026-02-01 16:31:00,689 - app.main - INFO - REQUEST: GET http://127.0.0.1:8000/auth/profile
+2026-02-01 16:31:00,697 - app.main - INFO - RESPONSE: GET http://127.0.0.1:8000/auth/profile - Status: 200
+2026-02-01 16:31:00,698 - app.services.scheduler_service - INFO -       Evaluating 1 assertions...
+2026-02-01 16:31:00,700 - app.services.scheduler_service - INFO - 💾 Saving history for Schedule 44, User 1
+2026-02-01 16:31:00,700 - app.services.scheduler_service - INFO -       -> GET http://127.0.0.1:8000/auth/profile [200]
+2026-02-01 16:31:00,701 - app.services.scheduler_service - INFO -       Running Node: Logout (1 calls)
+2026-02-01 16:31:00,704 - app.main - INFO - REQUEST: POST http://127.0.0.1:8000/auth/logout
+2026-02-01 16:31:00,718 - app.routes.auth_routes - INFO - Token 745c19d1-bb94-458d-8954-c49eca6fcf3a blacklisted for user mribelato@gmail.com
+2026-02-01 16:31:00,719 - app.main - INFO - RESPONSE: POST http://127.0.0.1:8000/auth/logout - Status: 200
+2026-02-01 16:31:00,721 - app.services.scheduler_service - INFO - 💾 Saving history for Schedule 44, User 1
+2026-02-01 16:31:00,722 - app.services.scheduler_service - INFO -       -> POST http://127.0.0.1:8000/auth/logout [200]
+2026-02-01 16:31:00,722 - app.services.scheduler_service - INFO -       Running Node: Profile após logaout(Acesso Negado) (1 calls)
+2026-02-01 16:31:00,726 - app.main - INFO - REQUEST: GET http://127.0.0.1:8000/auth/profile
+2026-02-01 16:31:00,732 - app.main - INFO - RESPONSE: GET http://127.0.0.1:8000/auth/profile - Status: 401
+2026-02-01 16:31:00,734 - app.services.scheduler_service - INFO -       Evaluating 1 assertions...
+2026-02-01 16:31:00,735 - app.services.scheduler_service - INFO - 💾 Saving history for Schedule 44, User 1
+2026-02-01 16:31:00,736 - app.services.scheduler_service - INFO -       -> GET http://127.0.0.1:8000/auth/profile [401]
+2026-02-01 16:31:00,749 - app.services.scheduler_service - INFO -   📂 Processing Feature: Produtos (ID: 3)
+2026-02-01 16:31:00,768 - app.services.scheduler_service - INFO -     ▶ Executing Flow: Fluxo Principal (ID: 3) - Cards: 1
+2026-02-01 16:31:00,769 - app.services.scheduler_service - INFO -    ► Executing Flow: Fluxo Principal (ID: 3) - 1 cards
+2026-02-01 16:31:00,769 - app.services.scheduler_service - INFO -       Running Node: Produtos (1 calls)
+2026-02-01 16:31:00,773 - app.main - INFO - REQUEST: POST http://127.0.0.1:8000/auth/login
+2026-02-01 16:31:00,777 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-02-01 16:31:00,777 - app.routes.auth_routes - INFO - Username attempt: mribelato@gmail.com
+2026-02-01 16:31:00,858 - app.routes.auth_routes - INFO - Login successful for user: mribelato@gmail.com
+2026-02-01 16:31:00,858 - app.routes.auth_routes - INFO - Access token generated for: mribelato@gmail.com
+2026-02-01 16:31:00,860 - app.main - INFO - RESPONSE: POST http://127.0.0.1:8000/auth/login - Status: 200
+2026-02-01 16:31:00,861 - app.services.scheduler_service - INFO - 💾 Saving history for Schedule 44, User 1
+2026-02-01 16:31:00,861 - app.services.scheduler_service - INFO -       -> POST http://127.0.0.1:8000/auth/login [200]
+2026-02-01 16:31:00,866 - app.services.scheduler_service - INFO - Suite execution completed. Success: 5, Fail: 0. Status: success
+2026-02-01 16:31:00,877 - app.services.scheduler_service - INFO - Using Product-level webhook for Schedule 44
+2026-02-01 16:31:00,877 - app.services.scheduler_service - INFO - Target URLs for webhook: dadgsfhsdhfjhfasfhsgfshfj
+2026-02-01 16:31:00,877 - app.services.scheduler_service - INFO - Parsed URLs: ['dadgsfhsdhfjhfasfhsgfshfj']
+2026-02-01 16:31:00,877 - app.services.scheduler_service - INFO - Sending webhook to: dadgsfhsdhfjhfasfhsgfshfj
+2026-02-01 16:31:00,878 - app.services.scheduler_service - ERROR - Failed to send webhook to dadgsfhsdhfjhfasfhsgfshfj: Invalid URL 'dadgsfhsdhfjhfasfhsgfshfj': No scheme supplied. Perhaps you meant https://dadgsfhsdhfjhfasfhsgfshfj?
+2026-02-01 16:31:00,878 - apscheduler.executors.default - INFO - Job "execute_job (trigger: date[2026-02-01 16:31:00 -03], next run at: 2026-02-01 16:31:00 -03)" executed successfully
+2026-02-01 16:39:46,632 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/1
+2026-02-01 16:39:46,635 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/1
+2026-02-01 16:39:46,637 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:39:46,639 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:39:46,650 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:39:46,654 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:39:46,704 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:39:46,712 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:39:46,789 - app.main - INFO - Desligando aplicação...
+2026-02-01 16:39:49,367 - app - INFO - Logging configured successfully.
+2026-02-01 16:39:49,545 - app - INFO - Logging configured successfully.
+2026-02-01 16:39:49,613 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-02-01 16:39:49,720 - app.main - INFO - Tabelas verificadas/criadas com sucesso
+2026-02-01 16:39:49,721 - app.main - INFO - Iniciando scheduler...
+2026-02-01 16:39:49,725 - apscheduler.scheduler - INFO - Scheduler started
+2026-02-01 16:39:49,726 - app.services.scheduler_service - INFO - APScheduler started
+2026-02-01 16:39:49,758 - app.main - ERROR - Erro ao iniciar scheduler: type object 'ScheduleModel' has no attribute 'status'
+2026-02-01 16:39:49,765 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-02-01 16:39:49,766 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-02-01 16:39:49,766 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:39:49,767 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:39:49,769 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:39:49,805 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:39:49,808 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:39:49,811 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/environments?project_id=1
+2026-02-01 16:39:49,812 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:39:49,815 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:39:49,818 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:39:49,902 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:39:49,905 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:39:49,914 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:39:50,835 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables/?project_id=1
+2026-02-01 16:39:50,836 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables/?project_id=1 - Status: 200
+2026-02-01 16:39:50,842 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1
+2026-02-01 16:39:50,844 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1 - Status: 307
+2026-02-01 16:39:50,850 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables?project_id=1
+2026-02-01 16:39:50,851 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables?project_id=1 - Status: 200
+2026-02-01 16:39:50,855 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1
+2026-02-01 16:39:50,878 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1 - Status: 200
+2026-02-01 16:39:50,886 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:39:50,889 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:39:50,894 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:39:50,896 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:39:50,910 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:39:50,912 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:39:50,926 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:39:50,947 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:39:50,957 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/flow/load/1
+2026-02-01 16:39:50,958 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:39:50,964 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:39:51,081 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:39:51,097 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:39:51,098 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:39:51,116 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:39:51,131 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:39:51,149 - app.main - INFO - REQUEST: POST http://localhost:8000/auth/login
+2026-02-01 16:39:51,163 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-02-01 16:39:51,164 - app.routes.auth_routes - INFO - Username attempt: mribelato@gmail.com
+2026-02-01 16:39:51,412 - app.routes.auth_routes - INFO - Login successful for user: mribelato@gmail.com
+2026-02-01 16:39:51,413 - app.routes.auth_routes - INFO - Access token generated for: mribelato@gmail.com
+2026-02-01 16:39:51,415 - app.main - INFO - RESPONSE: POST http://localhost:8000/auth/login - Status: 200
+2026-02-01 16:39:51,429 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/variables/2
+2026-02-01 16:39:51,430 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/variables/2 - Status: 200
+2026-02-01 16:39:51,436 - app.main - INFO - REQUEST: PUT http://localhost:8000/variables/2
+2026-02-01 16:39:51,474 - app.main - INFO - RESPONSE: PUT http://localhost:8000/variables/2 - Status: 200
+2026-02-01 16:39:51,485 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/history/
+2026-02-01 16:39:51,487 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/history/ - Status: 200
+2026-02-01 16:39:51,495 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:39:51,554 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:39:51,776 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:39:51,778 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:39:51,784 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:39:51,794 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:39:51,803 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/profile
+2026-02-01 16:39:51,806 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:39:51,811 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:39:51,823 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:39:51,832 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:39:51,867 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:39:52,091 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:39:52,098 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:39:52,109 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:39:52,117 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:39:52,127 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/logout
+2026-02-01 16:39:52,129 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/logout - Status: 200
+2026-02-01 16:39:52,134 - app.main - INFO - REQUEST: POST http://localhost:8000/auth/logout
+2026-02-01 16:39:52,163 - app.routes.auth_routes - INFO - Token 916c5a31-8c47-4847-ba98-e32f14c7d03a blacklisted for user mribelato@gmail.com
+2026-02-01 16:39:52,164 - app.main - INFO - RESPONSE: POST http://localhost:8000/auth/logout - Status: 200
+2026-02-01 16:39:52,173 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:39:52,213 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:39:52,431 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:39:52,434 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:39:52,449 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:39:52,467 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:39:52,481 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:39:52,491 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 401
+2026-02-01 16:39:52,498 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:39:52,532 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:39:53,752 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/flow/load/3
+2026-02-01 16:39:53,753 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/flow/load/3 - Status: 200
+2026-02-01 16:39:53,757 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/3
+2026-02-01 16:39:53,779 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/3 - Status: 200
+2026-02-01 16:39:53,787 - app.main - INFO - REQUEST: GET http://localhost:8000/variables/?project_id=1&environment_id=1
+2026-02-01 16:39:53,789 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables/?project_id=1&environment_id=1 - Status: 307
+2026-02-01 16:39:53,800 - app.main - INFO - REQUEST: GET http://localhost:8000/variables?project_id=1&environment_id=1
+2026-02-01 16:39:53,805 - app.main - INFO - RESPONSE: GET http://localhost:8000/variables?project_id=1&environment_id=1 - Status: 200
+2026-02-01 16:39:53,812 - app.main - INFO - REQUEST: POST http://localhost:8000/auth/login
+2026-02-01 16:39:53,814 - app.routes.auth_routes - INFO - === LOGIN REQUEST ===
+2026-02-01 16:39:53,815 - app.routes.auth_routes - INFO - Username attempt: mribelato@gmail.com
+2026-02-01 16:39:53,896 - app.routes.auth_routes - INFO - Login successful for user: mribelato@gmail.com
+2026-02-01 16:39:53,896 - app.routes.auth_routes - INFO - Access token generated for: mribelato@gmail.com
+2026-02-01 16:39:53,897 - app.main - INFO - RESPONSE: POST http://localhost:8000/auth/login - Status: 200
+2026-02-01 16:39:53,905 - app.main - INFO - REQUEST: POST http://localhost:8000/history/
+2026-02-01 16:39:53,938 - app.main - INFO - RESPONSE: POST http://localhost:8000/history/ - Status: 201
+2026-02-01 16:39:55,280 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/history/?limit=1000&environment_id=1
+2026-02-01 16:39:55,282 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/history/?limit=1000&environment_id=1
+2026-02-01 16:39:55,282 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/history/?limit=1000&environment_id=1 - Status: 200
+2026-02-01 16:39:55,284 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/history/?limit=1000&environment_id=1 - Status: 200
+2026-02-01 16:39:55,287 - app.main - INFO - REQUEST: GET http://localhost:8000/history/?limit=1000&environment_id=1
+2026-02-01 16:39:55,382 - app.main - INFO - RESPONSE: GET http://localhost:8000/history/?limit=1000&environment_id=1 - Status: 200
+2026-02-01 16:39:55,393 - app.main - INFO - REQUEST: GET http://localhost:8000/history/?limit=1000&environment_id=1
+2026-02-01 16:39:55,449 - app.main - INFO - RESPONSE: GET http://localhost:8000/history/?limit=1000&environment_id=1 - Status: 200
+2026-02-01 16:40:00,214 - app.main - INFO - Desligando aplicação...
+2026-02-01 16:40:03,291 - app - INFO - Logging configured successfully.
+2026-02-01 16:40:03,621 - app - INFO - Logging configured successfully.
+2026-02-01 16:40:03,740 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-02-01 16:40:04,033 - app.main - INFO - Tabelas verificadas/criadas com sucesso
+2026-02-01 16:40:04,034 - app.main - INFO - Iniciando scheduler...
+2026-02-01 16:40:04,044 - apscheduler.scheduler - INFO - Scheduler started
+2026-02-01 16:40:04,045 - app.services.scheduler_service - INFO - APScheduler started
+2026-02-01 16:40:04,266 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:40:04,275 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 14:02:00 -03], next run at: 2026-02-01 14:02:00 -03)" was missed by 2:38:04.275739
+2026-02-01 16:40:04,276 - apscheduler.scheduler - INFO - Removed job 41
+2026-02-01 16:40:04,287 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:40:04,289 - apscheduler.scheduler - INFO - Removed job 43
+2026-02-01 16:40:04,289 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 16:01:00 -03], next run at: 2026-02-01 16:01:00 -03)" was missed by 0:39:04.289565
+2026-02-01 16:40:04,293 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:40:04,294 - apscheduler.scheduler - INFO - Removed job 44
+2026-02-01 16:40:04,294 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 16:31:00 -03], next run at: 2026-02-01 16:31:00 -03)" was missed by 0:09:04.294746
+2026-02-01 16:40:27,284 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/
+2026-02-01 16:40:27,290 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:40:27,291 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/
+2026-02-01 16:40:27,299 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/ - Status: 200
+2026-02-01 16:40:27,307 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/ - Status: 200
+2026-02-01 16:40:27,315 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:40:27,428 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:40:27,441 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:40:27,455 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:40:27,460 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:40:27,468 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:40:27,472 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:40:27,478 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:40:27,577 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:40:27,584 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:40:27,602 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:45:00,980 - app.main - INFO - Desligando aplicação...
+2026-02-01 16:45:03,559 - app - INFO - Logging configured successfully.
+2026-02-01 16:45:03,707 - app - INFO - Logging configured successfully.
+2026-02-01 16:45:03,771 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-02-01 16:45:04,034 - app.main - INFO - Tabelas verificadas/criadas com sucesso
+2026-02-01 16:45:04,034 - app.main - INFO - Iniciando scheduler...
+2026-02-01 16:45:04,039 - apscheduler.scheduler - INFO - Scheduler started
+2026-02-01 16:45:04,040 - app.services.scheduler_service - INFO - APScheduler started
+2026-02-01 16:45:04,084 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:45:04,087 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 14:02:00 -03], next run at: 2026-02-01 14:02:00 -03)" was missed by 2:43:04.087186
+2026-02-01 16:45:04,088 - apscheduler.scheduler - INFO - Removed job 41
+2026-02-01 16:45:04,093 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:45:04,094 - apscheduler.scheduler - INFO - Removed job 43
+2026-02-01 16:45:04,095 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 16:01:00 -03], next run at: 2026-02-01 16:01:00 -03)" was missed by 0:44:04.095103
+2026-02-01 16:45:04,098 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:45:04,099 - apscheduler.scheduler - INFO - Removed job 44
+2026-02-01 16:45:04,099 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 16:31:00 -03], next run at: 2026-02-01 16:31:00 -03)" was missed by 0:14:04.099462
+2026-02-01 16:47:46,308 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:47:46,369 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:47:46,476 - app.main - INFO - Desligando aplicação...
+2026-02-01 16:47:51,232 - app - INFO - Logging configured successfully.
+2026-02-01 16:47:51,731 - app - INFO - Logging configured successfully.
+2026-02-01 16:47:51,934 - app.main - INFO - === INICIANDO API QA-WORKFLOW ===
+2026-02-01 16:47:52,208 - app.main - INFO - Tabelas verificadas/criadas com sucesso
+2026-02-01 16:47:52,209 - app.main - INFO - Iniciando scheduler...
+2026-02-01 16:47:52,220 - apscheduler.scheduler - INFO - Scheduler started
+2026-02-01 16:47:52,221 - app.services.scheduler_service - INFO - APScheduler started
+2026-02-01 16:47:52,396 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:47:52,403 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 14:02:00 -03], next run at: 2026-02-01 14:02:00 -03)" was missed by 2:45:52.403329
+2026-02-01 16:47:52,405 - apscheduler.scheduler - INFO - Removed job 41
+2026-02-01 16:47:52,420 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:47:52,421 - apscheduler.scheduler - INFO - Removed job 43
+2026-02-01 16:47:52,421 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 16:01:00 -03], next run at: 2026-02-01 16:01:00 -03)" was missed by 0:46:52.421870
+2026-02-01 16:47:52,430 - apscheduler.scheduler - INFO - Added job "execute_job" to job store "default"
+2026-02-01 16:47:52,432 - apscheduler.scheduler - INFO - Removed job 44
+2026-02-01 16:47:52,433 - apscheduler.executors.default - WARNING - Run time of job "execute_job (trigger: date[2026-02-01 16:31:00 -03], next run at: 2026-02-01 16:31:00 -03)" was missed by 0:16:52.433351
+2026-02-01 16:47:52,462 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:47:52,463 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:47:52,586 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:47:52,748 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:47:52,754 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:47:52,769 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:47:52,793 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:47:52,796 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:47:52,809 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:47:52,819 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:47:54,768 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:47:54,772 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:47:54,789 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:47:54,793 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:47:54,795 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:47:54,797 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:47:54,810 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:47:54,815 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:47:54,815 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:47:54,824 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:47:54,827 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:47:54,833 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:47:55,971 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:47:55,973 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:47:55,982 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:47:55,987 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:47:55,991 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:47:55,997 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:47:56,000 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:47:56,007 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:47:56,009 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:47:56,019 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:47:56,022 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:47:56,026 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:47:56,035 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:47:56,116 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:47:56,118 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:47:56,123 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:48:00,610 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:48:00,612 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:48:00,639 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:48:00,644 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:48:00,663 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:48:00,675 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:48:00,692 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:48:00,695 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:48:00,699 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:48:00,701 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:48:00,710 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:48:00,721 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:48:02,226 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:48:02,235 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:48:05,985 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:48:05,996 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:48:06,004 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:48:06,013 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:48:06,018 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:48:06,023 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:48:06,027 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:48:06,036 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:48:06,039 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:48:06,044 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:48:06,047 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:48:06,053 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:48:06,057 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:48:06,061 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:48:06,064 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:48:06,069 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:48:07,588 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:48:07,592 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:50:52,896 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/environments?project_id=1
+2026-02-01 16:50:52,897 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:50:52,902 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:50:52,911 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:52:43,847 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/profile
+2026-02-01 16:52:43,849 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/flow/load/1
+2026-02-01 16:52:43,850 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/profile
+2026-02-01 16:52:43,850 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/flow/load/1
+2026-02-01 16:52:43,852 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:43,853 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:52:43,854 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:43,854 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:52:43,857 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/profile
+2026-02-01 16:52:43,861 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:43,863 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/auth/profile
+2026-02-01 16:52:43,863 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:52:43,867 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:52:43,868 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:43,883 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:43,891 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:52:43,902 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:52:43,906 - app.main - INFO - REQUEST: GET http://localhost:8000/flow/load/1
+2026-02-01 16:52:43,906 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:43,910 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:52:43,918 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:43,921 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:52:43,926 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:43,942 - app.main - INFO - RESPONSE: GET http://localhost:8000/flow/load/1 - Status: 200
+2026-02-01 16:52:45,438 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:52:45,458 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:52:49,313 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/
+2026-02-01 16:52:49,315 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/
+2026-02-01 16:52:49,316 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/ - Status: 200
+2026-02-01 16:52:49,319 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/ - Status: 200
+2026-02-01 16:52:49,322 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:52:49,326 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:52:49,346 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:49,351 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:52:49,353 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:52:49,358 - app.main - INFO - REQUEST: GET http://localhost:8000/products/
+2026-02-01 16:52:49,370 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:49,378 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:52:49,384 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/ - Status: 200
+2026-02-01 16:52:49,392 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:49,397 - app.main - INFO - REQUEST: GET http://localhost:8000/auth/profile
+2026-02-01 16:52:49,404 - app.main - INFO - RESPONSE: GET http://localhost:8000/auth/profile - Status: 200
+2026-02-01 16:52:50,872 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/1
+2026-02-01 16:52:50,877 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:52:50,878 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/products/1
+2026-02-01 16:52:50,901 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:52:50,903 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:52:50,913 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:52:50,918 - app.main - INFO - REQUEST: GET http://localhost:8000/products/1
+2026-02-01 16:52:50,927 - app.main - INFO - REQUEST: OPTIONS http://localhost:8000/features/?product_id=1
+2026-02-01 16:52:50,928 - app.main - INFO - RESPONSE: OPTIONS http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:52:50,931 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:52:50,933 - app.main - INFO - RESPONSE: GET http://localhost:8000/products/1 - Status: 200
+2026-02-01 16:52:50,944 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:52:50,947 - app.main - INFO - REQUEST: GET http://localhost:8000/features/?product_id=1
+2026-02-01 16:52:50,952 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:52:50,961 - app.main - INFO - RESPONSE: GET http://localhost:8000/features/?product_id=1 - Status: 200
+2026-02-01 16:52:50,963 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200
+2026-02-01 16:52:50,968 - app.main - INFO - REQUEST: GET http://localhost:8000/environments?project_id=1
+2026-02-01 16:52:50,974 - app.main - INFO - RESPONSE: GET http://localhost:8000/environments?project_id=1 - Status: 200

@@ -19,14 +19,14 @@ class ScheduleModel(Base):
     notification_urls = Column(String(500), nullable=True) # Webhooks (comma separated or single)
     
     notifications_enabled = Column(Boolean, default=True)
-    status = Column(String(20), default="active")  # 'active', 'paused', 'completed'
+    status = Column(String(20), default="active", index=True)  # 'active', 'paused', 'completed'
     last_run = Column(DateTime, nullable=True)
     last_run_status = Column(String(20), nullable=True)  # 'success', 'failure'
     next_run = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Multi-tenancy
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
 
     # Relationship
     environment = relationship("Environment", back_populates="schedules")
