@@ -6,6 +6,8 @@ class ProductBase(BaseModel):
     name: str
     description: Optional[str] = None
     image_url: Optional[str] = None
+    notification_urls: Optional[str] = None
+    channel_type: Optional[str] = 'webhook'
 
 class ProductCreate(ProductBase):
     pass

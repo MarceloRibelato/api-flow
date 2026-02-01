@@ -12,11 +12,17 @@ from app.models.product_models import ProductModel
 class FlowService:
     @staticmethod
     def _verify_project_ownership(db: Session, project_id: int, company_id: int):
-        # project_id == feature_id
+        print(f"🔍 Checking Ownership: Feature {project_id} vs Company {company_id}")
         feature = db.query(FeatureModel).join(ProductModel).filter(
             FeatureModel.id == project_id, 
             ProductModel.company_id == company_id
         ).first()
+        
+        if feature:
+             print(f"✅ Ownership OK: Feature {feature.id} belongs to Product {feature.product_id} (Company {company_id})")
+        else:
+             print(f"❌ Ownership Check Failed: Project/Feature {project_id} not found for Company {company_id}")
+        
         return feature is not None
 
     @staticmethod

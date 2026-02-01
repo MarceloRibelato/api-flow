@@ -12,6 +12,7 @@ class CompanyDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
     cnpj = Column(String(20), unique=True, index=True, nullable=True)
+    default_notification_urls = Column(String(500), nullable=True) # Global webhook URL
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships

@@ -20,6 +20,7 @@ class ExecutionHistoryBase(BaseModel):
     project_id: Optional[int] = None
     flow_id: Optional[int] = None
     schedule_id: Optional[int] = None  # Added schedule_id
+    feature_name: Optional[str] = None # Added feature_name
     node_name: Optional[str] = None  # Added node_name for functional grouping
     method: str
     url: str
@@ -56,6 +57,7 @@ class ExecutionHistoryResponse(ExecutionHistoryBase):
 class ExecutionHistorySummary(BaseModel):
     id: int
     execution_id: str
+    feature_name: Optional[str] = None # Added feature_name
     method: str
     url: str
     status_code: int

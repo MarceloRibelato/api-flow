@@ -16,7 +16,9 @@ class ScheduleModel(Base):
     # Scheduling details
     cron_expression = Column(String(100), nullable=True)  # e.g. "0 9 * * *" for daily at 9am
     run_at = Column(DateTime, nullable=True)  # Single execution time
+    notification_urls = Column(String(500), nullable=True) # Webhooks (comma separated or single)
     
+    notifications_enabled = Column(Boolean, default=True)
     status = Column(String(20), default="active")  # 'active', 'paused', 'completed'
     last_run = Column(DateTime, nullable=True)
     last_run_status = Column(String(20), nullable=True)  # 'success', 'failure'

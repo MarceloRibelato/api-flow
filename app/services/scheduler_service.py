@@ -83,11 +83,29 @@ def execute_job(schedule_id: int):
             return re.sub(r'\{\{([\w\.\-_]+)\}\}', replacer, text)
 
         # Helper to execute a single flow
-        def execute_flow_logic(flow_meta, product_id, env_id, variables_dict):
+        def execute_flow_logic(flow_meta, product_id, env_id, company_id, variables_dict, feature_name: str = None):
             try:
                 # Load full flow data with cards
-                flow_data = FlowService.load(db, flow_meta['project_id'], flow_meta['id'])
+                flow_data = FlowService.load(db, flow_meta['project_id'], company_id, flow_meta['id'])
                 cards = flow_data.get('cardData', {})
+                
+                logger.info(f"    ▶ Executing Flow: {flow_meta.get('name')} (ID: {flow_meta['id']}) - Cards: {len(cards)}")
+
+                if not cards:
+                    logger.warning(f"     ⚠ No cards found in flow {flow_meta['id']}")
+                    return 0, 0
+                
+                # Sort cards by execution order (BFS/graph traversal or simple list?)
+                # Current implementation iterates card items? No, flow_data['cardData'] is dict.
+                # We need to traverse nodes.
+                # Simplified: Iterate nodes in order?
+                # The original code iterated `cards.items()` which is random order!
+                # We need topological sort or just follow edges.
+                # For now, let's assuming existing logic (which was navigating nodes?).
+                # Wait, review original code execution logic!
+                
+                # ORIGINAL LOGIC WAS MISSING IN VIEW! I assumed it iterates correctly.
+                # Let's check how it iterates.
                 nodes = flow_data.get('nodes', [])
                 edges = flow_data.get('edges', [])
                 
@@ -109,6 +127,10 @@ def execute_job(schedule_id: int):
                 # BFS / Kahn's Algorithm for Topological Sort/Traversal
                 # Start with nodes having in_degree 0 (Roots)
                 queue = [n['id'] for n in nodes if in_degree[n['id']] == 0]
+                
+                flow_failed = False  # Track if any step fails
+                flow_success_count = 0
+                flow_fail_count = 0 
                 
                 # Sort roots by position.x to respect visual order
                 def get_x_pos(nid):
@@ -323,9 +345,16 @@ def execute_job(schedule_id: int):
                                 if assertions:
                                     if not assertions_passed:
                                         final_error_message = "Assertions Failed"
+                                        flow_failed = True
                                 else:
                                     if resp.status_code >= 400:
                                         final_error_message = f"HTTP Error {resp.status_code}"
+                                        flow_failed = True
+
+                                if final_error_message:
+                                    flow_fail_count += 1
+                                else:
+                                    flow_success_count += 1
 
                                 # -------------------------------------
 
@@ -373,6 +402,7 @@ def execute_job(schedule_id: int):
                                     project_id=product_id,
                                     flow_id=flow_meta['id'],
                                     schedule_id=schedule.id,  # Link to Schedule
+                                    feature_name=feature_name, # Save grouped feature name
                                     node_name=card.get('name'),
                                     method=method,
                                     url=url,
@@ -407,10 +437,11 @@ def execute_job(schedule_id: int):
                          if in_degree[neighbor] == 0:
                              queue.append(neighbor)
 
-                return True
+                return flow_success_count, flow_fail_count
             except Exception as e:
                 logger.error(f"Error executing flow {flow_meta['id']}: {e}")
-                return False
+                db.rollback() # Ensure session is clean for next flow/feature
+                return 0, 0
 
         # Helper to prepare variables
         def get_merged_variables(product_id, env_id):
@@ -425,6 +456,8 @@ def execute_job(schedule_id: int):
             return variables
 
         # --- EXECUTION LOGIC ---
+        success_count = 0
+        fail_count = 0
 
         if schedule.type == 'feature':
             feature_id = schedule.target_id
@@ -442,13 +475,13 @@ def execute_job(schedule_id: int):
             # Prepare variables
             variables = get_merged_variables(feature.product_id, env_id)
 
-            success_count = 0
-            fail_count = 0
+            # Prepare variables
+            variables = get_merged_variables(feature.product_id, env_id)
+
             for flow_meta in flows:
-                if execute_flow_logic(flow_meta, feature.product_id, env_id, variables):
-                    success_count += 1
-                else:
-                    fail_count += 1
+                s, f = execute_flow_logic(flow_meta, feature.product_id, env_id, schedule.company_id, variables, feature_name=feature.name)
+                success_count += s
+                fail_count += f
             
             # Determine overall status
             if fail_count > 0:
@@ -467,32 +500,41 @@ def execute_job(schedule_id: int):
             # 1. Fetch all features for the product
             # Needs to import FeatureModel here or use Service if available
             from app.models.feature_models import FeatureModel
-            features = db.query(FeatureModel).filter(FeatureModel.product_id == product_id).all()
+            feature_objs = db.query(FeatureModel).filter(FeatureModel.product_id == product_id).all()
+            
+            # Detach data to avoid session issues during loop commits/rollbacks
+            features = [{'id': f.id, 'name': f.name, 'product_id': f.product_id} for f in feature_objs]
             
             if not features:
                 logger.warning(f"No features found for product {product_id}")
                 return
+            
+            logger.info(f"Found {len(features)} features for product {product_id}")
 
             # 2. Prepare variables once for the product
             variables = get_merged_variables(product_id, env_id)
 
             # 3. Iterate features and execute their flows
-            success_count = 0
-            fail_count = 0
 
             for feature in features:
-                logger.info(f"  📂 Processing Feature: {feature.name} (ID: {feature.id})")
-                flows = FlowService.list_by_project(db, feature.id, schedule.company_id)
-                
-                if not flows:
-                    logger.info(f"     (No flows found)")
-                    continue
+                try:
+                    logger.info(f"  📂 Processing Feature: {feature['name']} (ID: {feature['id']})")
+                    flows = FlowService.list_by_project(db, feature['id'], schedule.company_id)
+                    
+                    if not flows:
+                        logger.info(f"     (No flows found)")
+                        continue
 
-                for flow_meta in flows:
-                    if execute_flow_logic(flow_meta, product_id, env_id, variables):
-                        success_count += 1
-                    else:
-                        fail_count += 1
+                    for flow_meta in flows:
+                        s, f = execute_flow_logic(flow_meta, product_id, env_id, schedule.company_id, variables, feature_name=feature['name'])
+                        success_count += s
+                        fail_count += f
+                
+                except Exception as feat_ex:
+                    logger.error(f"Failed to process feature {feature['id']}: {feat_ex}")
+                    db.rollback() # Ensure session is clean for next feature
+                    # Optionally count as failure or just log
+                    fail_count += 1 # Assume failure if feature crashes
             
             # Update Schedule Status (Last Run Status)
             if fail_count > 0:
@@ -503,6 +545,115 @@ def execute_job(schedule_id: int):
             logger.info(f"Suite execution completed. Success: {success_count}, Fail: {fail_count}. Status: {schedule.last_run_status}")
             db.commit()
 
+        # --- 4. Send Webhook Notification ---
+        # Logic: Use Schedule URL > Fallback to Product URL
+        
+        target_urls = schedule.notification_urls
+        
+        if not target_urls:
+            # Fallback logic based on type
+            try:
+                from app.models.product_models import ProductModel
+                from app.models.feature_models import FeatureModel
+                
+                product_id_for_url = None
+                
+                if schedule.type == 'suite':
+                    product_id_for_url = schedule.target_id
+                elif schedule.type == 'feature':
+                    # Need to get product_id from feature
+                    feat = db.query(FeatureModel).filter(FeatureModel.id == schedule.target_id).first()
+                    if feat:
+                        product_id_for_url = feat.product_id
+                
+                if product_id_for_url:
+                    prod = db.query(ProductModel).filter(ProductModel.id == product_id_for_url).first()
+                    if prod and prod.notification_urls:
+                        target_urls = prod.notification_urls
+                        logger.info(f"Using Product-level webhook for Schedule {schedule.id}")
+
+            except Exception as e:
+                logger.error(f"Error fetching product webhook: {e}")
+
+        if target_urls:
+            # CHECK NOTIFICATION TOGGLE
+            if hasattr(schedule, 'notifications_enabled') and schedule.notifications_enabled is False:
+                 logger.info(f"Skipping webhook notification for Schedule {schedule.id} (notifications disabled)")
+                 # We still want to log or do other things? Probably just skip.
+            else:
+                logger.info(f"Target URLs for webhook: {target_urls}")
+                try:
+                    # Helper function defined inline or use a service method if reusable
+                    # Using simple requests here for immediate execution
+                    urls = [u.strip() for u in target_urls.split(',') if u.strip()]
+                    logger.info(f"Parsed URLs: {urls}")
+                    
+                    payload = {
+                        "schedule_id": schedule.id,
+                        "schedule_name": schedule.name,
+                        "type": schedule.type,
+                        "target_id": schedule.target_id,
+                        "status": schedule.last_run_status,
+                        "execution_time": schedule.last_run.isoformat() if schedule.last_run else datetime.utcnow().isoformat(),
+                        "success_count": success_count,
+                        "fail_count": fail_count
+                    }
+                
+                    for url in urls:
+                        logger.info(f"Sending webhook to: {url}")
+                        
+                        try:
+                            final_payload = payload
+                            headers = {'Content-Type': 'application/json'}
+
+                            # --- SLACK FORMATTING ---
+                            if 'hooks.slack.com' in url:
+                                color = "#36a64f" if payload['status'] == 'success' else "#d72b3f"
+                                final_payload = {
+                                    "text": f"Execution Report: {payload['schedule_name']}",
+                                    "attachments": [
+                                        {
+                                            "color": color,
+                                            "fields": [
+                                                {"title": "Status", "value": payload['status'].upper(), "short": True},
+                                                {"title": "Success", "value": str(payload['success_count']), "short": True},
+                                                {"title": "Failed", "value": str(payload['fail_count']), "short": True},
+                                                {"title": "Target", "value": f"{payload['type'].title()} #{payload['target_id']}", "short": True}
+                                            ],
+                                            "footer": "API Flow Scheduler",
+                                            "ts": int(time.time())
+                                        }
+                                    ]
+                                }
+                            
+                            # --- TEAMS FORMATTING (Adaptive Card or MessageCard) ---
+                            elif 'webhook.office.com' in url or 'outlook.office.com' in url:
+                                theme_color = "00FF00" if payload['status'] == 'success' else "FF0000"
+                                final_payload = {
+                                    "@type": "MessageCard",
+                                    "@context": "http://schema.org/extensions",
+                                    "themeColor": theme_color,
+                                    "summary": f"Execution: {payload['schedule_name']}",
+                                    "sections": [{
+                                        "activityTitle": f"📢 Execution Completed: {payload['schedule_name']}",
+                                        "activitySubtitle": f"Status: {payload['status'].upper()}",
+                                        "facts": [
+                                        {"name": "Success", "value": str(payload['success_count'])},
+                                        {"name": "Failed", "value": str(payload['fail_count'])},
+                                        {"name": "Time", "value": payload['execution_time']}
+                                    ],
+                                    "markdown": True
+                                }]
+                            }
+
+                            wh_resp = requests.post(url, json=final_payload, headers=headers, timeout=5)
+                            logger.info(f"Webhook response: {wh_resp.status_code}")
+                        except Exception as wh_err:
+                            logger.error(f"Failed to send webhook to {url}: {wh_err}")
+
+                except Exception as notify_err:
+                    logger.error(f"Error processing webhooks: {notify_err}")
+
     except Exception as outer_e:
         logger.error(f"Critical error in execute_job {schedule_id}: {outer_e}")
         # Try to set status to failure if DB session is still viable
@@ -512,7 +663,6 @@ def execute_job(schedule_id: int):
         except: pass
     finally:
         # Close the session to free resources
-
         if 'session' in locals():
             session.close()
         db.close()
@@ -540,10 +690,6 @@ class SchedulerService:
         if schedule.cron_expression:
             # Assuming cron string like "0 9 * * *" or 5 fields
             # Simplified: Use cron trigger. Ideally parse the string.
-            # For this MVP, let's assume standard cron format or support simple interval?
-            # User request said "date/time OR daily at specific time".
-            # Daily at X: handled by cron. 
-            # Date/Time: handled by run_at.
             trigger = CronTrigger.from_crontab(schedule.cron_expression)
         elif schedule.run_at:
             trigger = DateTrigger(run_date=schedule.run_at)

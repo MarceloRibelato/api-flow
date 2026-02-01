@@ -10,6 +10,8 @@ class ProductModel(Base):
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
     image_url = Column(Text, nullable=True)
+    notification_urls = Column(Text, nullable=True) # Webhook URLs for this product
+    channel_type = Column(String(50), default='webhook', nullable=True) # webhook, teams, slack
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

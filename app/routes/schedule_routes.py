@@ -20,6 +20,8 @@ class ScheduleCreate(BaseModel):
     environment_id: Optional[int] = None
     cron_expression: Optional[str] = None
     run_at: Optional[datetime] = None
+    notification_urls: Optional[str] = None
+    notifications_enabled: bool = True
 
 class ScheduleOut(BaseModel):
     id: int
@@ -29,6 +31,8 @@ class ScheduleOut(BaseModel):
     environment_id: Optional[int]
     cron_expression: Optional[str]
     run_at: Optional[datetime]
+    notification_urls: Optional[str]
+    notifications_enabled: bool
     status: str
     last_run: Optional[datetime]
     last_run_status: Optional[str] = None
@@ -53,6 +57,8 @@ def create_schedule(schedule_in: ScheduleCreate, db: Session = Depends(get_db), 
         environment_id=schedule_in.environment_id,
         cron_expression=schedule_in.cron_expression,
         run_at=schedule_in.run_at,
+        notification_urls=schedule_in.notification_urls,
+        notifications_enabled=schedule_in.notifications_enabled,
         status="active",
         user_id=current_user.id,
         company_id=current_user.company_id # Assign Company

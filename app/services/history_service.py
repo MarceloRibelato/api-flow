@@ -34,6 +34,7 @@ class HistoryService:
             api_name=history.api_name,  # Added mapping
             project_id=history.project_id,
             schedule_id=history.schedule_id,  # Ensure this is saved
+            feature_name=history.feature_name, # Added feature_name
             flow_id=history.flow_id,
             node_name=history.node_name,
             method=history.method,
