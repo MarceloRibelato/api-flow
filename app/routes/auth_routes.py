@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
 from app.models.user_models import UserDB
-from app.schemas.auth_schemas import Token, UserCreate, UserUpdate
+from app.schemas.auth_schemas import Token, UserCreate, UserUpdate, LoginRequest
 from app.services.auth_service import AuthService
 
 # Logger acquisition (inherited config)
@@ -15,57 +15,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-
-
-from datetime import datetime
-from jose import jwt
-from app.auth import SECRET_KEY, ALGORITHM, oauth2_scheme
-from app.models.auth_models import BlacklistedToken
-
-@router.post("/logout")
-def logout(
-    current_user: UserDB = Depends(get_current_user), 
-    token: str = Depends(oauth2_scheme), 
-    db: Session = Depends(get_db)
-):
-    """
-    Invalida o token atual adicionando-o à blacklist.
-    """
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        jti = payload.get("jti")
-        exp = payload.get("exp")
-        
-        if jti and exp:
-            expiration_dt = datetime.fromtimestamp(exp)
-            blacklisted = BlacklistedToken(
-                jti=jti,
-                user_id=current_user.id,
-                expiration=expiration_dt
-            )
-            db.add(blacklisted)
-            db.commit()
-            logger.info(f"Token {jti} blacklisted for user {current_user.username}")
-            
-    except Exception as e:
-        logger.error(f"Error blacklisting token: {e}")
-        # Even if error, we return success to frontend so it clears local state
-        
-    return {"msg": "Logout realizado com sucesso"}
-
-
 @router.post("/login", response_model=Token)
 def login(
-    form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
+    login_data: LoginRequest, db: Session = Depends(get_db)
 ):
     """
-    Endpoint para autenticação. Recebe dados via Form (padrão OAuth2).
+    Endpoint para autenticação via JSON.
     Retorna o token JWT (Bearer) se as credenciais forem válidas.
     """
     logger.info("=== LOGIN REQUEST ===")
-    logger.info(f"Username attempt: {form_data.username}")
+    logger.info(f"Username attempt: {login_data.username}")
 
-    user = AuthService.authenticate_user(db, form_data.username, form_data.password)
+    user = AuthService.authenticate_user(db, login_data.username, login_data.password)
 
     if not user:
         # logger.warning(f"Login failed for user: {form_data.username}")
@@ -82,10 +43,18 @@ def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    logger.info(f"Login successful for user: {form_data.username}")
+    logger.info(f"Login successful for user: {login_data.username}")
     logger.info(f"Access token generated for: {user.username}")
 
     return AuthService.create_token_response(user)
+
+
+@router.post("/logout")
+def logout():
+    """
+    Realiza o logout do usuário (Front-end deve descartar o token).
+    """
+    return {"msg": "Logout realizado com sucesso"}
 
 
 @router.post("/create")

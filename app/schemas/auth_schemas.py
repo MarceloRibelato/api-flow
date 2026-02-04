@@ -17,6 +17,11 @@ class UserCreate(UserBase):
     password: str
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[EmailStr] = None
@@ -38,6 +43,7 @@ class UserResponse(UserBase):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    role: Optional[str] = None
 
 class UserApprove(BaseModel):
     role: str

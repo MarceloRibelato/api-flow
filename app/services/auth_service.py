@@ -128,6 +128,7 @@ class AuthService:
         return {
             "access_token": access_token,
             "token_type": "bearer",
+            "role": user.role
         }
 
     # Format helpers moved to static methods or utility, but kept here for simplicity if needed by response

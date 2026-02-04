@@ -24,7 +24,6 @@ def get_db():
 def execute_job(schedule_id: int):
     """
     Callback function executed by the scheduler.
-    Fetches the schedule details and triggers the actual test execution.
     """
     logger.info(f"Executing scheduled job: {schedule_id}")
     db = SessionLocal()
@@ -56,17 +55,7 @@ def execute_job(schedule_id: int):
         # CRITICAL FIX: Disable proxy detection (can cause 1-2s delay on Windows)
         session.trust_env = False
 
-        # Helper to prepare variables
-        def get_merged_variables(product_id, env_id):
-            global_vars = VariableService.get_all(db, product_id, environment_id=None)
-            env_vars = []
-            if env_id:
-                env_vars = VariableService.get_all(db, product_id, environment_id=env_id)
-            
-            variables = {v.name: v for v in global_vars}
-            for v in env_vars:
-                variables[v.name] = v
-            return variables
+
 
         # --- EXECUTION LOGIC ---
         success_count = 0
@@ -76,33 +65,27 @@ def execute_job(schedule_id: int):
             feature_id = schedule.target_id
             env_id = schedule.environment_id
             logger.info(f"🚀 Running Scheduled Feature {feature_id} in Env {env_id}")
-
-            feature = FeatureService.get_by_id(db, feature_id, schedule.company_id)
-            if not feature:
-                logger.error(f"Feature {feature_id} not found")
-                return
-
-            # Fix: list_by_project uses project_id which corresponds to Feature ID in FlowDB
-            flows = FlowService.list_by_project(db, feature.id, schedule.company_id)
             
-            # Prepare variables
-            variables = get_merged_variables(feature.product_id, env_id)
+            s, f = FlowExecutorService.execute_feature_group(db, feature_id, env_id, schedule.company_id, schedule_id=schedule.id, user_id=schedule.user_id)
+            success_count = s
+            fail_count = f
 
-            # Prepare variables
-            variables = get_merged_variables(feature.product_id, env_id)
-
-            for flow_meta in flows:
-                s, f = FlowExecutorService.execute_flow_logic(db, flow_meta, feature.product_id, env_id, schedule.company_id, variables, feature_name=feature.name, schedule_id=schedule.id, user_id=schedule.user_id if schedule.user_id else 1)
-                success_count += s
-                fail_count += f
-            
             # Determine overall status
-            if fail_count > 0:
-                schedule.last_run_status = 'failure'
-            else:
-                schedule.last_run_status = 'success'
+            schedule.last_run_status = 'failure' if fail_count > 0 else 'success'
+            db.commit()
+
+
+        elif schedule.type == 'flow':
+            flow_id = schedule.target_id
+            env_id = schedule.environment_id
+            logger.info(f"🚀 Running Scheduled Flow {flow_id} in Env {env_id}")
             
-            logger.info(f"Feature execution completed. Success: {success_count}, Fail: {fail_count}. Status: {schedule.last_run_status}")
+            s, f = FlowExecutorService.execute_flow_by_id(db, flow_id, env_id, schedule.company_id, schedule_id=schedule.id, user_id=schedule.user_id)
+            success_count = s
+            fail_count = f
+
+            # Determine overall status
+            schedule.last_run_status = 'failure' if fail_count > 0 else 'success'
             db.commit()
 
         elif schedule.type == 'suite':
@@ -110,52 +93,12 @@ def execute_job(schedule_id: int):
             env_id = schedule.environment_id
             logger.info(f"🚀 Running Scheduled Suite (Product) {product_id} in Env {env_id}")
             
-            # 1. Fetch all features for the product
-            # Needs to import FeatureModel here or use Service if available
-            from app.models.feature_models import FeatureModel
-            feature_objs = db.query(FeatureModel).filter(FeatureModel.product_id == product_id).all()
+            s, f = FlowExecutorService.execute_suite(db, product_id, env_id, schedule.company_id, schedule_id=schedule.id, user_id=schedule.user_id)
+            success_count = s
+            fail_count = f
             
-            # Detach data to avoid session issues during loop commits/rollbacks
-            features = [{'id': f.id, 'name': f.name, 'product_id': f.product_id} for f in feature_objs]
-            
-            if not features:
-                logger.warning(f"No features found for product {product_id}")
-                return
-            
-            logger.info(f"Found {len(features)} features for product {product_id}")
-
-            # 2. Prepare variables once for the product
-            variables = get_merged_variables(product_id, env_id)
-
-            # 3. Iterate features and execute their flows
-
-            for feature in features:
-                try:
-                    logger.info(f"  📂 Processing Feature: {feature['name']} (ID: {feature['id']})")
-                    flows = FlowService.list_by_project(db, feature['id'], schedule.company_id)
-                    
-                    if not flows:
-                        logger.info(f"     (No flows found)")
-                        continue
-
-                    for flow_meta in flows:
-                        s, f = FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, schedule.company_id, variables, feature_name=feature['name'], schedule_id=schedule.id, user_id=schedule.user_id if schedule.user_id else 1)
-                        success_count += s
-                        fail_count += f
-                
-                except Exception as feat_ex:
-                    logger.error(f"Failed to process feature {feature['id']}: {feat_ex}")
-                    db.rollback() # Ensure session is clean for next feature
-                    # Optionally count as failure or just log
-                    fail_count += 1 # Assume failure if feature crashes
-            
-            # Update Schedule Status (Last Run Status)
-            if fail_count > 0:
-                schedule.last_run_status = 'failure'
-            else:
-                schedule.last_run_status = 'success'
-            
-            logger.info(f"Suite execution completed. Success: {success_count}, Fail: {fail_count}. Status: {schedule.last_run_status}")
+            # Update Schedule Status
+            schedule.last_run_status = 'failure' if fail_count > 0 else 'success'
             db.commit()
 
         # --- 4. Send Webhook Notification ---
@@ -178,6 +121,14 @@ def execute_job(schedule_id: int):
                     feat = db.query(FeatureModel).filter(FeatureModel.id == schedule.target_id).first()
                     if feat:
                         product_id_for_url = feat.product_id
+                elif schedule.type == 'flow':
+                    # Need to get product_id from flow -> feature -> product
+                    from app.models.flow_models import FlowDB
+                    flow_obj = db.query(FlowDB).filter(FlowDB.id == schedule.target_id).first()
+                    if flow_obj:
+                         feat = db.query(FeatureModel).filter(FeatureModel.id == flow_obj.project_id).first()
+                         if feat:
+                            product_id_for_url = feat.product_id
                 
                 if product_id_for_url:
                     prod = db.query(ProductModel).filter(ProductModel.id == product_id_for_url).first()

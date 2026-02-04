@@ -20,6 +20,11 @@ from app.routes.feature_routes import router as feature_router
 from app.routes.product_routes import router as product_router
 from app.routes.variable_routes import router as variable_router
 from app.routes.schedule_routes import router as schedule_router
+from app.routes.capture_routes import router as capture_router
+from app.routes.capture_routes import router as capture_router
+from app.routes.analysis_routes import router as analysis_router
+from app.routes.agent_routes import router as agent_router
+from app.routes.execution_routes import router as execution_router
 
 # ===== CONFIGURAÇÃO DE LOGGING =====
 setup_logging()
@@ -82,6 +87,10 @@ app.include_router(history_router)
 app.include_router(environment_router)
 app.include_router(variable_router)
 app.include_router(schedule_router, prefix="/schedules", tags=["Schedules"])
+app.include_router(capture_router)
+app.include_router(analysis_router)
+app.include_router(agent_router)
+app.include_router(execution_router)
 
 # Middleware para log de requests
 @app.middleware("http")

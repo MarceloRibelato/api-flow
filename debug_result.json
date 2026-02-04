@@ -1,0 +1,117 @@
+{
+  "schedules": [
+    {
+      "id": 55,
+      "name": "Execucao Full via API",
+      "type": "suite",
+      "target_id": 1,
+      "status": "failure"
+    },
+    {
+      "id": 54,
+      "name": "Execucao Full via API",
+      "type": "suite",
+      "target_id": 1,
+      "status": null
+    },
+    {
+      "id": 53,
+      "name": "Execucao Full via API",
+      "type": "suite",
+      "target_id": 1,
+      "status": "success"
+    },
+    {
+      "id": 52,
+      "name": "Verification Run via Script",
+      "type": "suite",
+      "target_id": 1,
+      "status": "success"
+    },
+    {
+      "id": 51,
+      "name": "Verification Run via Script",
+      "type": "suite",
+      "target_id": 1,
+      "status": "success"
+    }
+  ],
+  "history": [
+    {
+      "id": 1048,
+      "schedule_id": null,
+      "api_name": "Execute ",
+      "status": 200
+    },
+    {
+      "id": 1047,
+      "schedule_id": 55,
+      "api_name": "Login",
+      "status": 422
+    },
+    {
+      "id": 1046,
+      "schedule_id": 55,
+      "api_name": "GET structure",
+      "status": 200
+    },
+    {
+      "id": 1045,
+      "schedule_id": 55,
+      "api_name": "GET profile",
+      "status": 401
+    },
+    {
+      "id": 1044,
+      "schedule_id": 55,
+      "api_name": "GET 1",
+      "status": 401
+    },
+    {
+      "id": 1043,
+      "schedule_id": 55,
+      "api_name": "GET environments",
+      "status": 200
+    },
+    {
+      "id": 1042,
+      "schedule_id": 55,
+      "api_name": "GET environments",
+      "status": 200
+    },
+    {
+      "id": 1041,
+      "schedule_id": 55,
+      "api_name": "GET profile",
+      "status": 401
+    },
+    {
+      "id": 1040,
+      "schedule_id": 55,
+      "api_name": "GET /",
+      "status": 401
+    },
+    {
+      "id": 1039,
+      "schedule_id": 55,
+      "api_name": "GET profile",
+      "status": 401
+    }
+  ],
+  "link_check": {
+    "schedule_id": 55,
+    "count": 298
+  },
+  "features": [
+    {
+      "id": 1,
+      "name": "Login",
+      "flow_count": 21
+    },
+    {
+      "id": 3,
+      "name": "Produtos",
+      "flow_count": 12
+    }
+  ]
+}

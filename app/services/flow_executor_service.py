@@ -2,6 +2,7 @@ import logging
 import time
 import json
 import re
+from datetime import datetime
 import requests
 from sqlalchemy.orm import Session
 from app.services.flow_service import FlowService
@@ -36,6 +37,15 @@ class FlowExecutorService:
             return match.group(0)
 
         return re.sub(r'\{\{([\w\.\-_]+)\}\}', replacer, text)
+
+    @staticmethod
+    def is_blocked_domain(url: str) -> bool:
+        BLACKLIST = [
+            "smaato.net", "temu.com", "weborama.fr", "rfihub.com", 
+            "doubleclick.net", "google-analytics.com", "criteo.com",
+            "pubmatic.com", "adnxs.com", "rubiconproject.com", "openx.net"
+        ]
+        return any(domain in url for domain in BLACKLIST)
 
     @staticmethod
     def execute_flow_logic(db: Session, flow_meta, product_id, env_id, company_id, variables_dict, feature_name: str = None, schedule_id: int = None, user_id: int = 1):
@@ -109,6 +119,11 @@ class FlowExecutorService:
                             # FORCE FIX: Replace localhost with 127.0.0.1
                             if 'localhost' in url:
                                 url = url.replace('localhost', '127.0.0.1')
+
+                            # 🛑 DOMAIN FILTERING (AdBlock)
+                            if FlowExecutorService.is_blocked_domain(url):
+                                logger.warning(f"      ⛔ Skipping Blocked/Ad Domain: {url}")
+                                continue
                             
                             headers_raw = api_call.get('headers', {})
                             if isinstance(headers_raw, list):
@@ -126,12 +141,49 @@ class FlowExecutorService:
                             
                             if isinstance(headers, list): headers = {}
                             if not isinstance(headers, dict) and headers is not None: headers = {}
+                            
+                            # SAFETY: Remove headers that interfere with requests auto-calculation
+                            headers = {k: v for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
 
                             body = FlowExecutorService.replace_vars(api_call.get('body', ''), variables_dict)
+
+                            # FIX: If Content-Type is multipart (captured from browser) but body is URL-encoded (converted by us), force proper header
+                            # Otherwise server expects boundary and fails with 400
+                            # FIX: Content-Type handling
+                            # 1. Identify existing Content-Type key (case-insensitive)
+                            ct_key = next((k for k in headers.keys() if k.lower() == 'content-type'), None)
+                            
+                            # 2. Check body signature
+                            body_is_urlencoded = isinstance(body, str) and ('=' in body or '&' in body) and not body.strip().startswith('{')
+                            
+                            if ct_key:
+                                val = headers[ct_key]
+                                # If it's multipart (from browser capture) but we have a string body, it's a mismatch -> Fix it
+                                if 'multipart/form-data' in str(val).lower():
+                                    if body_is_urlencoded:
+                                        headers[ct_key] = 'application/x-www-form-urlencoded'
+                                        logger.info(f"      [FIX] Forced Content-Type to x-www-form-urlencoded (was multipart)")
+                                    else:
+                                        # If it's not obviously urlencoded, maybe it is raw data? 
+                                        # But browser capture of multipart usually implies we couldn't capture the boundary, so better to default to json or urlencoded?
+                                        # For now, trust the mismatch fix only if body looks like k=v
+                                        pass
+                            
+                            # 3. Special Case: Auth/Login usually needs x-www-form-urlencoded
+                            if 'auth/login' in url and body_is_urlencoded:
+                                if not ct_key:
+                                    headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                                elif 'json' in headers[ct_key]: # If accidentally captured as JSON header
+                                     headers[ct_key] = 'application/x-www-form-urlencoded'
+
+
                             
                             start_time = time.time()
                             try:
                                 # Use flow_session instead of new session
+                                logger.info(f"      [DEBUG] Requesting: {method} {url}")
+                                logger.info(f"      [DEBUG] Headers: {headers}")
+                                logger.info(f"      [DEBUG] Body: {body}")
                                 resp = flow_session.request(method, url, headers=headers, data=body)
                             except Exception as req_ex:
                                 logger.error(f"Request failed: {req_ex}")
@@ -326,9 +378,13 @@ class FlowExecutorService:
                                     except Exception as e:
                                         logger.error(f"      ❌ Extraction Error for {rule}: {str(e)}")
                             
+                            # Sanitize ID (Frontend uses strings like 'api-0-1', DB expects Int or None)
+                            raw_api_id = api_call.get('id')
+                            api_id_clean = int(raw_api_id) if str(raw_api_id).isdigit() else None
+
                             # Save History
                             hist = ExecutionHistoryCreate(
-                                api_id=api_call.get('id'),
+                                api_id=api_id_clean,
                                 api_name=api_call.get('name'),
                                 project_id=product_id,
                                 flow_id=flow_meta['id'],
@@ -372,3 +428,148 @@ class FlowExecutorService:
             logger.error(f"Error executing flow {flow_meta['id']}: {e}")
             db.rollback()
             return 0, 0
+
+    @staticmethod
+    def get_merged_variables(db: Session, product_id: int, env_id: int):
+        from app.services.variable_service import VariableService
+        global_vars = VariableService.get_all(db, product_id, environment_id=None)
+        env_vars = []
+        if env_id:
+            env_vars = VariableService.get_all(db, product_id, environment_id=env_id)
+        
+        variables = {v.name: v for v in global_vars}
+        for v in env_vars:
+            variables[v.name] = v
+        return variables
+
+    @staticmethod
+    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1):
+        """
+        Executes all flows within a specific feature.
+        """
+        from app.services.feature_service import FeatureService
+        from app.services.flow_service import FlowService
+        
+        feature = FeatureService.get_by_id(db, feature_id, company_id)
+        if not feature:
+            logger.error(f"Feature {feature_id} not found")
+            return 0, 0
+
+        # list_by_project actually returns flows for a "feature" (project in old naming)
+        flows = FlowService.list_by_project(db, feature.id, company_id)
+        variables = FlowExecutorService.get_merged_variables(db, feature.product_id, env_id)
+
+        success_count = 0
+        fail_count = 0
+
+        logger.info(f"🚀 Executing Feature Group: {feature.name} (ID: {feature.id})")
+
+
+        logger.info(f"🚀 Executing Feature Group: {feature.name} (ID: {feature.id})")
+
+        # FIX: Only execute the latest flow to match UI behavior (1 Feature = 1 Active Flow)
+        # list_by_project returns flows ordered by updated_at desc
+        if flows:
+            latest_flow = flows[0]
+            if len(flows) > 1:
+                logger.info(f"ℹ️  Selecting latest flow '{latest_flow.get('name')}' (ID: {latest_flow.get('id')}) from {len(flows)} detected flows.")
+            
+            s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id)
+            success_count += s
+            fail_count += f
+        else:
+            logger.warning(f"No flows found for feature {feature.id}")
+        
+        return success_count, fail_count
+
+    @staticmethod
+    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1):
+        """
+        Executes a single specific flow.
+        """
+        from app.services.flow_service import FlowService
+        from app.models.feature_models import FeatureModel
+        
+        # 1. Load Flow Metadata
+        # We need project_id first to call load, but FlowService.load tries to look it up if flow_id is passed?
+        # Actually FlowService.load signature is (db, project_id, company_id, flow_id). 
+        # It requires project_id to verify ownership.
+        # So we need to fetch the flow DB object first to get the project_id.
+        from app.models.flow_models import FlowDB
+        flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
+        if not flow:
+            logger.error(f"Flow {flow_id} not found")
+            return 0, 0
+            
+        # 2. Load Full Flow Data
+        flow_meta = FlowService.load(db, flow.project_id, company_id, flow_id)
+        if not flow_meta or not flow_meta.get('id'):
+             logger.error(f"Could not load flow data for {flow_id}")
+             return 0, 0
+
+        # 3. Get Project/Feature info for Variables
+        # flow_meta has 'product_id' which FlowService.load populates.
+        product_id = flow_meta.get('product_id')
+        feature_name = "Unknown Feature"
+        
+        feature = db.query(FeatureModel).filter(FeatureModel.id == flow.project_id).first()
+        if feature:
+            feature_name = feature.name
+            if not product_id: product_id = feature.product_id
+
+        if not product_id:
+            logger.warning(f"Product ID not found for flow {flow_id}, using 0 for variables lookup")
+            product_id = 0
+
+        logger.info(f"🚀 Executing Single Flow: {flow_meta['name']} (ID: {flow.id}) in Feature {feature_name}")
+
+        # 4. Prepare Variables
+        variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
+
+        # 5. Execute
+        return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id)
+
+    @staticmethod
+    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1):
+        """
+        Executes all features within a product.
+        """
+        from app.models.feature_models import FeatureModel
+        from app.services.flow_service import FlowService
+
+        feature_objs = db.query(FeatureModel).filter(FeatureModel.product_id == product_id).all()
+        features = [{'id': f.id, 'name': f.name, 'product_id': f.product_id} for f in feature_objs]
+        
+        if not features:
+            logger.warning(f"No features found for product {product_id}")
+            return 0, 0
+
+        variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
+        
+        total_success = 0
+        total_fail = 0
+
+        logger.info(f"🚀 Executing Suite for Product {product_id} - {len(features)} Features")
+
+        for feature in features:
+            try:
+                logger.info(f"  📂 Processing Feature: {feature['name']} (ID: {feature['id']})")
+                flows = FlowService.list_by_project(db, feature['id'], company_id)
+                
+                if not flows:
+                    continue
+
+                if not flows:
+                    continue
+
+                # FIX: Only execute latest flow per feature
+                latest_flow = flows[0]
+                s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, product_id, env_id, company_id, variables, feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id)
+                total_success += s
+                total_fail += f
+            except Exception as feat_ex:
+                logger.error(f"Failed to process feature {feature['id']}: {feat_ex}")
+                db.rollback()
+                total_fail += 1
+        
+        return total_success, total_fail
