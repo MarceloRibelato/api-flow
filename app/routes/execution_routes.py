@@ -21,8 +21,16 @@ class ExecutionRequest(BaseModel):
     name: str
     flow_id: Optional[int] = None
 
+from app.auth import get_current_user
+from app.models.user_models import UserDB
+
 @router.post("/create")
-def trigger_execution(req: ExecutionRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def trigger_execution(
+    req: ExecutionRequest, 
+    background_tasks: BackgroundTasks, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """
     Creates a new schedule (one-time) and triggers execution immediately.
     """
@@ -72,7 +80,11 @@ def trigger_execution(req: ExecutionRequest, background_tasks: BackgroundTasks, 
     }
 
 @router.get("/{schedule_id}/pdf")
-def get_execution_pdf(schedule_id: int, db: Session = Depends(get_db)):
+def get_execution_pdf(
+    schedule_id: int, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """
     Generates and returns a PDF report for the given execution (schedule).
     """

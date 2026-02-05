@@ -36,6 +36,8 @@ def update_agent_settings(
         settings = AgentSettingsDB(user_id=current_user.id)
         db.add(settings)
     
+    if settings_update.ai_enabled is not None:
+        settings.ai_enabled = settings_update.ai_enabled
     if settings_update.ai_provider is not None:
         settings.ai_provider = settings_update.ai_provider
     if settings_update.ai_model is not None:

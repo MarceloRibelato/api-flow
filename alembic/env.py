@@ -19,14 +19,14 @@ if config.config_file_name is not None:
 import sys
 import os
 sys.path.append(os.getcwd())
+sys.path.append(r'c:\Projetos\Flow\api-flow') # Force absolute path
+
 
 from app.database import Base
-from app.models.api_test_history_models import ApiExecutionHistory
-from app.models.environment_model import Environment
-from app.models.flow_models import FlowDB
-from app.models.project_models import ProjectModel
-from app.models.user_models import UserDB
-from app.models.variable_model import Variable
+from app.models.agent_models import AgentSettingsDB
+# Import other models only if needed for autogenerate detection of their changes
+# from app.models.user_models import UserDB 
+
 
 target_metadata = Base.metadata
 
