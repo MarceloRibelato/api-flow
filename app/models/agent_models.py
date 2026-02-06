@@ -13,6 +13,7 @@ class AgentSettingsDB(Base):
     ai_provider = Column(String, default="openai")  # openai, anthropic, gemini
     ai_model = Column(String, default="gpt-4o")
     ai_api_key = Column(String, nullable=True)
+    ai_base_url = Column(String, nullable=True)
     
     # Relationship with User
     user = relationship("UserDB", backref="agent_settings")

@@ -90,7 +90,12 @@ app.include_router(schedule_router, prefix="/schedules", tags=["Schedules"])
 app.include_router(capture_router)
 app.include_router(analysis_router)
 app.include_router(agent_router)
+app.include_router(agent_router)
 app.include_router(execution_router)
+
+# Proxy Router for bypassing CORS
+from app.routes.proxy_routes import router as proxy_router
+app.include_router(proxy_router)
 
 # Middleware para log de requests
 @app.middleware("http")

@@ -44,6 +44,8 @@ def update_agent_settings(
         settings.ai_model = settings_update.ai_model
     if settings_update.ai_api_key is not None:
         settings.ai_api_key = settings_update.ai_api_key
+    if settings_update.ai_base_url is not None:
+        settings.ai_base_url = settings_update.ai_base_url
         
     try:
         db.commit()

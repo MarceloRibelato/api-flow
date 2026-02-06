@@ -6,6 +6,7 @@ class AgentSettingsBase(BaseModel):
     ai_provider: Optional[str] = "openai"
     ai_model: Optional[str] = "gpt-4o"
     ai_api_key: Optional[str] = None
+    ai_base_url: Optional[str] = None
 
 class AgentSettingsUpdate(AgentSettingsBase):
     pass

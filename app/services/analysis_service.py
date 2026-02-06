@@ -61,7 +61,15 @@ class AnalysisService:
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.2
                 }
-                resp = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data, timeout=30)
+                base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
+                # Ensure no trailing slash for cleaner concatenation if needed, though usually full path is preferred or just base
+                # For OpenAI compatible, usually base_url/chat/completions
+                if not base_url.endswith("/"):
+                     base_url += "/"
+                
+                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+
+                resp = requests.post(url, headers=headers, json=data, timeout=30)
                 if resp.status_code == 200:
                     content = resp.json()["choices"][0]["message"]["content"]
                     content = content.replace("```json", "").replace("```", "").strip()
@@ -133,6 +141,44 @@ class AnalysisService:
                          suggestions = [{ "type": "logic", "severity": "low", "message": "Raw AI Response", "details": content }]
                 else:
                      return [{ "type": "error", "severity": "high", "message": f"DeepSeek Error {resp.status_code}", "details": resp.text }]
+
+            elif settings.ai_provider == "ollama":
+                # Ollama is OpenAI compatible usually, or has its own /api/generate
+                # Standard OpenAI compatible endpoint for Ollama: http://localhost:11434/v1/chat/completions
+                
+                base_url = settings.ai_base_url if settings.ai_base_url else "http://localhost:11434/v1"
+                if not base_url.endswith("/"):
+                     base_url += "/"
+                
+                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+
+                headers = {
+                    "Content-Type": "application/json"
+                }
+                # Ollama often doesn't need API key, but we pass dummy if empty
+                if settings.ai_api_key:
+                    headers["Authorization"] = f"Bearer {settings.ai_api_key}"
+
+                data = {
+                    "model": settings.ai_model or "llama3",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False
+                }
+                
+                try:
+                    resp = requests.post(url, headers=headers, json=data, timeout=60)
+                except Exception as conn_err:
+                     return [{ "type": "error", "severity": "high", "message": "Ollama Connection Error", "details": f"Could not connect to {url}. Ensure Ollama is running." }]
+
+                if resp.status_code == 200:
+                    content = resp.json()["choices"][0]["message"]["content"]
+                    content = content.replace("```json", "").replace("```", "").strip()
+                    try:
+                        suggestions = json.loads(content)
+                    except:
+                        suggestions = [{ "type": "logic", "severity": "low", "message": "Raw AI Response", "details": content }]
+                else:
+                     return [{ "type": "error", "severity": "high", "message": f"Ollama Error {resp.status_code}", "details": resp.text }]
 
         except Exception as e:
             print(f"LLM Call Error: {e}")
