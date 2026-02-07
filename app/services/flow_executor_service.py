@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from app.services.flow_service import FlowService
 from app.services.history_service import HistoryService
 from app.schemas.history_schemas import ExecutionHistoryCreate
+from app.services.variable_service import VariableService
+from app.schemas.variable_schemas import VariableCreate
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +33,11 @@ class FlowExecutorService:
             # Only iterate objects that have 'name' attribute
             for v in variables.values():
                 if hasattr(v, 'name') and v.name.upper() == var_name:
+                    logger.debug(f"    🔍 Replaced '{{match.group(1)}}' with '{v.value}' (Fallback Match)")
                     return str(v.value)
             
             # 3. Not Found - Return original placeholder
+            logger.warning(f"    ⚠️ Variable '{{var_name}}' NOT FOUND. Available: {list(variables.keys())}")
             return match.group(0)
 
         return re.sub(r'\{\{([\w\.\-_]+)\}\}', replacer, text)
@@ -397,7 +401,22 @@ class FlowExecutorService:
                                         if value is not None:
                                             var_name = str(r_variable).strip().upper()
                                             if var_name:
+                                                # Update Context
                                                 variables_dict[var_name] = str(value)
+                                                
+                                                # PERSIST TO DB
+                                                try:
+                                                    new_var = VariableCreate(
+                                                        name=var_name,
+                                                        value=str(value),
+                                                        project_id=product_id, # product_id acts as project_id in this context
+                                                        environment_id=env_id,
+                                                        type="extracted"
+                                                    )
+                                                    VariableService.create(db, new_var)
+                                                    logger.info(f"      ✅ Extracted & Saved Variable [{{var_name}}] = '{{value}}'")
+                                                except Exception as db_ex:
+                                                    logger.error(f"      ⚠️ Failed to save variable {{var_name}} to DB: {{db_ex}}")
 
                                     except Exception as e:
                                         logger.error(f"      ❌ Extraction Error for {rule}: {str(e)}")
@@ -584,6 +603,7 @@ class FlowExecutorService:
         for feature in features:
             try:
                 logger.info(f"  📂 Processing Feature: {feature['name']} (ID: {feature['id']})")
+                logger.debug(f"  📊 Variables State: {list(variables.keys())}")
                 flows = FlowService.list_by_project(db, feature['id'], company_id)
                 
                 if not flows:

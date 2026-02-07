@@ -25,6 +25,10 @@ class VariableService:
 
     @staticmethod
     def create(db: Session, var: VariableCreate):
+        # Normalize name to UPPERCASE to prevent duplicates (Token vs TOKEN)
+        if var.name:
+            var.name = var.name.strip().upper()
+
         existing = (
             db.query(Variable)
             .filter(
@@ -65,6 +69,10 @@ class VariableService:
 
     @staticmethod
     def update(db: Session, var_id: int, var_data: VariableCreate):
+        # Normalize name to UPPERCASE
+        if var_data.name:
+            var_data.name = var_data.name.strip().upper()
+
         db_var = db.query(Variable).filter(Variable.id == var_id).first()
         if db_var:
             db_var.name = var_data.name
