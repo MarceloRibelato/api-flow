@@ -16,25 +16,15 @@ class HistoryService:
         execution_id = f"exec_{uuid.uuid4().hex[:10]}_{int(datetime.now().timestamp())}"
 
         # Filtro de variáveis: Salva apenas as que realmente aparecem no request
-        filtered_vars = {}
-        if history.variables_used:
-            search_space = (
-                f"{history.url} {history.processed_url} {history.request_body or ''} "
-            )
-            search_space += str(history.request_headers or "") + " "
-            search_space += str(history.request_params or "")
-
-            for var_name, var_value in history.variables_used.items():
-                if f"{{{{{var_name}}}}}" in search_space:
-                    filtered_vars[var_name] = var_value
+        filtered_vars = HistoryService._filter_variables(history)
 
         db_history = ApiExecutionHistory(
             execution_id=execution_id,
             api_id=history.api_id,
-            api_name=history.api_name,  # Added mapping
+            api_name=history.api_name,
             project_id=history.project_id,
-            schedule_id=history.schedule_id,  # Ensure this is saved
-            feature_name=history.feature_name, # Added feature_name
+            schedule_id=history.schedule_id,
+            feature_name=history.feature_name,
             flow_id=history.flow_id,
             node_name=history.node_name,
             method=history.method,
@@ -65,6 +55,67 @@ class HistoryService:
         return db_history
 
     @staticmethod
+    def save_batch(db: Session, histories: list[ExecutionHistoryCreate], user_id: int):
+        if not histories:
+            return
+
+        db_objects = []
+        timestamp = int(datetime.now().timestamp())
+        
+        for i, history in enumerate(histories):
+            # Generate unique ID for each item in batch
+            execution_id = f"exec_{uuid.uuid4().hex[:10]}_{timestamp}_{i}"
+            
+            filtered_vars = HistoryService._filter_variables(history)
+            
+            db_history = ApiExecutionHistory(
+                execution_id=execution_id,
+                api_id=history.api_id,
+                api_name=history.api_name,
+                project_id=history.project_id,
+                schedule_id=history.schedule_id,
+                feature_name=history.feature_name,
+                flow_id=history.flow_id,
+                node_name=history.node_name,
+                method=history.method,
+                url=history.url,
+                request_headers=history.request_headers,
+                request_body=history.request_body,
+                request_params=history.request_params,
+                status_code=history.status_code,
+                status_text=history.status_text,
+                response_headers=history.response_headers,
+                response_body=history.response_body,
+                response_time=history.response_time,
+                error_message=history.error_message,
+                variables_used=filtered_vars,
+                processed_url=history.processed_url,
+                user_id=user_id,
+                environment_id=history.environment_id,
+                environment_name=history.environment_name,
+                assertions=[a.model_dump() for a in history.assertions] if history.assertions else None,
+            )
+            db_objects.append(db_history)
+
+        db.bulk_save_objects(db_objects)
+        db.commit()
+
+    @staticmethod
+    def _filter_variables(history: ExecutionHistoryCreate):
+        filtered_vars = {}
+        if history.variables_used:
+            search_space = (
+                f"{history.url} {history.processed_url} {history.request_body or ''} "
+            )
+            search_space += str(history.request_headers or "") + " "
+            search_space += str(history.request_params or "")
+
+            for var_name, var_value in history.variables_used.items():
+                if f"{{{{{var_name}}}}}" in search_space:
+                    filtered_vars[var_name] = var_value
+        return filtered_vars
+
+    @staticmethod
     def get_all(
         db: Session,
         company_id: int,  # Altered: user_id -> company_id
@@ -80,6 +131,8 @@ class HistoryService:
         end_date: Optional[datetime] = None,
         method: Optional[str] = None,
         status_code: Optional[int] = None,
+        sort_by: str = 'created_at',
+        order: str = 'desc'
     ):
         # Join with UserDB to filter by company
         query = db.query(ApiExecutionHistory).join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
@@ -115,9 +168,16 @@ class HistoryService:
         total = query.count()
         total_pages = (total + limit - 1) // limit if limit > 0 else 0
 
+        # Dynamic Sorting
+        sort_column = getattr(ApiExecutionHistory, sort_by, ApiExecutionHistory.created_at)
+        if order == 'asc':
+            query = query.order_by(sort_column.asc())
+        else:
+            query = query.order_by(sort_column.desc())
+
         skip = (page - 1) * limit
         history = (
-            query.order_by(ApiExecutionHistory.created_at.desc())
+            query
             .offset(skip)
             .limit(limit)
             .all()

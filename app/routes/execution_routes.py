@@ -60,8 +60,9 @@ def trigger_execution(
         cron_expression=None,
         run_at=datetime.utcnow(), # One-off
         status='active',
-        company_id=1, # Default or get from Auth
-        user_id=1 # Default or get from Auth
+
+        company_id=current_user.company_id, # Use Auth
+        user_id=current_user.id # Use Auth
     )
     
     db.add(new_schedule)

@@ -1,28 +1,21 @@
 import json
 from datetime import datetime
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from app.models.flow_models import FlowDB
+from app.models.flow_models import FlowDB, FlowNodeDB, FlowEdgeDB, FlowCardDataDB
 from app.schemas.flow_schemas import FlowSaveSchema
 from app.models.feature_models import FeatureModel
-
-
 from app.models.product_models import ProductModel
+
 
 class FlowService:
     @staticmethod
     def _verify_project_ownership(db: Session, project_id: int, company_id: int):
-        print(f"🔍 Checking Ownership: Feature {project_id} vs Company {company_id}")
+        # Implementation remains the same
         feature = db.query(FeatureModel).join(ProductModel).filter(
             FeatureModel.id == project_id, 
             ProductModel.company_id == company_id
         ).first()
-        
-        if feature:
-             print(f"✅ Ownership OK: Feature {feature.id} belongs to Product {feature.product_id} (Company {company_id})")
-        else:
-             print(f"❌ Ownership Check Failed: Project/Feature {project_id} not found for Company {company_id}")
-        
         return feature is not None
 
     @staticmethod
@@ -38,7 +31,10 @@ class FlowService:
                 "name": f.name,
                 "created_at": f.created_at,
                 "updated_at": f.updated_at,
-                "nodes_count": len(f.flow_nodes),
+                # Note: This technically still triggers lazy load if we don't join, 
+                # but for list view usually we don't need full details. 
+                # Improving this would require a group_by query, but let's stick to the main load/save optim.
+                "nodes_count": len(f.flow_nodes), 
                 "edges_count": len(f.flow_edges)
             } for f in flows
         ]
@@ -59,11 +55,17 @@ class FlowService:
         if not FlowService._verify_project_ownership(db, project_id, company_id):  
              return {"nodes": [], "edges": [], "cardData": {}, "id": None, "name": "", "project_id": project_id}
 
+        query = db.query(FlowDB).options(
+            joinedload(FlowDB.flow_nodes),
+            joinedload(FlowDB.flow_edges),
+            joinedload(FlowDB.flow_card_data)
+        )
+
         if flow_id:
-            flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
+            flow = query.filter(FlowDB.id == flow_id).first()
         else:
             # Migration/Fallback: Load the most recently updated flow for the project
-            flow = db.query(FlowDB).filter(FlowDB.project_id == project_id).order_by(FlowDB.updated_at.desc()).first()
+            flow = query.filter(FlowDB.project_id == project_id).order_by(FlowDB.updated_at.desc()).first()
 
         if not flow:
             print(f"❌ FlowService.load: Flow not found for project_id={project_id}, flow_id={flow_id}")
@@ -71,7 +73,7 @@ class FlowService:
 
         print(f"✅ FlowService.load: Loaded Flow ID={flow.id} Name='{flow.name}'")
 
-        # Fetch Relational Data
+        # Fetch Relational Data (Now eager loaded)
         db_nodes = flow.flow_nodes
         db_edges = flow.flow_edges
         db_cards = flow.flow_card_data
@@ -128,7 +130,7 @@ class FlowService:
         return {
             "id": flow.id,
             "project_id": flow.project_id,
-            "product_id": product_id, # Return Product ID
+            "product_id": product_id, 
             "name": flow.name,
             "nodes": formatted_nodes,
             "edges": formatted_edges,
@@ -150,8 +152,6 @@ class FlowService:
         if flow_id:
              flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
         
-        # Fallback: if no flowId but project has flows, take the last one? 
-        # Or create new? Careful here. For now, if no flowId, try to find existing default or create.
         if not flow:
              # Try find ANY flow for project to update (Legacy mode) or create new primary
              flow = db.query(FlowDB).filter(FlowDB.project_id == project_id).order_by(FlowDB.updated_at.desc()).first()
@@ -170,20 +170,20 @@ class FlowService:
         flow_id = flow.id
 
         # 2. Clear existing data (Full Replace Strategy)
-        # Using delete() queries is more efficient than iterating objects
-        from app.models.flow_models import FlowNodeDB, FlowEdgeDB, FlowCardDataDB
-        
         db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == flow_id).delete()
         db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == flow_id).delete()
         db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow_id).delete()
 
-        # 3. Insert Nodes
+        # 3. Batch Insert Preparation
         print(f"🛠️ FlowService.save: Inserting {len(nodes)} nodes and {len(edges)} edges for Flow ID {flow_id}")
+        
+        nodes_to_insert = []
+        edges_to_insert = []
+        cards_to_insert = []
+
+        # Nodes
         for node in nodes:
-            # Handle Pydantic model dump or dict access
-            # node is NodeSchema
             node_data = node.data.model_dump()
-            
             db_node = FlowNodeDB(
                 flow_id=flow_id,
                 client_id=node.id,
@@ -192,19 +192,18 @@ class FlowService:
                 position_y=node.position['y'],
                 width=node.width,
                 height=node.height,
-                parent_node_id=node.parentNode, # Now supported in schema
-                
+                parent_node_id=node.parentNode,
                 data={
                     "name": node_data.get("name"),
                     "color": node_data.get("color"),
                     "childCount": node_data.get("childCount"),
                     "isCollapsed": node_data.get("isCollapsed"),
-                    "hidden": node.hidden # Store hidden in data JSON for convenience or add col
+                    "hidden": node.hidden
                 }
             )
-            db.add(db_node)
+            nodes_to_insert.append(db_node)
 
-        # 4. Insert Edges
+        # Edges
         for edge in edges:
             db_edge = FlowEdgeDB(
                 client_id=edge.id, 
@@ -214,33 +213,31 @@ class FlowService:
                 type=edge.type,
                 animated=edge.animated
             )
-            db.add(db_edge)
+            edges_to_insert.append(db_edge)
 
-        # 5. Insert Card Data
+        # Cards
         for cid, cinfo in card_data.items():
-            # cinfo is CardDataSchema
-            # cinfo is CardDataSchema
-            # Prepare API calls list
             api_calls_payload = [api.model_dump() for api in cinfo.apiCalls]
-            print(f"🛠️ Saving Card {cid}: APICalls Count={len(api_calls_payload)}")
-            if len(api_calls_payload) > 0:
-                print(f"   -> First API Call: {api_calls_payload[0].get('name')} (ID: {api_calls_payload[0].get('id')})")
-                print(f"   -> Extracts Count: {len(api_calls_payload[0].get('extracts', []))}") # DEBUG LOG
-                print(f"   -> Assertions Count: {len(api_calls_payload[0].get('assertions', []))}") # DEBUG LOG
-                if api_calls_payload[0].get('extracts'):
-                     print(f"   -> First Extract: {api_calls_payload[0]['extracts'][0]}")
-
+            
             db_card = FlowCardDataDB(
                 node_id=cid,
                 flow_id=flow_id,
                 name=cinfo.name,
                 description=cinfo.description,
                 color=cinfo.color,
-                bdd_scenarios=cinfo.bddScenarios, # JSON
-                api_calls=api_calls_payload, # JSON
-                env_data={k: v.model_dump() for k, v in cinfo.envData.items()} # JSON
+                bdd_scenarios=cinfo.bddScenarios,
+                api_calls=api_calls_payload,
+                env_data={k: v.model_dump() for k, v in cinfo.envData.items()}
             )
-            db.add(db_card)
+            cards_to_insert.append(db_card)
+
+        # 4. Bulk Save
+        if nodes_to_insert:
+            db.bulk_save_objects(nodes_to_insert)
+        if edges_to_insert:
+            db.bulk_save_objects(edges_to_insert)
+        if cards_to_insert:
+            db.bulk_save_objects(cards_to_insert)
 
         db.commit()
 

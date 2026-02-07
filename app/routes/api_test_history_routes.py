@@ -51,6 +51,8 @@ def get_execution_history(
     end_date: Optional[datetime] = None,
     method: Optional[str] = None,
     status_code: Optional[int] = None,
+    sort_by: Optional[str] = Query('created_at', regex="^(created_at|id|response_time)$"),
+    order: Optional[str] = Query('desc', regex="^(asc|desc)$"),
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
@@ -70,6 +72,8 @@ def get_execution_history(
             end_date,
             method,
             status_code,
+            sort_by,
+            order
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao buscar: {str(e)}")

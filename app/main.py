@@ -2,6 +2,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
+import httpx # Added for global client
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -20,7 +21,6 @@ from app.routes.feature_routes import router as feature_router
 from app.routes.product_routes import router as product_router
 from app.routes.variable_routes import router as variable_router
 from app.routes.schedule_routes import router as schedule_router
-from app.routes.capture_routes import router as capture_router
 from app.routes.capture_routes import router as capture_router
 from app.routes.analysis_routes import router as analysis_router
 from app.routes.agent_routes import router as agent_router
@@ -50,10 +50,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Erro ao iniciar scheduler: {e}")
 
+    # Init Global HTTP Client (Persistent Connection Pool)
+    # verify=False is often useful for local dev with self-signed certs, fitting the 'proxy' nature here
+    app.state.http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True, verify=False)
+    logger.info("Global HTTP Client initialized")
+
     yield
     
     # Shutdown
     logger.info("Desligando aplicação...")
+    await app.state.http_client.aclose()
+    logger.info("Global HTTP Client closed")
+
     if scheduler_service.scheduler.running:
         scheduler_service.scheduler.shutdown()
 

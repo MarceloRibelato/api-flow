@@ -97,6 +97,9 @@ class FlowExecutorService:
 
             visited = set()
             
+            # Accumulate history items for batch save
+            history_buffer = []
+
             while queue:
                 current_id = queue.pop(0)
                 
@@ -175,7 +178,6 @@ class FlowExecutorService:
                                     headers['Content-Type'] = 'application/x-www-form-urlencoded'
                                 elif 'json' in headers[ct_key]: # If accidentally captured as JSON header
                                      headers[ct_key] = 'application/x-www-form-urlencoded'
-
 
                             
                             start_time = time.time()
@@ -282,11 +284,22 @@ class FlowExecutorService:
                                         # --- Body ---
                                         elif src == 'body':
                                             if resp_json:
-                                                parts = str(prop).split('.')
+                                                assertion_path_parts = str(prop).split('.')
                                                 current = resp_json
-                                                for part in parts:
+                                                for part in assertion_path_parts:
                                                     if isinstance(current, dict) and part in current:
                                                         current = current[part]
+                                                    elif isinstance(current, list):
+                                                        try:
+                                                            idx = int(part)
+                                                            if 0 <= idx < len(current):
+                                                                current = current[idx]
+                                                            else:
+                                                                current = None
+                                                                break
+                                                        except ValueError:
+                                                            current = None
+                                                            break
                                                     else:
                                                         current = None
                                                         break
@@ -360,11 +373,22 @@ class FlowExecutorService:
                                         if r_source == 'header':
                                             value = next((v for k, v in resp.headers.items() if k.lower() == str(r_property).lower()), None)
                                         elif r_source == 'body' and resp_json:
-                                            parts = str(r_property).split('.')
+                                            extract_path_parts = str(r_property).split('.')
                                             current = resp_json
-                                            for part in parts:
+                                            for part in extract_path_parts:
                                                 if isinstance(current, dict) and part in current:
                                                     current = current[part]
+                                                elif isinstance(current, list):
+                                                    try:
+                                                        idx = int(part)
+                                                        if 0 <= idx < len(current):
+                                                            current = current[idx]
+                                                        else:
+                                                            current = None
+                                                            break
+                                                    except ValueError:
+                                                        current = None
+                                                        break
                                                 else:
                                                     current = None
                                                     break
@@ -378,11 +402,11 @@ class FlowExecutorService:
                                     except Exception as e:
                                         logger.error(f"      ❌ Extraction Error for {rule}: {str(e)}")
                             
-                            # Sanitize ID (Frontend uses strings like 'api-0-1', DB expects Int or None)
+                            # Sanitize ID
                             raw_api_id = api_call.get('id')
                             api_id_clean = int(raw_api_id) if str(raw_api_id).isdigit() else None
 
-                            # Save History
+                            # Prepare History Object (Don't save yet, add to buffer)
                             hist = ExecutionHistoryCreate(
                                 api_id=api_id_clean,
                                 api_name=api_call.get('name'),
@@ -402,12 +426,12 @@ class FlowExecutorService:
                                 response_time=duration,
                                 environment_id=env_id,
                                 environment_name=str(env_id),
-                                variables_used={},
+                                variables_used={}, # Passed as empty, filtering happens in save_batch/save
                                 assertions=assertion_results,
                                 error_message=final_error_message
                             )
-                            # BATCH COMMIT OPTIMIZATION (commit=False)
-                            HistoryService.save(db, hist, user_id=user_id, commit=False)
+                            # Add to buffer instead of saving immediately
+                            history_buffer.append(hist)
                         
                         except Exception as ex:
                             logger.error(f"Failed to execute API call in card {card.get('name')}: {ex}")
@@ -420,10 +444,16 @@ class FlowExecutorService:
                         if in_degree[neighbor] == 0:
                             queue.append(neighbor)
             
-            # FINAL COMMIT FOR THE FLOW
-            db.commit()
+            # BATCH SAVE ALL HISTORY
+            if history_buffer:
+                logger.info(f"💾 Bulk Saving {len(history_buffer)} execution records...")
+                HistoryService.save_batch(db, history_buffer, user_id)
 
             return flow_success_count, flow_fail_count
+        except Exception as e:
+            logger.error(f"Error executing flow {flow_meta['id']}: {e}")
+            db.rollback()
+            return 0, 0
         except Exception as e:
             logger.error(f"Error executing flow {flow_meta['id']}: {e}")
             db.rollback()
