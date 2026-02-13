@@ -20,6 +20,7 @@ class ExecutionRequest(BaseModel):
     environment_id: int
     name: str
     flow_id: Optional[int] = None
+    max_concurrency: Optional[int] = None # Added max_concurrency
 
 from app.auth import get_current_user
 from app.models.user_models import UserDB
@@ -60,6 +61,7 @@ def trigger_execution(
         cron_expression=None,
         run_at=datetime.utcnow(), # One-off
         status='active',
+        max_concurrency=req.max_concurrency, # Save max_concurrency
 
         company_id=current_user.company_id, # Use Auth
         user_id=current_user.id # Use Auth

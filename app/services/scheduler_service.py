@@ -93,7 +93,14 @@ def execute_job(schedule_id: int):
             env_id = schedule.environment_id
             logger.info(f"🚀 Running Scheduled Suite (Product) {product_id} in Env {env_id}")
             
-            s, f = FlowExecutorService.execute_suite(db, product_id, env_id, schedule.company_id, schedule_id=schedule.id, user_id=schedule.user_id or 1)
+            # Extract concurrency from schedule (if any)
+            concurrency = getattr(schedule, 'max_concurrency', None)
+            
+            s, f = FlowExecutorService.execute_suite(
+                db, product_id, env_id, schedule.company_id, 
+                schedule_id=schedule.id, user_id=schedule.user_id or 1,
+                max_concurrency=concurrency
+            )
             success_count = s
             fail_count = f
             

@@ -592,7 +592,7 @@ class FlowExecutorService:
         return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id)
 
     @staticmethod
-    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1):
+    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None):
         """
         Executes all features within a product.
         """
@@ -606,33 +606,75 @@ class FlowExecutorService:
             logger.warning(f"No features found for product {product_id}")
             return 0, 0
 
-        variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
+        if not features:
+            logger.warning(f"No features found for product {product_id}")
+            return 0, 0
+
+        # RAW VARIABLES (Objects)
+        raw_variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
+        
+        # KEY FIX: Serialize to plain dict {name: value} to avoid SQLAlchemy Session threading issues
+        # and ensure each thread gets a clean, independent snapshot.
+        variables = {}
+        for k, v in raw_variables.items():
+            if hasattr(v, 'value'):
+               variables[k] = str(v.value)
+            else:
+               variables[k] = str(v)
         
         total_success = 0
         total_fail = 0
 
         logger.info(f"🚀 Executing Suite for Product {product_id} - {len(features)} Features")
 
-        for feature in features:
+        import concurrent.futures
+
+        # Worker Function for Parallel Execution
+        def process_feature(feature):
+            f_success = 0
+            f_fail = 0
             try:
-                logger.info(f"  📂 Processing Feature: {feature['name']} (ID: {feature['id']})")
-                logger.debug(f"  📊 Variables State: {list(variables.keys())}")
-                flows = FlowService.list_by_project(db, feature['id'], company_id)
+                # Create a NEW DB Session for this thread/feature to avoid sharing session across threads
+                # Session is not thread-safe!
+                from app.database import SessionLocal
+                thread_db = SessionLocal()
                 
-                if not flows:
-                    continue
-
-                if not flows:
-                    continue
-
-                # FIX: Only execute latest flow per feature
-                latest_flow = flows[0]
-                s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, product_id, env_id, company_id, variables, feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id)
-                total_success += s
-                total_fail += f
+                try:
+                    logger.info(f"  📂 Processing Feature: {feature['name']} (ID: {feature['id']}) [Thread]")
+                    flows = FlowService.list_by_project(thread_db, feature['id'], company_id)
+                    
+                    if flows:
+                        # FIX: Only execute latest flow per feature
+                        latest_flow = flows[0]
+                         # Re-fetch merge variables inside thread or pass them? 
+                         # Variables are dict, safe to read.
+                        s, f = FlowExecutorService.execute_flow_logic(
+                            thread_db, latest_flow, product_id, env_id, company_id, 
+                            variables.copy(), # Copy vars to avoid contamination
+                            feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id
+                        )
+                        f_success = s
+                        f_fail = f
+                finally:
+                    thread_db.close()
             except Exception as feat_ex:
                 logger.error(f"Failed to process feature {feature['id']}: {feat_ex}")
-                db.rollback()
-                total_fail += 1
+                f_fail = 1
+            return f_success, f_fail
+
+        # Run Features in Parallel
+        # Adjust max_workers as needed via env var MAX_CONCURRENT_FEATURES (default 5) or override
+        from app.config import settings
+        max_workers = max_concurrency if max_concurrency else settings.MAX_CONCURRENT_FEATURES
+        
+        logger.info(f"🚀 Starting parallel execution with {max_workers} workers")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            full_results = list(executor.map(process_feature, features))
+
+        # Aggregate Results
+        for s, f in full_results:
+            total_success += s
+            total_fail += f
         
         return total_success, total_fail

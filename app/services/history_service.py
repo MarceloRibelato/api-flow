@@ -176,6 +176,33 @@ class HistoryService:
             query = query.order_by(sort_column.desc())
 
         skip = (page - 1) * limit
+        
+        from sqlalchemy.orm import load_only
+        
+        # Optimize fetch: Select only columns needed for ExecutionHistorySummary
+        # Exclude heavy text fields (response_body, request_body, headers)
+        query = query.options(
+            load_only(
+                ApiExecutionHistory.id,
+                ApiExecutionHistory.execution_id,
+                ApiExecutionHistory.feature_name,
+                ApiExecutionHistory.method,
+                ApiExecutionHistory.url,
+                ApiExecutionHistory.status_code,
+                ApiExecutionHistory.status_text,
+                ApiExecutionHistory.response_time,
+                ApiExecutionHistory.created_at,
+                ApiExecutionHistory.processed_url,
+                ApiExecutionHistory.environment_id,
+                ApiExecutionHistory.environment_name,
+                ApiExecutionHistory.node_name,
+                ApiExecutionHistory.api_name,
+                ApiExecutionHistory.error_message, # Used for 'success' property logic if not direct
+                # assertions might be needed if summary shows them? Schema has assertions: Optional[List]
+                ApiExecutionHistory.assertions 
+            )
+        )
+
         history = (
             query
             .offset(skip)
