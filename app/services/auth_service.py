@@ -72,10 +72,17 @@ class AuthService:
                 # But requirement says "First account created is ADM, others need approval".
                 # Let's stick to strict requirement: First User = System Admin. Others = Pending.
                 
-                if not is_first_user:
+        if not is_first_user:
                      role = "viewer"  # Will be "admin" of company eventually, but needs approval? 
                      # Let's assume strict First User rule for now.
         
+        # Enforce Terms Acceptance
+        if not user.accepted_terms:
+            raise ValueError("Você deve aceitar os Termos de Uso para se cadastrar.")
+            
+        from datetime import datetime
+        terms_accepted_at = datetime.utcnow()
+
         db_user = UserDB(
             username=user.username,
             email=user.email,
@@ -88,6 +95,8 @@ class AuthService:
             status=status,
             cnpj=cnpj_clean,
             phone=phone_clean,
+            accepted_terms=user.accepted_terms,
+            terms_accepted_at=terms_accepted_at
         )
         db.add(db_user)
         db.commit()

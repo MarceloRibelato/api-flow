@@ -13,6 +13,7 @@ class FlowDB(Base):
     
     # New Columns for Multi-Flow Support
     name = Column(String(255), default="Fluxo Principal") # Default for migration
+    flow_type = Column(String(50), default="api") # Distinguish between 'api' and 'frontend' flows
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

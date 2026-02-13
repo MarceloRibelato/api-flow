@@ -25,7 +25,7 @@ class CaptureService:
 
             # 1. Create a new Flow
             flow_name = f"Captured Flow - {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-            new_flow = FlowDB(name=flow_name, project_id=project_id, created_at=datetime.utcnow())
+            new_flow = FlowDB(name=flow_name, project_id=project_id, flow_type="api", created_at=datetime.utcnow())
             db.add(new_flow)
             db.commit()
             db.refresh(new_flow)
@@ -34,10 +34,47 @@ class CaptureService:
             # Logic: If current request's pageUrl is same as previous, add to same group.
             # If different, start new group (new Node).
             
+            IGNORED_ENDPOINTS = [
+                "/api/auth/profile",
+                "/api/notifications",
+                "/favicon.ico",
+                "/manifest.json"
+            ]
+
+            def should_ignore(req):
+                # 1. Check Blacklist
+                url = req.get('url', '').lower()
+                if any(ignored in url for ignored in IGNORED_ENDPOINTS):
+                    return True
+                
+                # 2. Ignore OPTION requests (CORS preflight)
+                if req.get('method') == 'OPTIONS':
+                    return True
+                    
+                return False
+
             nodes_data = [] 
             current_group = None
 
+            last_request_signature = None # To track sequential duplicates
+
             for req in requests_data:
+                # FILTER: Skip ignored requests
+                if should_ignore(req):
+                    print(f"Skipping ignored request: {req.get('url')}")
+                    continue
+
+                # DEDUPLICATION: Skip exact duplicate of the immediately preceding request
+                # Signature: Method + URL + Body
+                req_body_str = json.dumps(req.get('body')) if isinstance(req.get('body'), (dict, list)) else str(req.get('body'))
+                request_signature = f"{req.get('method')}:{req.get('url')}:{req_body_str}"
+
+                if request_signature == last_request_signature:
+                    print(f"Skipping duplicate request: {req.get('url')}")
+                    continue
+                
+                last_request_signature = request_signature
+
                 page_url = req.get('pageUrl', 'Unknown Page')
                 custom_name = req.get('customNodeName')
                 print(f"DEBUG CAPTURE: URL={req.get('url')} CustomName={custom_name} Page={page_url}")
@@ -97,6 +134,17 @@ class CaptureService:
                 # Process API Calls for this Node
                 api_calls_payload = []
                 for j, req in enumerate(group['requests']):
+                    # Hardened URL Resolution
+                    from urllib.parse import urljoin
+                    original_url = req.get('url', '')
+                    page_url = req.get('pageUrl', '')
+                    
+                    if page_url and not original_url.startswith('http'):
+                        absolute_url = urljoin(page_url, original_url)
+                        print(f"      [CAPTURE FIX] Resolved relative URL: {original_url} -> {absolute_url}")
+                    else:
+                        absolute_url = original_url
+
                     # Format Headers
                     raw_headers = req.get('headers', {})
                     formatted_headers = []
@@ -105,9 +153,9 @@ class CaptureService:
                     
                     api_calls_payload.append({
                         "id": f"api-{i}-{j}",
-                        "name": f"{req.get('method')} {req.get('url').split('?')[0].split('/')[-1] or '/'}", # Short name
+                        "name": f"{req.get('method')} {absolute_url.split('?')[0].split('/')[-1] or '/'}", # Short name
                         "method": req.get('method', 'GET'),
-                        "url": req.get('url'),
+                        "url": absolute_url,
                         "headers": formatted_headers,
                         "body": json.dumps(req.get('body')) if isinstance(req.get('body'), (dict, list)) else (req.get('body') or ""), 
                         "extracts": [],

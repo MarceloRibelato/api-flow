@@ -15,6 +15,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str
+    accepted_terms: bool = False
 
 
 class LoginRequest(BaseModel):
