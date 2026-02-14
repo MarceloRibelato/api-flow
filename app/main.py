@@ -25,6 +25,7 @@ from app.routes.capture_routes import router as capture_router
 from app.routes.analysis_routes import router as analysis_router
 from app.routes.agent_routes import router as agent_router
 from app.routes.execution_routes import router as execution_router
+from app.routes.import_routes import router as import_router
 
 # ===== CONFIGURAÇÃO DE LOGGING =====
 setup_logging()
@@ -35,11 +36,29 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup: Create tables and start scheduler
     logger.info("=== INICIANDO API QA-WORKFLOW ===")
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("Tabelas verificadas/criadas com sucesso")
-    except Exception as e:
-        logger.error(f"Erro ao criar tabelas: {e}")
+    
+    # Retry logic for DB connection
+    import time
+    from sqlalchemy.exc import OperationalError
+    
+    max_retries = 30
+    retry_interval = 2
+    
+    for i in range(max_retries):
+        try:
+            logger.info(f"Tentativa de conexão com DB ({i+1}/{max_retries})...")
+            Base.metadata.create_all(bind=engine)
+            logger.info("Tabelas verificadas/criadas com sucesso")
+            break
+        except Exception as e:
+            if i < max_retries - 1:
+                logger.warning(f"DB ainda não disponível, aguardando {retry_interval}s... Erro: {e}")
+                time.sleep(retry_interval)
+            else:
+                logger.error(f"Erro CRÍTICO ao conectar no DB após {max_retries} tentativas: {e}")
+                # We could raise here to crash the container and let Docker restart it, 
+                # but for now let's just log critical error.
+                raise e
 
     logger.info("Iniciando scheduler...")
     try:
@@ -100,6 +119,7 @@ app.include_router(analysis_router)
 app.include_router(agent_router)
 app.include_router(agent_router)
 app.include_router(execution_router)
+app.include_router(import_router)
 
 # Proxy Router for bypassing CORS
 from app.routes.proxy_routes import router as proxy_router
