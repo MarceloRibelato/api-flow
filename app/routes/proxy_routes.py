@@ -29,12 +29,20 @@ async def proxy_request(req: ProxyRequest, request: Request):
              else:
                  data_body = req.body
 
+        # Rewrite localhost to flow-frontend if target is port 80 (API Gateway)
+        # This fixes "connection refused" when backend tries to hit localhost:80 inside its container
+        target_url = req.url
+        if target_url.startswith("http://localhost/") or target_url.startswith("http://127.0.0.1/"):
+             target_url = target_url.replace("http://localhost/", "http://flow-frontend/")
+             target_url = target_url.replace("http://127.0.0.1/", "http://flow-frontend/")
+             logger.info(f"🔄 Proxy Rewrote URL: {req.url} -> {target_url}")
+
         # Use Global HTTP Client from app state
         client = request.app.state.http_client
         
         resp = await client.request(
             method=req.method,
-            url=req.url,
+            url=target_url,
             headers=headers,
             params=req.params,
             json=json_body,

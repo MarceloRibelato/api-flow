@@ -4,6 +4,7 @@ import json
 import re
 from datetime import datetime
 import requests
+from jsonschema import validate, ValidationError
 from sqlalchemy.orm import Session
 from app.services.flow_service import FlowService
 from app.services.history_service import HistoryService
@@ -256,12 +257,35 @@ class FlowExecutorService:
                                     resp_json = None
 
                                 # --- Assertion Evaluation Logic ---
-                                assertions = api_call.get('assertions', [])
-                                if assertions:
-                                    for assertion in assertions:
-                                        # (Assertion logic remains the same but uses resp_status/duration/etc)
+                                assertions_raw = api_call.get('assertions', [])
+                                if assertions_raw:
+                                    unique_assertions = []
+                                    seen_assertions = set()
+                                    
+                                    # 1. Deduplication
+                                    for assertion in assertions_raw:
+                                        src = assertion.get('source') or assertion.get('type') or 'statusCode'
+                                        prop = assertion.get('property') or assertion.get('path') or ''
+                                        op = assertion.get('operator') or 'equals'
+                                        target = assertion.get('value')
+                                        if target is None: target = assertion.get('target') or ''
+                                        
+                                        # Strict Single Contract Check
+                                        if src == 'contract':
+                                            key = 'contract_unique_key'
+                                        else:
+                                            key = f"{src}|{prop}|{op}|{target}"
+                                            
+                                        if key not in seen_assertions:
+                                            seen_assertions.add(key)
+                                            unique_assertions.append(assertion)
+
+                                    for assertion in unique_assertions:
                                         try:
-                                            src = assertion.get('type') or assertion.get('source') or 'statusCode'
+                                            # Normalize Source
+                                            src = assertion.get('source') or assertion.get('type') or 'statusCode'
+                                            if src == 'status': src = 'statusCode'
+                                            
                                             raw_operator = assertion.get('operator', 'equals')
                                             target = assertion.get('value')
                                             if target is None: target = assertion.get('target')
@@ -277,11 +301,35 @@ class FlowExecutorService:
                                             elif op in ['lessthan', 'lt', '<']: op = 'lt'
                                             elif op in ['exists']: op = 'exists'
                                             elif op in ['notexists', 'not_exists']: op = 'notexists'
+                                            elif op in ['json_schema', 'matches_schema']: op = 'json_schema' # Contract
 
                                             actual_val = None
                                             is_success = False
                                             
-                                            if src == 'statusCode':
+                                            # --- CONTRACT VALIDATION ---
+                                            if src == 'contract':
+                                                if op == 'json_schema':
+                                                    try:
+                                                        schema = json.loads(target) if isinstance(target, str) else target
+                                                        data_to_validate = resp_json
+                                                        validate(instance=data_to_validate, schema=schema)
+                                                        is_success = True
+                                                        actual_val = "Schema Match"
+                                                        target = "Valid Contract" # UX
+                                                    except ValidationError as ve:
+                                                        is_success = False
+                                                        actual_val = f"Validation Error: {ve.message}"
+                                                        target = "Valid Contract"
+                                                    except Exception as schema_err:
+                                                        logger.error(f"      ❌ Contract Schema Error: {schema_err}")
+                                                        is_success = False
+                                                        actual_val = f"Schema Error: {str(schema_err)}"
+                                                        target = "Valid Contract"
+                                                else:
+                                                     is_success = False
+                                                     actual_val = "Unknown Operator"
+
+                                            elif src == 'statusCode':
                                                 actual_val = resp_status
                                                 if op == 'exists': is_success = True
                                                 elif op == 'notexists': is_success = False
@@ -309,6 +357,7 @@ class FlowExecutorService:
                                                     except ValueError: is_success = False
 
                                             elif src == 'header':
+                                                # Case Insensitive Lookup
                                                 found_key = next((k for k in resp_headers.keys() if k.lower() == str(prop).lower()), None)
                                                 actual_val = resp_headers[found_key] if found_key else None
                                                 if op == 'exists': is_success = (actual_val is not None)
@@ -486,16 +535,14 @@ class FlowExecutorService:
             env_vars = VariableService.get_all(db, product_id, environment_id=env_id)
             logger.info(f"    found {len(env_vars)} env vars for env_id {env_id}")
         else:
-             # FIX: If no environment selected (Global), and no global vars found (or even if found),
-             # we might want to fallback to the "First" environment to avoid 0 variables issue if user forgot to select env.
-             # Only fallback if we strictly have NO variables? Or always try to find a default?
-             # Let's fallback if `global_vars` is empty OR just to be safe, pick the first one.
-             if not global_vars:
-                 envs = EnvironmentService.get_by_project(db, product_id)
-                 if envs:
-                     fallback_env = envs[0]
-                     logger.warning(f"    ⚠️ No Environment selected and No Global Vars. Fallback to Env: {fallback_env.name} (ID: {fallback_env.id})")
-                     env_vars = VariableService.get_all(db, product_id, environment_id=fallback_env.id)
+            # FIX: If no environment selected (Global), we SHOULD attempts to find a default environment
+            # because most flows rely on environment-specific variables (like BASE_URL).
+            envs = EnvironmentService.get_by_project(db, product_id)
+            if envs:
+                fallback_env = envs[0]
+                logger.warning(f"    ⚠️ No Environment selected (Scheduled?). Fallback to First Env: {fallback_env.name} (ID: {fallback_env.id})")
+                extra_vars = VariableService.get_all(db, product_id, environment_id=fallback_env.id)
+                env_vars.extend(extra_vars)
 
         variables = {v.name: v for v in global_vars}
         for v in env_vars:

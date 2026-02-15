@@ -2,7 +2,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.analysis_service import AnalysisService
-from typing import Optional
+from typing import Optional, Dict, Any
+from pydantic import BaseModel
+
+class AssertionRequest(BaseModel):
+    status: int
+    headers: Dict[str, Any]
+    body: Any
+    mode: Optional[str] = "ai" # 'ai' or 'contract'
 
 router = APIRouter(prefix="/analysis", tags=["AI Insights"])
 
@@ -27,3 +34,14 @@ def analyze_history(project_id: Optional[int] = None, db: Session = Depends(get_
     Analyzes execution history for performance trends.
     """
     return AnalysisService.analyze_performance_trends(db, project_id)
+
+@router.post("/assertions")
+def generate_assertions(
+    req: AssertionRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Generates assertion suggestions based on the provided API response.
+    """
+    return AnalysisService.generate_assertions(db, current_user.id, req.dict())
