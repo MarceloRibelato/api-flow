@@ -71,9 +71,4 @@ async def proxy_request(req: ProxyRequest, request: Request):
         logger.error(f"Internal Proxy Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-    except httpx.RequestError as e:
-        logger.error(f"Proxy Error: {e}")
-        raise HTTPException(status_code=502, detail=f"Proxy Error: {str(e)}")
-    except Exception as e:
-        logger.error(f"Internal Proxy Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
