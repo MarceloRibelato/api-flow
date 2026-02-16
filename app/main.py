@@ -121,6 +121,10 @@ app.include_router(agent_router)
 app.include_router(execution_router)
 app.include_router(import_router)
 
+# Dashboard Router
+from app.routes.dashboard_routes import router as dashboard_router
+app.include_router(dashboard_router)
+
 # Proxy Router for bypassing CORS
 from app.routes.proxy_routes import router as proxy_router
 app.include_router(proxy_router)
