@@ -101,6 +101,10 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
             "phone": AuthService.format_phone(new_user.phone),
         }
 
+    except ValueError as ve:
+        db.rollback()
+        logger.warning(f"Validation Error: {str(ve)}")
+        raise HTTPException(status_code=400, detail=str(ve))
     except HTTPException:
         raise
     except Exception as e:

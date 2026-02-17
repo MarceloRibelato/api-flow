@@ -161,9 +161,16 @@ class DashboardService:
              for i in range(days):
                 day_str = (datetime.now(timezone.utc) - timedelta(days=i)).strftime('%Y-%m-%d')
                 stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
+        else:
+             # Pre-fill for custom range
+             delta = (end_date - start_date).days
+             for i in range(delta + 1):
+                 day_str = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
+                 stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
 
         for row in raw_data:
             day_str = row.created_at.strftime('%Y-%m-%d')
+            # Initialize if not exists (should be covered by above but safe fallback)
             if day_str not in stats_map:
                  stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
             

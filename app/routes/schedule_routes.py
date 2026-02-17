@@ -29,6 +29,7 @@ class ScheduleOut(BaseModel):
     type: str
     target_id: int
     environment_id: Optional[int]
+    environment_name: Optional[str] = None
     cron_expression: Optional[str]
     run_at: Optional[datetime]
     notification_urls: Optional[str]
@@ -74,12 +75,23 @@ def create_schedule(schedule_in: ScheduleCreate, db: Session = Depends(get_db), 
 
 @router.get("/", response_model=List[ScheduleOut])
 def list_schedules(type: Optional[str] = None, target_id: Optional[int] = None, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
-    query = db.query(ScheduleModel).filter(ScheduleModel.company_id == current_user.company_id) # Filter by Company
+    from sqlalchemy.orm import joinedload
+    from app.models.environment_model import Environment
+    
+    query = db.query(ScheduleModel).options(joinedload(ScheduleModel.environment)).filter(ScheduleModel.company_id == current_user.company_id) # Filter by Company
     if type:
         query = query.filter(ScheduleModel.type == type)
     if target_id:
         query = query.filter(ScheduleModel.target_id == target_id)
-    return query.all()
+        
+    results = query.all()
+    
+    # Manually map environment_name for Pydantic
+    for schedule in results:
+        if schedule.environment:
+            schedule.environment_name = schedule.environment.name
+            
+    return results
 
 @router.delete("/{schedule_id}")
 def delete_schedule(schedule_id: int, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):

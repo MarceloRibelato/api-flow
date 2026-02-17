@@ -26,6 +26,16 @@ class AuthService:
 
     @staticmethod
     def create_user(db: Session, user: UserCreate):
+        # Validation Logic
+        if len(user.password) < 8:
+            raise ValueError("A senha deve ter pelo menos 8 caracteres.")
+        if not any(char.isupper() for char in user.password):
+            raise ValueError("A senha deve conter pelo menos uma letra maiúscula.")
+        if not any(char.isdigit() for char in user.password):
+            raise ValueError("A senha deve conter pelo menos um número.")
+        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", user.password):
+            raise ValueError("A senha deve conter pelo menos um caractere especial.")
+
         # Limpar máscaras dos campos
         cpf_clean = re.sub(r"[.-]", "", user.cpf) if user.cpf else None
         cnpj_clean = re.sub(r"[./-]", "", user.cnpj) if user.cnpj else None
