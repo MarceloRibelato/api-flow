@@ -26,6 +26,7 @@ class HistoryService:
             schedule_id=history.schedule_id,
             feature_name=history.feature_name,
             flow_id=history.flow_id,
+            node_id=history.node_id,
             node_name=history.node_name,
             method=history.method,
             url=history.url,
@@ -76,6 +77,7 @@ class HistoryService:
                 schedule_id=history.schedule_id,
                 feature_name=history.feature_name,
                 flow_id=history.flow_id,
+                node_id=history.node_id,
                 node_name=history.node_name,
                 method=history.method,
                 url=history.url,
@@ -131,6 +133,7 @@ class HistoryService:
         end_date: Optional[datetime] = None,
         method: Optional[str] = None,
         status_code: Optional[int] = None,
+        node_id: Optional[str] = None,
         sort_by: str = 'created_at',
         order: str = 'desc'
     ):
@@ -150,6 +153,12 @@ class HistoryService:
         if schedule_id is not None:
             # logger.info(f"🔍 Filtering History by Schedule ID: {schedule_id}")
             query = query.filter(ApiExecutionHistory.schedule_id == schedule_id)
+        if node_id:
+            from sqlalchemy import or_
+            query = query.filter(or_(
+                ApiExecutionHistory.node_id == node_id,
+                ApiExecutionHistory.node_id.is_(None)
+            ))
 
         if method:
             query = query.filter(ApiExecutionHistory.method == method.upper())
@@ -199,7 +208,8 @@ class HistoryService:
                 ApiExecutionHistory.api_name,
                 ApiExecutionHistory.error_message, # Used for 'success' property logic if not direct
                 # assertions might be needed if summary shows them? Schema has assertions: Optional[List]
-                ApiExecutionHistory.assertions 
+                ApiExecutionHistory.assertions,
+                ApiExecutionHistory.node_id
             )
         )
 

@@ -28,6 +28,7 @@ class ApiExecutionHistory(Base):
     api_name = Column(String(255), nullable=True)  # Added api_name
     project_id = Column(Integer, nullable=True, index=True)
     flow_id = Column(BigInteger, nullable=True, index=True)
+    node_id = Column(String(100), nullable=True, index=True)  # Added stable node ID (e.g. '1-1')
     schedule_id = Column(Integer, nullable=True, index=True)  # Added schedule_id
     feature_name = Column(String(255), nullable=True) # Added feature_name
     node_name = Column(String(255), nullable=True)  # Added node_name for grouping

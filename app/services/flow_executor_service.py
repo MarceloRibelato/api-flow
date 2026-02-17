@@ -156,45 +156,45 @@ class FlowExecutorService:
                     api_calls = card.get('apiCalls', [])
                     logger.info(f"      Running Node: {card.get('name')} ({len(api_calls)} calls)")
                     
-                for api_call in api_calls:
-                    method = api_call.get('method', 'GET')
-                    url = FlowExecutorService.replace_vars(api_call.get('url', ''), variables_dict)
-                    
-                    # Initialize response placeholders for history
-                    resp_status = 0
-                    resp_reason = "Pending"
-                    resp_headers = {}
-                    resp_text = ""
-                    duration = 0
-                    assertion_results = []
-                    assertions_passed = True
-                    final_error_message = None
-                    headers = {}
-                    body = ""
+                    for api_call in api_calls:
+                        method = api_call.get('method', 'GET')
+                        url = FlowExecutorService.replace_vars(api_call.get('url', ''), variables_dict)
+                        
+                        # Initialize response placeholders for history
+                        resp_status = 0
+                        resp_reason = "Pending"
+                        resp_headers = {}
+                        resp_text = ""
+                        duration = 0
+                        assertion_results = []
+                        assertions_passed = True
+                        final_error_message = None
+                        headers = {}
+                        body = ""
 
-                    try:
-                        if method == 'PYTHON':
-                            # --- Logic/Script Step (Playwright) ---
-                            logger.info(f"      [SKIP] Logic Step: {api_call.get('name')} (PYTHON)")
-                            resp_status = 200
-                            resp_reason = "Logic Captured"
-                            resp_text = api_call.get('description', 'Playwright Script Content')
-                            duration = 0
-                        else:
-                            if url.startswith('/'):
-                                from app.config import settings
-                                # Remove leading slash to avoid double slash if base ends with one (though join handles it usually, simple concat is safer if we control format)
-                                # Actually, standard is base without slash, path with slash.
-                                # But let's be safe.
-                                base = settings.API_BASE_URL.rstrip('/')
-                                path = url.lstrip('/')
-                                url = f"{base}/{path}"
-                                path = url.lstrip('/')
-                                url = f"{base}/{path}"
-                                logger.info(f"      [FIX] Relative URL detected. Prepended base ({settings.API_BASE_URL}): {url}")
-                            
-                            # SANITIZATION FOR DOCKER ENV
-                            url = FlowExecutorService.sanitize_url_for_docker(url)
+                        try:
+                            if method == 'PYTHON':
+                                # --- Logic/Script Step (Playwright) ---
+                                logger.info(f"      [SKIP] Logic Step: {api_call.get('name')} (PYTHON)")
+                                resp_status = 200
+                                resp_reason = "Logic Captured"
+                                resp_text = api_call.get('description', 'Playwright Script Content')
+                                duration = 0
+                            else:
+                                if url.startswith('/'):
+                                    from app.config import settings
+                                    # Remove leading slash to avoid double slash if base ends with one (though join handles it usually, simple concat is safer if we control format)
+                                    # Actually, standard is base without slash, path with slash.
+                                    # But let's be safe.
+                                    base = settings.API_BASE_URL.rstrip('/')
+                                    path = url.lstrip('/')
+                                    url = f"{base}/{path}"
+                                    path = url.lstrip('/')
+                                    url = f"{base}/{path}"
+                                    logger.info(f"      [FIX] Relative URL detected. Prepended base ({settings.API_BASE_URL}): {url}")
+                                
+                                # SANITIZATION FOR DOCKER ENV
+                                url = FlowExecutorService.sanitize_url_for_docker(url)
                             
 
 
@@ -474,6 +474,7 @@ class FlowExecutorService:
                             api_name=api_call.get('name') or "Step",
                             project_id=product_id,
                             flow_id=flow_meta['id'],
+                            node_id=current_id,
                             schedule_id=schedule_id,
                             feature_name=feature_name,
                             node_name=card.get('name'),

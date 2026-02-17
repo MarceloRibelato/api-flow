@@ -34,8 +34,17 @@ def execute_job(schedule_id: int):
             return
 
         schedule.last_run = datetime.utcnow()
-        if scheduler.get_job(str(schedule_id)):
-             schedule.next_run = scheduler.get_job(str(schedule_id)).next_run_time
+        
+        job = scheduler.get_job(str(schedule_id))
+        if job:
+             schedule.next_run = job.next_run_time
+        else:
+             # Job is gone from scheduler (one-time job finished)
+             schedule.next_run = None
+             if not schedule.cron_expression:
+                 schedule.status = 'completed'
+                 logger.info(f"Marking one-time schedule {schedule_id} as completed")
+        
         db.commit()
 
         # Import services locally
