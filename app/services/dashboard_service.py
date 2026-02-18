@@ -7,11 +7,14 @@ from datetime import datetime, timedelta, timezone
 class DashboardService:
     @staticmethod
     def _apply_filters(query, project_id: Optional[int] = None, flow_id: Optional[int] = None, 
+                       environment_id: Optional[int] = None,
                        start_date: Optional[datetime] = None, end_date: Optional[datetime] = None):
         if project_id:
             query = query.filter(ApiExecutionHistory.project_id == project_id)
         if flow_id:
             query = query.filter(ApiExecutionHistory.flow_id == flow_id)
+        if environment_id:
+            query = query.filter(ApiExecutionHistory.environment_id == environment_id)
         
         # Ensure dates are timezone-aware (UTC) if they are naive
         if start_date and start_date.tzinfo is None:
@@ -28,6 +31,7 @@ class DashboardService:
 
     @staticmethod
     def get_summary_stats(db: Session, days: int = 7, project_id: int = None, flow_id: int = None, 
+                          environment_id: int = None,
                           start_date: datetime = None, end_date: datetime = None) -> Dict[str, Any]:
         """
         Returns summary metrics for the period/filters.
@@ -37,7 +41,7 @@ class DashboardService:
             start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
         base_query = db.query(ApiExecutionHistory)
-        base_query = DashboardService._apply_filters(base_query, project_id, flow_id, start_date, end_date)
+        base_query = DashboardService._apply_filters(base_query, project_id, flow_id, environment_id, start_date, end_date)
         
         total_executions = base_query.count()
         
@@ -59,9 +63,10 @@ class DashboardService:
 
     @staticmethod
     def get_recent_failures(db: Session, limit: int = 5, project_id: int = None, flow_id: int = None,
+                            environment_id: int = None,
                             start_date: datetime = None, end_date: datetime = None) -> List[Dict[str, Any]]:
         query = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.error_message != None)
-        query = DashboardService._apply_filters(query, project_id, flow_id, start_date, end_date)
+        query = DashboardService._apply_filters(query, project_id, flow_id, environment_id, start_date, end_date)
         
         failures = query.order_by(desc(ApiExecutionHistory.created_at)).limit(limit).all()
             
@@ -80,9 +85,10 @@ class DashboardService:
 
     @staticmethod
     def get_slowest_executions(db: Session, limit: int = 5, project_id: int = None, flow_id: int = None,
+                               environment_id: int = None,
                                start_date: datetime = None, end_date: datetime = None) -> List[Dict[str, Any]]:
         query = db.query(ApiExecutionHistory)
-        query = DashboardService._apply_filters(query, project_id, flow_id, start_date, end_date)
+        query = DashboardService._apply_filters(query, project_id, flow_id, environment_id, start_date, end_date)
         
         slowest = query.order_by(desc(ApiExecutionHistory.response_time)).limit(limit).all()
             
@@ -101,6 +107,7 @@ class DashboardService:
 
     @staticmethod
     def get_daily_stats(db: Session, days: int = 7, project_id: int = None, flow_id: int = None,
+                        environment_id: int = None,
                         start_date: datetime = None, end_date: datetime = None) -> List[Dict[str, Any]]:
         """
         Returns execution counts (success/failure) grouped by day.
@@ -126,6 +133,8 @@ class DashboardService:
             query = query.filter(ApiExecutionHistory.project_id == project_id)
         if flow_id:
             query = query.filter(ApiExecutionHistory.flow_id == flow_id)
+        if environment_id:
+            query = query.filter(ApiExecutionHistory.environment_id == environment_id)
         
         if start_date_query:
             query = query.filter(ApiExecutionHistory.created_at >= start_date_query)
@@ -194,6 +203,7 @@ class DashboardService:
 
     @staticmethod
     def get_top_failing_apis(db: Session, limit: int = 5, project_id: int = None, flow_id: int = None,
+                             environment_id: int = None,
                              start_date: datetime = None, end_date: datetime = None) -> List[Dict[str, Any]]:
         query = db.query(
             ApiExecutionHistory.api_name,
@@ -202,7 +212,7 @@ class DashboardService:
              (ApiExecutionHistory.status_code >= 400) | (ApiExecutionHistory.error_message != None)
         )
         
-        query = DashboardService._apply_filters(query, project_id, flow_id, start_date, end_date)
+        query = DashboardService._apply_filters(query, project_id, flow_id, environment_id, start_date, end_date)
         
         top_failures = query.group_by(
             ApiExecutionHistory.api_name
