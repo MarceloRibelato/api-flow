@@ -1,5 +1,5 @@
 from datetime import datetime
-from datetime import datetime
+import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -33,8 +33,7 @@ def save_execution_history(
     try:
         return HistoryService.save(db, history, current_user.id)
     except Exception as e:
-        # db.rollback is handled by exception if session management isn't robust,
-        # but here we prevent bubbling implementation details
+        logging.error(f"❌ Error saving history: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erro ao salvar: {str(e)}")
 
 
@@ -78,6 +77,7 @@ def get_execution_history(
             order
         )
     except Exception as e:
+        logging.error(f"❌ Error getting history: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erro ao buscar: {str(e)}")
 
 

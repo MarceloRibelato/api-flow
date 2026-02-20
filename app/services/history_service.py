@@ -5,7 +5,7 @@ from typing import Optional
 from sqlalchemy import distinct
 from sqlalchemy.orm import Session
 
-from app.models.api_test_history_models import ApiExecutionHistory
+from app.models.api_test_history_models import ApiExecutionHistory, ApiExecutionHistoryArchive
 from app.models.user_models import UserDB
 from app.schemas.history_schemas import ExecutionHistoryCreate
 
@@ -126,7 +126,6 @@ class HistoryService:
         api_id: Optional[int] = None,
         project_id: Optional[int] = None,
         flow_id: Optional[int] = None,
-
         environment_id: Optional[int] = None,
         schedule_id: Optional[int] = None,
         start_date: Optional[datetime] = None,
@@ -137,8 +136,9 @@ class HistoryService:
         sort_by: str = 'created_at',
         order: str = 'desc'
     ):
-        # Join with UserDB to filter by company
-        query = db.query(ApiExecutionHistory).join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
+        # Join with UserDB to filter by company. Use outerjoin to avoid losing records if user_id is missing
+        # though user_id should be mandatory for permission tracking
+        query = db.query(ApiExecutionHistory).outerjoin(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
             UserDB.company_id == company_id
         )
 
@@ -297,4 +297,84 @@ class HistoryService:
             .group_by(ApiExecutionHistory.method, ApiExecutionHistory.url)
             .all()
         )
+
+    @staticmethod
+    def archive_old_records(db: Session, days: int):
+        """
+        Moves history records older than 'days' to the archive table.
+        """
+        from datetime import datetime, timedelta
+        threshold = datetime.utcnow() - timedelta(days=days)
+        
+        try:
+            # 1. Find records to archive
+            records_to_archive = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.created_at < threshold).all()
+            count = len(records_to_archive)
+            
+            if count > 0:
+                archive_objects = []
+                for rec in records_to_archive:
+                    archive_rec = ApiExecutionHistoryArchive(
+                        execution_id=rec.execution_id,
+                        api_id=rec.api_id,
+                        api_name=rec.api_name,
+                        project_id=rec.project_id,
+                        flow_id=rec.flow_id,
+                        node_id=rec.node_id,
+                        schedule_id=rec.schedule_id,
+                        feature_name=rec.feature_name,
+                        node_name=rec.node_name,
+                        user_id=rec.user_id,
+                        environment_id=rec.environment_id,
+                        environment_name=rec.environment_name,
+                        method=rec.method,
+                        url=rec.url,
+                        request_headers=rec.request_headers,
+                        request_body=rec.request_body,
+                        request_params=rec.request_params,
+                        status_code=rec.status_code,
+                        status_text=rec.status_text,
+                        response_headers=rec.response_headers,
+                        response_body=rec.response_body,
+                        response_time=rec.response_time,
+                        error_message=rec.error_message,
+                        variables_used=rec.variables_used,
+                        processed_url=rec.processed_url,
+                        assertions=rec.assertions,
+                        created_at=rec.created_at
+                    )
+                    archive_objects.append(archive_rec)
+                
+                # 2. Bulk insert into archive
+                db.bulk_save_objects(archive_objects)
+                
+                # 3. Delete from main table
+                ids_to_delete = [r.id for r in records_to_archive]
+                db.query(ApiExecutionHistory).filter(ApiExecutionHistory.id.in_(ids_to_delete)).delete(synchronize_session=False)
+                
+                db.commit()
+            return count
+        except Exception as e:
+            db.rollback()
+            raise e
+
+    @staticmethod
+    def purge_archived_records(db: Session, days: int):
+        """
+        Permanently deletes archived records older than 'days'.
+        """
+        from datetime import datetime, timedelta
+        threshold = datetime.utcnow() - timedelta(days=days)
+        
+        try:
+            delete_query = db.query(ApiExecutionHistoryArchive).filter(ApiExecutionHistoryArchive.created_at < threshold)
+            count = delete_query.count()
+            
+            if count > 0:
+                delete_query.delete(synchronize_session=False)
+                db.commit()
+            return count
+        except Exception as e:
+            db.rollback()
+            raise e
 

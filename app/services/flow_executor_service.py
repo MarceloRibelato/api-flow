@@ -46,37 +46,32 @@ class FlowExecutorService:
     @staticmethod
     def sanitize_url_for_docker(url: str) -> str:
         """
-        Rewrites localhost URLs to localhost:8000 when running inside Docker backend.
-        The backend listens on port 8000, but variables often point to localhost (port 80).
+        Rewrites localhost URLs to use internal gateway or specific overrides when running inside Docker.
         """
         if not url: return url
+        from app.config import settings
         
-        # Check if URL targets localhost port 80 (default)
-        # e.g. http://localhost/api/... -> http://localhost:8000/api/...
-        # e.g. http://127.0.0.1/api/... -> http://127.0.0.1:8000/api/...
+        # Rule A: User-specified global replacement for localhost
+        if settings.TARGET_URL_REPLACEMENT and ("localhost" in url or "127.0.0.1" in url):
+             new_url = re.sub(r'(https?://)(localhost|127\.0\.0\.1)', rf'\1{settings.TARGET_URL_REPLACEMENT}', url)
+             logger.info(f"      🔧 Rewrote URL (Global Override): {url} -> {new_url}")
+             return new_url
+        
+        # Rule B: Standard Internal rewrite for port 80/443 (Gateway/Nginx)
         if url.startswith("http://localhost/") or url.startswith("http://127.0.0.1/"):
-             # Insert port 8000 AND remove /api prefix if present (because Nginx usually strips it)
-             new_url = url.replace("http://localhost/", "http://localhost:8000/")
-             new_url = new_url.replace("http://127.0.0.1/", "http://127.0.0.1:8000/")
+             gateway = settings.INTERNAL_GATEWAY_URL.rstrip('/')
+             new_url = url.replace("http://localhost/", f"{gateway}/").replace("http://127.0.0.1/", f"{gateway}/")
              
-             # Nginx Logic: /api/ -> /
+             # Relative path mapping: /api/ -> / if gateway handles it
              if "/api/" in new_url:
                  new_url = new_url.replace("/api/", "/")
                  
-             logger.info(f"      🔧 Rewrote Internal URL: {url} -> {new_url}")
+             logger.info(f"      🔧 Rewrote Internal Gateway URL: {url} -> {new_url}")
              return new_url
              
-        # Also handle https if dev uses self-signed
-        if url.startswith("https://localhost/") or url.startswith("https://127.0.0.1/"):
-             # Assuming backend doesn't do SSL, we might need to downgrade to http OR use port 8000? 
-             # Usually backend is http inside container.
-             new_url = url.replace("https://localhost/", "http://localhost:8000/")
-             new_url = new_url.replace("https://127.0.0.1/", "http://127.0.0.1:8000/")
-             
-             if "/api/" in new_url:
-                 new_url = new_url.replace("/api/", "/")
-                 
-             logger.info(f"      🔧 Rewrote Internal HTTPS URL: {url} -> {new_url}")
+        # Rule C: Fallback for localhost:8000 to hit backend directly
+        if ":8000" in url and ("localhost" in url or "127.0.0.1" in url):
+             new_url = url.replace("localhost", "127.0.0.1") # Keep it internal
              return new_url
              
         return url
@@ -96,13 +91,6 @@ class FlowExecutorService:
             # Load full flow data with cards
             flow_data = FlowService.load(db, flow_meta['project_id'], company_id, flow_meta['id'])
             cards = flow_data.get('cardData', {})
-            
-            logger.info(f"    ▶ Executing Flow: {flow_meta.get('name')} (ID: {flow_meta['id']}) - Cards: {len(cards)}")
-
-            if not cards:
-                logger.warning(f"     ⚠ No cards found in flow {flow_meta['id']}")
-                return 0, 0
-            
             nodes = flow_data.get('nodes', [])
             edges = flow_data.get('edges', [])
             
@@ -139,383 +127,210 @@ class FlowExecutorService:
             flow_session.trust_env = False # Disable proxy for performance
 
             visited = set()
-            
-            # Accumulate history items for batch save
             history_buffer = []
 
             while queue:
                 current_id = queue.pop(0)
-                
                 if current_id in visited:
                     continue
                 visited.add(current_id)
 
-                # Execute Card for this Node if exists
+                # Execute Card for this Node
                 card = cards.get(current_id)
                 if card:
                     api_calls = card.get('apiCalls', [])
                     logger.info(f"      Running Node: {card.get('name')} ({len(api_calls)} calls)")
                     
-                    for api_call in api_calls:
-                        method = api_call.get('method', 'GET')
-                        url = FlowExecutorService.replace_vars(api_call.get('url', ''), variables_dict)
-                        
-                        # Initialize response placeholders for history
-                        resp_status = 0
-                        resp_reason = "Pending"
-                        resp_headers = {}
-                        resp_text = ""
-                        duration = 0
-                        assertion_results = []
-                        assertions_passed = True
-                        final_error_message = None
-                        headers = {}
-                        body = ""
+                    try:
+                        for api_call in api_calls:
+                            method = api_call.get('method', 'GET')
+                            url = FlowExecutorService.replace_vars(api_call.get('url', ''), variables_dict)
+                            
+                            resp_status = 0
+                            resp_reason = "Pending"
+                            resp_headers = {}
+                            resp_text = ""
+                            duration = 0
+                            assertion_results = []
+                            assertions_passed = True
+                            final_error_message = None
+                            headers = {}
+                            body = ""
 
-                        try:
-                            if method == 'PYTHON':
-                                # --- Logic/Script Step (Playwright) ---
-                                logger.info(f"      [SKIP] Logic Step: {api_call.get('name')} (PYTHON)")
-                                resp_status = 200
-                                resp_reason = "Logic Captured"
-                                resp_text = api_call.get('description', 'Playwright Script Content')
-                                duration = 0
-                            else:
-                                if url.startswith('/'):
-                                    from app.config import settings
-                                    # Remove leading slash to avoid double slash if base ends with one (though join handles it usually, simple concat is safer if we control format)
-                                    # Actually, standard is base without slash, path with slash.
-                                    # But let's be safe.
-                                    base = settings.API_BASE_URL.rstrip('/')
-                                    path = url.lstrip('/')
-                                    url = f"{base}/{path}"
-                                    path = url.lstrip('/')
-                                    url = f"{base}/{path}"
-                                    logger.info(f"      [FIX] Relative URL detected. Prepended base ({settings.API_BASE_URL}): {url}")
-                                
-                                # SANITIZATION FOR DOCKER ENV
-                                url = FlowExecutorService.sanitize_url_for_docker(url)
-                            
-
-
-                            # 🛑 DOMAIN FILTERING (AdBlock)
-                            if FlowExecutorService.is_blocked_domain(url):
-                                logger.warning(f"      ⛔ Skipping Blocked/Ad Domain: {url}")
-                                continue
-                            
-                            headers_raw = api_call.get('headers', {})
-                            if isinstance(headers_raw, list):
-                                mapping = {}
-                                for h in headers_raw:
-                                        if isinstance(h, dict):
-                                            if 'key' in h and 'value' in h:
-                                                mapping[h['key']] = h['value']
-                                            else:
-                                                mapping.update(h)
-                                headers_raw = mapping
-                            
-                            headers_json_str = json.dumps(headers_raw)
-                            headers = json.loads(FlowExecutorService.replace_vars(headers_json_str, variables_dict))
-                            
-                            if isinstance(headers, list): headers = {}
-                            if not isinstance(headers, dict) and headers is not None: headers = {}
-                            
-                            # SAFETY: Remove headers that interfere with requests auto-calculation
-                            headers = {k: v for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
-
-                            body = FlowExecutorService.replace_vars(api_call.get('body', ''), variables_dict)
-
-                            # Identify existing Content-Type key (case-insensitive)
-                            ct_key = next((k for k in headers.keys() if k.lower() == 'content-type'), None)
-                            body_is_urlencoded = isinstance(body, str) and ('=' in body or '&' in body) and not body.strip().startswith('{')
-                            
-                            if ct_key:
-                                val = headers[ct_key]
-                                if 'multipart/form-data' in str(val).lower() and body_is_urlencoded:
-                                    headers[ct_key] = 'application/x-www-form-urlencoded'
-                                    logger.info(f"      [FIX] Forced Content-Type to x-www-form-urlencoded (was multipart)")
-                            
-                            if 'auth/login' in url and body_is_urlencoded:
-                                if not ct_key:
-                                    headers['Content-Type'] = 'application/x-www-form-urlencoded'
-                                elif 'json' in headers[ct_key]:
-                                     headers[ct_key] = 'application/x-www-form-urlencoded'
-
-                            start_time = time.time()
                             try:
-                                logger.info(f"      [DEBUG] Requesting: {method} {url}")
-                                resp = flow_session.request(method, url, headers=headers, data=body)
-                                duration = int((time.time() - start_time) * 1000)
-                                resp_status = resp.status_code
-                                resp_reason = resp.reason
-                                resp_headers = dict(resp.headers)
-                                resp_text = resp.text
-                                
-                                try:
-                                    resp_json = resp.json()
-                                except ValueError:
-                                    resp_json = None
-
-                                # --- Assertion Evaluation Logic ---
-                                assertions_raw = api_call.get('assertions', [])
-                                if assertions_raw:
-                                    unique_assertions = []
-                                    seen_assertions = set()
+                                if method == 'PYTHON':
+                                    logger.info(f"      [SKIP] Logic Step: {api_call.get('name')} (PYTHON)")
+                                    resp_status = 200
+                                    resp_reason = "Logic Captured"
+                                    resp_text = api_call.get('description', 'Playwright Script Content')
+                                else:
+                                    if url.startswith('/'):
+                                        from app.config import settings
+                                        base = settings.API_BASE_URL.rstrip('/')
+                                        path = url.lstrip('/')
+                                        url = f"{base}/{path}"
                                     
-                                    # 1. Deduplication
-                                    for assertion in assertions_raw:
-                                        src = assertion.get('source') or assertion.get('type') or 'statusCode'
-                                        prop = assertion.get('property') or assertion.get('path') or ''
-                                        op = assertion.get('operator') or 'equals'
-                                        target = assertion.get('value')
-                                        if target is None: target = assertion.get('target') or ''
-                                        
-                                        # Strict Single Contract Check
-                                        if src == 'contract':
-                                            key = 'contract_unique_key'
-                                        else:
-                                            key = f"{src}|{prop}|{op}|{target}"
-                                            
-                                        if key not in seen_assertions:
-                                            seen_assertions.add(key)
-                                            unique_assertions.append(assertion)
+                                    url = FlowExecutorService.sanitize_url_for_docker(url)
 
-                                    for assertion in unique_assertions:
+                                    if FlowExecutorService.is_blocked_domain(url):
+                                        logger.warning(f"      ⛔ Skipping Blocked/Ad Domain: {url}")
+                                        continue
+                                    
+                                    headers_raw = api_call.get('headers', {})
+                                    if isinstance(headers_raw, list):
+                                        mapping = {}
+                                        for h in headers_raw:
+                                            if isinstance(h, dict):
+                                                if 'key' in h and 'value' in h:
+                                                    mapping[h['key']] = h['value']
+                                                else:
+                                                    mapping.update(h)
+                                        headers_raw = mapping
+                                    
+                                    headers_json_str = json.dumps(headers_raw)
+                                    headers = json.loads(FlowExecutorService.replace_vars(headers_json_str, variables_dict))
+                                    if not isinstance(headers, dict): headers = {}
+                                    headers = {k: v for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
+
+                                    body = FlowExecutorService.replace_vars(api_call.get('body', ''), variables_dict)
+                                    ct_key = next((k for k in headers.keys() if k.lower() == 'content-type'), None)
+                                    body_is_urlencoded = isinstance(body, str) and ('=' in body or '&' in body) and not body.strip().startswith('{')
+                                    
+                                    if ct_key and 'multipart/form-data' in str(headers[ct_key]).lower() and body_is_urlencoded:
+                                        headers[ct_key] = 'application/x-www-form-urlencoded'
+                                    
+                                    if 'auth/login' in url and body_is_urlencoded:
+                                        if not ct_key: headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                                        elif 'json' in headers[ct_key]: headers[ct_key] = 'application/x-www-form-urlencoded'
+
+                                    start_time = time.time()
+                                    resp = flow_session.request(method, url, headers=headers, data=body)
+                                    duration = int((time.time() - start_time) * 1000)
+                                    resp_status = resp.status_code
+                                    resp_reason = resp.reason
+                                    resp_headers = dict(resp.headers)
+                                    resp_text = resp.text
+                                    
+                                    try:
+                                        resp_json = resp.json()
+                                    except ValueError:
+                                        resp_json = None
+
+                                    # --- Assertions ---
+                                    assertions_raw = api_call.get('assertions', [])
+                                    for assertion in assertions_raw:
                                         try:
-                                            # Normalize Source
                                             src = assertion.get('source') or assertion.get('type') or 'statusCode'
                                             if src == 'status': src = 'statusCode'
-                                            
                                             raw_operator = assertion.get('operator', 'equals')
-                                            target = assertion.get('value')
-                                            if target is None: target = assertion.get('target')
+                                            target = assertion.get('value') if assertion.get('value') is not None else assertion.get('target')
                                             prop = assertion.get('property') or assertion.get('path')
                                             op = str(raw_operator).lower()
                                             
-                                            # Operator mapping...
-                                            if op in ['equals', '==', 'eq']: op = 'equals'
-                                            elif op in ['notequals', '!=', 'notesquals', 'neq', 'not_equals']: op = 'notequals'
-                                            elif op in ['contains', 'in']: op = 'contains'
-                                            elif op in ['notcontains', 'not_contains']: op = 'notcontains'
-                                            elif op in ['greaterthan', 'gt', '>']: op = 'gt'
-                                            elif op in ['lessthan', 'lt', '<']: op = 'lt'
-                                            elif op in ['exists']: op = 'exists'
-                                            elif op in ['notexists', 'not_exists']: op = 'notexists'
-                                            elif op in ['json_schema', 'matches_schema']: op = 'json_schema' # Contract
-
                                             actual_val = None
                                             is_success = False
                                             
-                                            # --- CONTRACT VALIDATION ---
-                                            if src == 'contract':
-                                                if op == 'json_schema':
-                                                    try:
-                                                        schema = json.loads(target) if isinstance(target, str) else target
-                                                        data_to_validate = resp_json
-                                                        validate(instance=data_to_validate, schema=schema)
-                                                        is_success = True
-                                                        actual_val = "Schema Match"
-                                                        target = "Valid Contract" # UX
-                                                    except ValidationError as ve:
-                                                        is_success = False
-                                                        actual_val = f"Validation Error: {ve.message}"
-                                                        target = "Valid Contract"
-                                                    except Exception as schema_err:
-                                                        logger.error(f"      ❌ Contract Schema Error: {schema_err}")
-                                                        is_success = False
-                                                        actual_val = f"Schema Error: {str(schema_err)}"
-                                                        target = "Valid Contract"
-                                                else:
-                                                     is_success = False
-                                                     actual_val = "Unknown Operator"
-
-                                            elif src == 'statusCode':
+                                            if src == 'statusCode':
                                                 actual_val = resp_status
-                                                if op == 'exists': is_success = True
-                                                elif op == 'notexists': is_success = False
-                                                else:
-                                                    try:
-                                                        target_int = int(str(target).strip())
-                                                        if op == 'equals': is_success = (actual_val == target_int)
-                                                        elif op == 'notequals': is_success = (actual_val != target_int)
-                                                        elif op == 'gt': is_success = (actual_val > target_int)
-                                                        elif op == 'lt': is_success = (actual_val < target_int)
-                                                        else: is_success = (actual_val == target_int)
-                                                    except ValueError: is_success = False
+                                                try:
+                                                    t_int = int(str(target).strip())
+                                                    if op in ['equals', 'eq', '==']: is_success = (actual_val == t_int)
+                                                    elif op in ['notequals', 'neq', '!=']: is_success = (actual_val != t_int)
+                                                    elif op in ['gt', '>']: is_success = (actual_val > t_int)
+                                                    elif op in ['lt', '<']: is_success = (actual_val < t_int)
+                                                except: is_success = False
+                                            elif src == 'body' and resp_json:
+                                                parts = str(prop).split('.')
+                                                curr = resp_json
+                                                for p in parts:
+                                                    if isinstance(curr, dict) and p in curr: curr = curr[p]
+                                                    elif isinstance(curr, list):
+                                                        try: curr = curr[int(p)]
+                                                        except: curr = None; break
+                                                    else: curr = None; break
+                                                actual_val = curr
+                                                str_act = str(actual_val) if actual_val is not None else ""
+                                                str_tar = str(target)
+                                                if op in ['equals', 'eq']: is_success = (str_act == str_tar)
+                                                elif op in ['contains', 'in']: is_success = (str_tar in str_act)
                                             
-                                            elif src == 'responseTime':
-                                                actual_val = duration
-                                                if op == 'exists': is_success = True
-                                                elif op == 'notexists': is_success = False
-                                                else:
-                                                    try:
-                                                        target_int = int(str(target).strip())
-                                                        if op == 'lt': is_success = (actual_val < target_int)
-                                                        elif op == 'gt': is_success = (actual_val > target_int)
-                                                        elif op == 'equals': is_success = (actual_val == target_int)
-                                                        else: is_success = (actual_val < target_int)
-                                                    except ValueError: is_success = False
-
-                                            elif src == 'header':
-                                                # Case Insensitive Lookup
-                                                found_key = next((k for k in resp_headers.keys() if k.lower() == str(prop).lower()), None)
-                                                actual_val = resp_headers[found_key] if found_key else None
-                                                if op == 'exists': is_success = (actual_val is not None)
-                                                elif op == 'notexists': is_success = (actual_val is None)
-                                                else:
-                                                    val_to_compare = str(actual_val) if actual_val is not None else ""
-                                                    if op == 'equals': is_success = (val_to_compare == str(target))
-                                                    elif op == 'contains': is_success = (str(target) in val_to_compare)
-                                                    elif op == 'notequals': is_success = (val_to_compare != str(target))
-                                                    elif op == 'notcontains': is_success = (str(target) not in val_to_compare)
-                                                    else: is_success = (val_to_compare == str(target))
-
-                                            elif src == 'body':
-                                                if resp_json:
-                                                    assertion_path_parts = str(prop).split('.')
-                                                    current = resp_json
-                                                    for part in assertion_path_parts:
-                                                        if isinstance(current, dict) and part in current: current = current[part]
-                                                        elif isinstance(current, list):
-                                                            try:
-                                                                idx = int(part)
-                                                                if 0 <= idx < len(current): current = current[idx]
-                                                                else: current = None; break
-                                                            except ValueError: current = None; break
-                                                        else: current = None; break
-                                                    actual_val = current
-                                                else: actual_val = None
-
-                                                if op == 'exists': is_success = (actual_val is not None)
-                                                elif op == 'notexists': is_success = (actual_val is None)
-                                                else:
-                                                    str_actual = str(actual_val) if actual_val is not None else ""
-                                                    str_target = str(target)
-                                                    if op == 'equals': is_success = (str_actual == str_target)
-                                                    elif op == 'contains': is_success = (str_target in str_actual)
-                                                    elif op == 'notequals': is_success = (str_actual != str_target)
-                                                    elif op == 'notcontains': is_success = (str_target not in str_actual)
-                                                    else: is_success = (str_actual == str_target)
-
                                             assertion_results.append({
-                                                "source": src, "operator": raw_operator, "target": str(target) if target is not None else "",
-                                                "actual": str(actual_val) if actual_val is not None else "None", "success": is_success
+                                                "source": src, "operator": raw_operator, "target": str(target),
+                                                "actual": str(actual_val), "success": is_success
                                             })
                                             if not is_success: assertions_passed = False
-                                        except Exception as ass_err:
-                                            logger.error(f"Assertion Error: {ass_err}")
-                                            assertions_passed = False
+                                        except: assertions_passed = False
 
-                                # --- Automatic Variable Extraction ---
-                                extracts = api_call.get('extracts', [])
-                                if extracts and resp_json:
-                                    for rule in extracts:
-                                        try:
-                                            r_source = rule.get('source')
-                                            r_property = rule.get('property', '')
-                                            r_variable = rule.get('variable', '')
-                                            value = None
-                                            if r_source == 'header':
-                                                value = next((v for k, v in resp_headers.items() if k.lower() == str(r_property).lower()), None)
-                                            elif r_source == 'body':
-                                                extract_path_parts = str(r_property).split('.')
-                                                current = resp_json
-                                                for part in extract_path_parts:
-                                                    if isinstance(current, dict) and part in current: current = current[part]
-                                                    elif isinstance(current, list):
-                                                        try:
-                                                            idx = int(part)
-                                                            if 0 <= idx < len(current): current = current[idx]
-                                                            else: current = None; break
-                                                        except ValueError: current = None; break
-                                                    else: current = None; break
-                                                value = current
-                                            
-                                            if value is not None:
-                                                var_name = str(r_variable).strip().upper()
-                                                if var_name:
-                                                    variables_dict[var_name] = str(value)
-                                                    try:
-                                                        new_var = VariableCreate(name=var_name, value=str(value), project_id=product_id, environment_id=env_id, type="extracted")
-                                                        VariableService.create(db, new_var)
-                                                        logger.info(f"      ✅ Extracted & Saved Variable [{var_name}] = '{value}'")
-                                                    except: pass
-                                        except Exception as e:
-                                            logger.error(f"      ❌ Extraction Error: {e}")
+                                    # --- Extraction ---
+                                    extracts = api_call.get('extracts', [])
+                                    if extracts and resp_json:
+                                        for rule in extracts:
+                                            try:
+                                                r_prop = rule.get('property', '')
+                                                r_var = rule.get('variable', '').strip().upper()
+                                                parts = r_prop.split('.')
+                                                curr = resp_json
+                                                for p in parts:
+                                                    if isinstance(curr, dict) and p in curr: curr = curr[p]
+                                                    elif isinstance(curr, list):
+                                                        try: curr = curr[int(p)]
+                                                        except: curr = None; break
+                                                    else: curr = None; break
+                                                if curr is not None and r_var:
+                                                    variables_dict[r_var] = str(curr)
+                                                    new_var = VariableCreate(name=r_var, value=str(curr), project_id=product_id, environment_id=env_id, type="extracted")
+                                                    VariableService.create(db, new_var)
+                                                    logger.info(f"      ✅ Extracted [{r_var}] = '{curr}'")
+                                            except: pass
 
                             except Exception as req_ex:
                                 logger.error(f"Request failed: {req_ex}")
                                 resp_status = 500
-                                resp_reason = "Request Exception"
-                                resp_text = str(req_ex)
                                 final_error_message = str(req_ex)
 
-                        # Determine Final Status for history display
-                        if not final_error_message:
-                            if api_call.get('assertions'):
-                                if not assertions_passed:
+                            if not final_error_message:
+                                if api_call.get('assertions') and not assertions_passed:
                                     final_error_message = "Assertions Failed"
-                                    flow_failed = True
-                            else:
-                                if resp_status >= 400:
+                                elif resp_status >= 400:
                                     final_error_message = f"HTTP Error {resp_status}"
-                                    flow_failed = True
 
-                        if final_error_message: flow_fail_count += 1
-                        else: flow_success_count += 1
+                            if final_error_message: flow_fail_count += 1
+                            else: flow_success_count += 1
 
-                        # Sanitize ID
-                        raw_api_id = api_call.get('id')
-                        api_id_clean = int(raw_api_id) if str(raw_api_id).isdigit() else None
-
-                        # Prepare History Object (ALWAYS save)
-                        hist = ExecutionHistoryCreate(
-                            api_id=api_id_clean,
-                            api_name=api_call.get('name') or "Step",
-                            project_id=product_id,
-                            flow_id=flow_meta['id'],
-                            node_id=current_id,
-                            schedule_id=schedule_id,
-                            feature_name=feature_name,
-                            node_name=card.get('name'),
-                            method=method,
-                            url=url,
-                            request_headers=headers,
-                            request_body=body,
-                            status_code=resp_status,
-                            status_text=resp_reason,
-                            response_headers=resp_headers,
-                            response_body=resp_text,
-                            response_time=duration,
-                            environment_id=env_id,
-                            environment_name=str(env_id),
-                            variables_used={},
-                            assertions=assertion_results,
-                            error_message=final_error_message
-                        )
-                        history_buffer.append(hist)
-                    
+                            hist = ExecutionHistoryCreate(
+                                api_id=int(api_call.get('id')) if str(api_call.get('id')).isdigit() else None,
+                                api_name=api_call.get('name') or "Step",
+                                project_id=product_id,
+                                flow_id=flow_meta['id'],
+                                node_id=current_id,
+                                schedule_id=schedule_id,
+                                feature_name=feature_name,
+                                node_name=card.get('name'),
+                                method=method,
+                                url=url,
+                                status_code=resp_status,
+                                response_body=resp_text,
+                                response_time=duration,
+                                environment_id=env_id,
+                                error_message=final_error_message,
+                                assertions=assertion_results
+                            )
+                            history_buffer.append(hist)
                     except Exception as loop_ex:
                         logger.error(f"Critical error in execution loop: {loop_ex}")
 
-                # Add neighbors to queue
-                neighbors = adj.get(current_id, [])
-                neighbors.sort(key=get_x_pos)
-                for neighbor in neighbors:
-                        in_degree[neighbor] -= 1
-                        if in_degree[neighbor] == 0:
-                            queue.append(neighbor)
-            
-            # BATCH SAVE ALL HISTORY
+                # Neighbors
+                for tgt in adj.get(current_id, []):
+                    in_degree[tgt] -= 1
+                    if in_degree[tgt] == 0:
+                        queue.append(tgt)
+                        queue.sort(key=get_x_pos)
+
             if history_buffer:
-                logger.info(f"💾 Bulk Saving {len(history_buffer)} execution records...")
                 HistoryService.save_batch(db, history_buffer, user_id)
 
             return flow_success_count, flow_fail_count
-        except Exception as e:
-            logger.error(f"Error executing flow {flow_meta['id']}: {e}")
-            db.rollback()
-            return 0, 0
+
         except Exception as e:
             logger.error(f"Error executing flow {flow_meta['id']}: {e}")
             db.rollback()

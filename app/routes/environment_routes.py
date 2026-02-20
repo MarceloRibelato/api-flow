@@ -7,7 +7,7 @@ from app.database import get_db
 from app.schemas.environment_schemas import EnvironmentCreate, EnvironmentResponse
 from app.services.environment_service import EnvironmentService
 
-router = APIRouter()
+router = APIRouter(tags=["Environments"])
 
 # --- Environment Endpoints ---
 

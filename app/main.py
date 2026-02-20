@@ -26,6 +26,7 @@ from app.routes.analysis_routes import router as analysis_router
 from app.routes.agent_routes import router as agent_router
 from app.routes.execution_routes import router as execution_router
 from app.routes.import_routes import router as import_router
+from app.routes.cicd_routes import router as cicd_router
 
 # ===== CONFIGURAÇÃO DE LOGGING =====
 setup_logging()
@@ -113,13 +114,14 @@ app.include_router(feature_router)
 app.include_router(history_router)
 app.include_router(environment_router)
 app.include_router(variable_router)
-app.include_router(schedule_router, prefix="/schedules", tags=["Schedules"])
+app.include_router(schedule_router, prefix="/schedules")
 app.include_router(capture_router)
 app.include_router(analysis_router)
 app.include_router(agent_router)
 app.include_router(agent_router)
 app.include_router(execution_router)
 app.include_router(import_router)
+app.include_router(cicd_router)
 
 # Dashboard Router
 from app.routes.dashboard_routes import router as dashboard_router

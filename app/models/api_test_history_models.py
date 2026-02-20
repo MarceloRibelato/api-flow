@@ -75,3 +75,47 @@ class ApiExecutionHistory(Base):
         # 3. Exception occurred
         # So providing error_message is the Source of Truth for failure.
         return not bool(self.error_message)
+
+
+class ApiExecutionHistoryArchive(Base):
+    __tablename__ = "api_test_execution_history_archive"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_id = Column(String, unique=True, index=True)
+
+    # IDs relacionados
+    api_id = Column(BigInteger, nullable=True, index=True)
+    api_name = Column(String(255), nullable=True)
+    project_id = Column(Integer, nullable=True, index=True)
+    flow_id = Column(BigInteger, nullable=True, index=True)
+    node_id = Column(String(100), nullable=True, index=True)
+    schedule_id = Column(Integer, nullable=True, index=True)
+    feature_name = Column(String(255), nullable=True)
+    node_name = Column(String(255), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    environment_id = Column(Integer, nullable=True, index=True)
+    environment_name = Column(String(100), nullable=True)
+
+    # Dados da requisição
+    method = Column(String(10), index=True)
+    url = Column(Text)
+    request_headers = deferred(Column(JSON, nullable=True))
+    request_body = deferred(Column(GzippedText, nullable=True))
+    request_params = Column(JSON, nullable=True)
+
+    # Dados da resposta
+    status_code = Column(Integer, index=True)
+    status_text = Column(String(100))
+    response_headers = deferred(Column(JSON, nullable=True))
+    response_body = deferred(Column(GzippedText, nullable=True))
+    response_time = Column(Integer)
+    error_message = Column(Text, nullable=True)
+
+    # Metadados
+    variables_used = deferred(Column(JSON, nullable=True))
+    processed_url = Column(Text, nullable=True)
+    assertions = Column(JSON, nullable=True)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

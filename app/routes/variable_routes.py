@@ -7,7 +7,7 @@ from app.database import get_db
 from app.schemas.variable_schemas import VariableCreate, VariableResponse
 from app.services.variable_service import VariableService
 
-router = APIRouter()
+router = APIRouter(tags=["Variables"])
 
 # --- Variable Endpoints ---
 

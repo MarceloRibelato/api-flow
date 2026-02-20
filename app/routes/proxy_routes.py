@@ -29,13 +29,23 @@ async def proxy_request(req: ProxyRequest, request: Request):
              else:
                  data_body = req.body
 
-        # Rewrite localhost to flow-frontend if target is port 80 (API Gateway)
-        # This fixes "connection refused" when backend tries to hit localhost:80 inside its container
+        # 3. Dynamic URL Replacement (for cross-machine/container compatibility)
+        from app.config import settings
         target_url = req.url
-        if target_url.startswith("http://localhost/") or target_url.startswith("http://127.0.0.1/"):
-             target_url = target_url.replace("http://localhost/", "http://flow-frontend/")
-             target_url = target_url.replace("http://127.0.0.1/", "http://flow-frontend/")
-             logger.info(f"🔄 Proxy Rewrote URL: {req.url} -> {target_url}")
+        
+        # Rule A: User-specified global replacement for localhost
+        if settings.TARGET_URL_REPLACEMENT and ("localhost" in target_url or "127.0.0.1" in target_url):
+             # Try to replace hostname but keep port and path
+             target_url = re.sub(r'(https?://)(localhost|127\.0\.0\.1)', rf'\1{settings.TARGET_URL_REPLACEMENT}', target_url)
+             logger.info(f"🔄 Proxy Global Replace: {req.url} -> {target_url}")
+             
+        # Rule B: Standard Internal rewrite if targeting port 80 (Gateway)
+        # This fixes "connection refused" when backend tries to hit its own entrypoint
+        elif target_url.startswith("http://localhost/") or target_url.startswith("http://127.0.0.1/"):
+             gateway = settings.INTERNAL_GATEWAY_URL.rstrip('/')
+             target_url = target_url.replace("http://localhost/", f"{gateway}/")
+             target_url = target_url.replace("http://127.0.0.1/", f"{gateway}/")
+             logger.info(f"🔄 Proxy Gateway Rewrite: {req.url} -> {target_url}")
 
         # Use Global HTTP Client from app state
         client = request.app.state.http_client

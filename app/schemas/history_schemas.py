@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, computed_fie
 class AssertionResult(BaseModel):
     source: str
     operator: str
+    property: Optional[str] = None # Added missing field
     target: Optional[Any] = None
     actual: Optional[Any] = None
     success: bool
@@ -23,13 +24,13 @@ class ExecutionHistoryBase(BaseModel):
     feature_name: Optional[str] = None # Added feature_name
     node_id: Optional[str] = None # Added node_id for stable identifier (e.g. '1-1')
     node_name: Optional[str] = None  # Added node_name for functional grouping
-    method: str
+    method: Optional[str] = "GET"
     url: str
     request_headers: Optional[Dict[str, Any]] = None
     request_body: Optional[str] = None
     request_params: Optional[Dict[str, Any]] = None
     status_code: int
-    status_text: str
+    status_text: Optional[str] = "OK"
     response_headers: Optional[Dict[str, Any]] = None
     response_body: Optional[str] = None
     response_time: int
@@ -59,10 +60,10 @@ class ExecutionHistorySummary(BaseModel):
     id: int
     execution_id: str
     feature_name: Optional[str] = None # Added feature_name
-    method: str
+    method: Optional[str] = "GET"
     url: str
     status_code: int
-    status_text: Optional[str] = None
+    status_text: Optional[str] = "OK"
     response_time: int
     created_at: datetime
     processed_url: Optional[str] = None

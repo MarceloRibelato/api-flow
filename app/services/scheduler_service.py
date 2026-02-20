@@ -255,6 +255,52 @@ class SchedulerService:
         if not scheduler.running:
             scheduler.start()
             logger.info("APScheduler started")
+            
+            # Register Maintenance Jobs
+            self.add_maintenance_jobs()
+
+    def add_maintenance_jobs(self):
+        """
+        Registers non-user scheduled maintenance tasks.
+        """
+        # 1. History Cleanup (Daily at 03:00 AM)
+        if not scheduler.get_job('maintenance_purge_history'):
+            scheduler.add_job(
+                purge_history_job,
+                trigger=CronTrigger(hour=3, minute=0),
+                id='maintenance_purge_history',
+                replace_existing=True
+            )
+            logger.info("Registered daily history purge job (03:00 AM)")
+
+def purge_history_job():
+    """
+    Tiered maintenance task: 
+    1. Archive records older than HISTORY_RETENTION_DAYS (30)
+    2. Purge archived records older than HISTORY_ARCHIVE_RETENTION_DAYS (180)
+    """
+    from app.services.history_service import HistoryService
+    from app.config import settings
+    from app.database import SessionLocal
+    
+    db = SessionLocal()
+    try:
+        # Tier 1: Archive
+        retain_days = settings.HISTORY_RETENTION_DAYS
+        logger.info(f"💾 Starting history archiving (Threshold: {retain_days} days)")
+        archived_count = HistoryService.archive_old_records(db, retain_days)
+        logger.info(f"✅ Archived {archived_count} records.")
+        
+        # Tier 2: Purge
+        archive_retain_days = settings.HISTORY_ARCHIVE_RETENTION_DAYS
+        logger.info(f"🧹 Starting archive purge (Threshold: {archive_retain_days} days)")
+        purged_count = HistoryService.purge_archived_records(db, archive_retain_days)
+        logger.info(f"✨ Purge complete. Removed {purged_count} archived records.")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to run history maintenance: {e}")
+    finally:
+        db.close()
 
     def add_job(self, schedule: ScheduleModel, db: Session):
         """

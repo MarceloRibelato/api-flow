@@ -10,7 +10,7 @@ from app.services.scheduler_service import scheduler_service
 from app.auth import get_current_user
 from app.models.user_models import UserDB
 
-router = APIRouter()
+router = APIRouter(tags=["Schedules"])
 
 # --- Pydantic Schemas ---
 class ScheduleCreate(BaseModel):
