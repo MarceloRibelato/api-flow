@@ -22,6 +22,7 @@ class ApiExecutionHistory(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     execution_id = Column(String, unique=True, index=True)
+    batch_id = Column(String(100), nullable=True, index=True)  # Groups all API calls from a single run
 
     # IDs relacionados
     api_id = Column(BigInteger, nullable=True, index=True)
@@ -82,6 +83,7 @@ class ApiExecutionHistoryArchive(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     execution_id = Column(String, unique=True, index=True)
+    batch_id = Column(String(100), nullable=True, index=True)  # Groups all API calls from a single run
 
     # IDs relacionados
     api_id = Column(BigInteger, nullable=True, index=True)

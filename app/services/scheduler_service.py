@@ -273,6 +273,54 @@ class SchedulerService:
             )
             logger.info("Registered daily history purge job (03:00 AM)")
 
+    def add_job(self, schedule: ScheduleModel, db: Session):
+        """
+        Adds a job to the scheduler based on the ScheduleModel.
+        """
+        job_id = str(schedule.id)
+
+        # Remove existing if any (to update)
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+
+        if schedule.status != 'active':
+            return
+
+        trigger = None
+        if schedule.cron_expression:
+            trigger = CronTrigger.from_crontab(schedule.cron_expression)
+        elif schedule.run_at:
+            trigger = DateTrigger(run_date=schedule.run_at)
+
+        if trigger:
+            scheduler.add_job(
+                execute_job,
+                trigger=trigger,
+                args=[schedule.id],
+                id=job_id,
+                replace_existing=True
+            )
+
+            # Update next_run immediately
+            job = scheduler.get_job(job_id)
+            if job:
+                schedule.next_run = job.next_run_time
+                db.commit()
+
+    def remove_job(self, schedule_id: int):
+        job_id = str(schedule_id)
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+
+    def sync_jobs(self, db: Session):
+        """
+        Syncs in-memory scheduler with database schedules (e.g. on startup)
+        """
+        schedules = db.query(ScheduleModel).filter(ScheduleModel.status == 'active').all()
+        for s in schedules:
+            self.add_job(s, db)
+
+
 def purge_history_job():
     """
     Tiered maintenance task: 
@@ -301,54 +349,5 @@ def purge_history_job():
         logger.error(f"❌ Failed to run history maintenance: {e}")
     finally:
         db.close()
-
-    def add_job(self, schedule: ScheduleModel, db: Session):
-        """
-        Adds a job to the scheduler based on the ScheduleModel.
-        """
-        job_id = str(schedule.id)
-        
-        # Remove existing if any (to update)
-        if scheduler.get_job(job_id):
-            scheduler.remove_job(job_id)
-
-        if schedule.status != 'active':
-            return
-
-        trigger = None
-        if schedule.cron_expression:
-            # Assuming cron string like "0 9 * * *" or 5 fields
-            # Simplified: Use cron trigger. Ideally parse the string.
-            trigger = CronTrigger.from_crontab(schedule.cron_expression)
-        elif schedule.run_at:
-            trigger = DateTrigger(run_date=schedule.run_at)
-        
-        if trigger:
-            scheduler.add_job(
-                execute_job,
-                trigger=trigger,
-                args=[schedule.id],
-                id=job_id,
-                replace_existing=True
-            )
-            
-            # Update next_run immediately
-            job = scheduler.get_job(job_id)
-            if job:
-                schedule.next_run = job.next_run_time
-                db.commit()
-
-    def remove_job(self, schedule_id: int):
-        job_id = str(schedule_id)
-        if scheduler.get_job(job_id):
-            scheduler.remove_job(job_id)
-            
-    def sync_jobs(self, db: Session):
-        """
-        Syncs in-memory scheduler with database schedules (e.g. on startup)
-        """
-        schedules = db.query(ScheduleModel).filter(ScheduleModel.status == 'active').all()
-        for s in schedules:
-            self.add_job(s, db)
 
 scheduler_service = SchedulerService()

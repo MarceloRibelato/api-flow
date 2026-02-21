@@ -80,46 +80,56 @@ class FlowService:
 
         # --- Reconstruct Nodes ---
         formatted_nodes = []
-        for node in db_nodes:
-            formatted_node = {
-                "id": node.client_id,
-                "type": node.type,
-                "position": {
-                    "x": node.position_x, 
-                    "y": node.position_y
-                },
-                "width": node.width,
-                "height": node.height,
-                "parentNode": node.parent_node_id,
-                "data": node.data or {},
-                "hidden": node.data.get("hidden", False) if node.data else False
-            }
-            formatted_nodes.append(formatted_node)
+        if db_nodes:
+            for node in db_nodes:
+                formatted_node = {
+                    "id": node.client_id,
+                    "type": node.type,
+                    "position": {"x": node.position_x, "y": node.position_y},
+                    "width": node.width,
+                    "height": node.height,
+                    "parentNode": node.parent_node_id,
+                    "data": node.data or {},
+                    "hidden": node.data.get("hidden", False) if node.data else False
+                }
+                formatted_nodes.append(formatted_node)
+        elif flow.nodes:
+            # Fallback to legacy JSON
+            formatted_nodes = flow.nodes if isinstance(flow.nodes, list) else []
 
         # --- Reconstruct Edges ---
         formatted_edges = []
-        for edge in db_edges:
-            formatted_edge = {
-                "id": edge.client_id,
-                "source": edge.source,
-                "target": edge.target,
-                "type": edge.type,
-                "animated": edge.animated
-            }
-            formatted_edges.append(formatted_edge)
+        if db_edges:
+            for edge in db_edges:
+                formatted_edge = {
+                    "id": edge.client_id,
+                    "source": edge.source,
+                    "target": edge.target,
+                    "type": edge.type,
+                    "animated": edge.animated
+                }
+                formatted_edges.append(formatted_edge)
+        elif flow.edges:
+            # Fallback to legacy JSON
+            formatted_edges = flow.edges if isinstance(flow.edges, list) else []
 
         # --- Reconstruct Card Data ---
         card_data = {}
-        for card in db_cards:
-            node_id = card.node_id
-            card_data[node_id] = {
-                "name": card.name,
-                "description": card.description,
-                "color": card.color,
-                "bddScenarios": card.bdd_scenarios or [],
-                "apiCalls": card.api_calls or [],
-                "envData": card.env_data or {}
-            }
+        if db_cards:
+            for card in db_cards:
+                node_id = card.node_id
+                card_data[node_id] = {
+                    "name": card.name,
+                    "description": card.description,
+                    "color": card.color,
+                    "bddScenarios": card.bdd_scenarios or [],
+                    "apiCalls": card.api_calls or [],
+                    "envData": card.env_data or {}
+                }
+        elif flow.card_data:
+            # Fallback to legacy JSON
+            # Legacy card_data is usually a dict {node_id: {data}}
+            card_data = flow.card_data if isinstance(flow.card_data, dict) else {}
 
         # Fetch Product ID from Feature/Project
         product_id = None

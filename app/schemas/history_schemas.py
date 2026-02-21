@@ -16,6 +16,7 @@ class AssertionResult(BaseModel):
 
 
 class ExecutionHistoryBase(BaseModel):
+    batch_id: Optional[str] = None  # Groups all API calls from a single run
     api_id: Optional[int] = None
     api_name: Optional[str] = None  # Added api_name
     project_id: Optional[int] = None
@@ -59,6 +60,7 @@ class ExecutionHistoryResponse(ExecutionHistoryBase):
 class ExecutionHistorySummary(BaseModel):
     id: int
     execution_id: str
+    batch_id: Optional[str] = None  # Used by frontend to group executions
     feature_name: Optional[str] = None # Added feature_name
     method: Optional[str] = "GET"
     url: str

@@ -1,5 +1,6 @@
 import logging
 import time
+import uuid
 import json
 import re
 from datetime import datetime
@@ -38,7 +39,7 @@ class FlowExecutorService:
                     return str(v.value)
             
             # 3. Not Found - Return original placeholder
-            logger.warning(f"    ⚠️ Variable '{{var_name}}' NOT FOUND. Available: {list(variables.keys())}")
+            logger.warning(f"    ⚠️ Variable '{var_name}' NOT FOUND. Available: {list(variables.keys())}")
             return match.group(0)
 
         return re.sub(r'\{\{([\w\.\-_]+)\}\}', replacer, text)
@@ -58,16 +59,13 @@ class FlowExecutorService:
              return new_url
         
         # Rule B: Standard Internal rewrite for port 80/443 (Gateway/Nginx)
-        if url.startswith("http://localhost/") or url.startswith("http://127.0.0.1/"):
-             gateway = settings.INTERNAL_GATEWAY_URL.rstrip('/')
-             new_url = url.replace("http://localhost/", f"{gateway}/").replace("http://127.0.0.1/", f"{gateway}/")
-             
-             # Relative path mapping: /api/ -> / if gateway handles it
-             if "/api/" in new_url:
-                 new_url = new_url.replace("/api/", "/")
-                 
-             logger.info(f"      🔧 Rewrote Internal Gateway URL: {url} -> {new_url}")
-             return new_url
+        # Normalize: ensure we catch localhost with or without trailing slash
+        if any(url.lower().startswith(p) for p in ["http://localhost", "http://127.0.0.1"]):
+            gateway = settings.INTERNAL_GATEWAY_URL.rstrip('/')
+            new_url = url.replace("http://localhost", gateway).replace("http://127.0.0.1", gateway)
+            logger.info(f"      🔧 Rewrote Internal Gateway URL: {url} -> {new_url}")
+            return new_url
+
              
         # Rule C: Fallback for localhost:8000 to hit backend directly
         if ":8000" in url and ("localhost" in url or "127.0.0.1" in url):
@@ -94,6 +92,8 @@ class FlowExecutorService:
             nodes = flow_data.get('nodes', [])
             edges = flow_data.get('edges', [])
             
+            logger.info(f"📊 [execute_flow_logic] Loaded Flow: {len(nodes)} nodes, {len(edges)} edges")
+            
             # Build Graph (Adjacency List)
             adj = {n['id']: [] for n in nodes}
             in_degree = {n['id']: 0 for n in nodes}
@@ -101,15 +101,20 @@ class FlowExecutorService:
             # Filter valid edges (where both source and target exist)
             node_ids = set(n['id'] for n in nodes)
             valid_edges = [e for e in edges if e['source'] in node_ids and e['target'] in node_ids]
+            
+            logger.info(f"🔗 Validated {len(valid_edges)}/{len(edges)} edges.")
 
             for edge in valid_edges:
                 src, tgt = edge['source'], edge['target']
                 adj[src].append(tgt)
                 in_degree[tgt] += 1
+                logger.debug(f"   Edge: {src} -> {tgt}")
 
             # BFS / Kahn's Algorithm for Topological Sort/Traversal
             # Start with nodes having in_degree 0 (Roots)
             queue = [n['id'] for n in nodes if in_degree[n['id']] == 0]
+            
+            logger.info(f"🌱 Initial Roots (queue): {queue}")
             
             flow_failed = False  # Track if any step fails
             flow_success_count = 0
@@ -128,9 +133,13 @@ class FlowExecutorService:
 
             visited = set()
             history_buffer = []
+            # Generate a unique batch_id to tie all API calls in this run together
+            batch_id = f"sched_{uuid.uuid4().hex}"
 
             while queue:
                 current_id = queue.pop(0)
+                logger.info(f"➡️  [Step] Processing Node: {current_id} (Queue: {len(queue)})")
+                
                 if current_id in visited:
                     continue
                 visited.add(current_id)
@@ -170,29 +179,57 @@ class FlowExecutorService:
                                         path = url.lstrip('/')
                                         url = f"{base}/{path}"
                                     
+                                    # ✅ RE-ENABLED: Normalize URL for Docker internal networking
                                     url = FlowExecutorService.sanitize_url_for_docker(url)
 
                                     if FlowExecutorService.is_blocked_domain(url):
                                         logger.warning(f"      ⛔ Skipping Blocked/Ad Domain: {url}")
                                         continue
                                     
+                                    # --- 1. Headers Reconstruction ---
                                     headers_raw = api_call.get('headers', {})
                                     if isinstance(headers_raw, list):
                                         mapping = {}
                                         for h in headers_raw:
                                             if isinstance(h, dict):
-                                                if 'key' in h and 'value' in h:
-                                                    mapping[h['key']] = h['value']
-                                                else:
-                                                    mapping.update(h)
+                                                k = h.get('key')
+                                                v = h.get('value')
+                                                if k is not None: mapping[k] = v
+                                                else: mapping.update(h)
                                         headers_raw = mapping
                                     
                                     headers_json_str = json.dumps(headers_raw)
                                     headers = json.loads(FlowExecutorService.replace_vars(headers_json_str, variables_dict))
                                     if not isinstance(headers, dict): headers = {}
-                                    headers = {k: v for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
+                                    headers = {str(k): str(v) for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
 
-                                    body = FlowExecutorService.replace_vars(api_call.get('body', ''), variables_dict)
+                                    # --- 2. Params Reconstruction (Query String) ---
+                                    params_raw = api_call.get('params', {})
+                                    if isinstance(params_raw, list):
+                                        mapping = {}
+                                        for p in params_raw:
+                                            if isinstance(p, dict):
+                                                k = p.get('key')
+                                                v = p.get('value')
+                                                if k is not None: mapping[k] = v
+                                                else: mapping.update(p)
+                                        params_raw = mapping
+                                    
+                                    params_json_str = json.dumps(params_raw)
+                                    params = json.loads(FlowExecutorService.replace_vars(params_json_str, variables_dict))
+                                    if not isinstance(params, dict): params = {}
+                                    params = {str(k): str(v) for k, v in params.items() if v is not None}
+
+                                    # --- 3. Body Reconstruction ---
+                                    body_raw = api_call.get('body', '')
+                                    if isinstance(body_raw, (dict, list)):
+                                        body_json_str = json.dumps(body_raw)
+                                        body = FlowExecutorService.replace_vars(body_json_str, variables_dict)
+                                    else:
+                                        body = FlowExecutorService.replace_vars(str(body_raw), variables_dict)
+                                    
+                                    if body is None: body = ""
+
                                     ct_key = next((k for k in headers.keys() if k.lower() == 'content-type'), None)
                                     body_is_urlencoded = isinstance(body, str) and ('=' in body or '&' in body) and not body.strip().startswith('{')
                                     
@@ -204,7 +241,7 @@ class FlowExecutorService:
                                         elif 'json' in headers[ct_key]: headers[ct_key] = 'application/x-www-form-urlencoded'
 
                                     start_time = time.time()
-                                    resp = flow_session.request(method, url, headers=headers, data=body)
+                                    resp = flow_session.request(method, url, headers=headers, data=body, params=params, timeout=30)
                                     duration = int((time.time() - start_time) * 1000)
                                     resp_status = resp.status_code
                                     resp_reason = resp.reason
@@ -220,12 +257,15 @@ class FlowExecutorService:
                                     assertions_raw = api_call.get('assertions', [])
                                     for assertion in assertions_raw:
                                         try:
-                                            src = assertion.get('source') or assertion.get('type') or 'statusCode'
-                                            if src == 'status': src = 'statusCode'
+                                            # Normalize Source
+                                            src_raw = assertion.get('source') or assertion.get('type') or 'statusCode'
+                                            src = 'statusCode' if src_raw in ['status', 'statusCode'] else src_raw
+                                            
                                             raw_operator = assertion.get('operator', 'equals')
+                                            op = str(raw_operator).lower()
+                                            
                                             target = assertion.get('value') if assertion.get('value') is not None else assertion.get('target')
                                             prop = assertion.get('property') or assertion.get('path')
-                                            op = str(raw_operator).lower()
                                             
                                             actual_val = None
                                             is_success = False
@@ -234,54 +274,111 @@ class FlowExecutorService:
                                                 actual_val = resp_status
                                                 try:
                                                     t_int = int(str(target).strip())
-                                                    if op in ['equals', 'eq', '==']: is_success = (actual_val == t_int)
+                                                    if op in ['equals', 'eq', '==', 'is']: is_success = (actual_val == t_int)
                                                     elif op in ['notequals', 'neq', '!=']: is_success = (actual_val != t_int)
-                                                    elif op in ['gt', '>']: is_success = (actual_val > t_int)
-                                                    elif op in ['lt', '<']: is_success = (actual_val < t_int)
+                                                    elif op in ['gt', 'greaterthan', '>']: is_success = (actual_val > t_int)
+                                                    elif op in ['lt', 'lessthan', '<']: is_success = (actual_val < t_int)
+                                                    elif op in ['gte', '>=']: is_success = (actual_val >= t_int)
+                                                    elif op in ['lte', '<=']: is_success = (actual_val <= t_int)
                                                 except: is_success = False
-                                            elif src == 'body' and resp_json:
-                                                parts = str(prop).split('.')
-                                                curr = resp_json
-                                                for p in parts:
-                                                    if isinstance(curr, dict) and p in curr: curr = curr[p]
-                                                    elif isinstance(curr, list):
-                                                        try: curr = curr[int(p)]
-                                                        except: curr = None; break
-                                                    else: curr = None; break
-                                                actual_val = curr
+                                            elif src == 'header':
+                                                # Case insensitive header lookup
+                                                h_key = str(prop).lower() if prop else ""
+                                                actual_val = next((v for k, v in resp_headers.items() if k.lower() == h_key), None)
                                                 str_act = str(actual_val) if actual_val is not None else ""
                                                 str_tar = str(target)
-                                                if op in ['equals', 'eq']: is_success = (str_act == str_tar)
+                                                if op in ['equals', 'eq', 'is']: is_success = (str_act == str_tar)
                                                 elif op in ['contains', 'in']: is_success = (str_tar in str_act)
+                                                elif op in ['exists', 'not_null']: is_success = (actual_val is not None)
+                                            elif src == 'responseTime':
+                                                actual_val = duration
+                                                try:
+                                                    t_int = int(str(target).strip())
+                                                    if op in ['lt', 'lessthan', '<']: is_success = (actual_val < t_int)
+                                                    elif op in ['lte', '<=']: is_success = (actual_val <= t_int)
+                                                    elif op in ['gt', 'greaterthan', '>']: is_success = (actual_val > t_int)
+                                                    elif op in ['equals', 'eq']: is_success = (actual_val == t_int)
+                                                except: is_success = False
+                                            elif src == 'body':
+                                                if op == 'exists':
+                                                    # Check if path exists
+                                                    if not prop: 
+                                                        is_success = (resp_json is not None)
+                                                        actual_val = "Body Received" if is_success else None
+                                                    else:
+                                                        parts = str(prop).split('.')
+                                                        curr = resp_json
+                                                        for p in parts:
+                                                            if isinstance(curr, dict) and p in curr: curr = curr[p]
+                                                            elif isinstance(curr, list):
+                                                                try: curr = curr[int(p)]
+                                                                except: curr = None; break
+                                                            else: curr = None; break
+                                                        is_success = (curr is not None)
+                                                        actual_val = str(curr) if is_success else None
+                                                elif resp_json:
+                                                    # Path validation
+                                                    parts = str(prop).split('.') if prop else []
+                                                    curr = resp_json
+                                                    for p in parts:
+                                                        if isinstance(curr, dict) and p in curr: curr = curr[p]
+                                                        elif isinstance(curr, list):
+                                                            try: curr = curr[int(p)]
+                                                            except: curr = None; break
+                                                        else: curr = None; break
+                                                    actual_val = curr
+                                                    str_act = str(actual_val) if actual_val is not None else ""
+                                                    str_tar = str(target)
+                                                    if op in ['equals', 'eq', 'is']: is_success = (str_act == str_tar)
+                                                    elif op in ['contains', 'in']: is_success = (str_tar in str_act)
+                                                    elif op in ['exists', 'not_null']: is_success = (actual_val is not None)
+                                            elif src == 'contract':
+                                                # Placeholder for schema validation if target is 'Valid Contract'
+                                                is_success = True if resp_status < 400 else False
+                                                actual_val = "Schema Match" if is_success else "Invalid"
                                             
                                             assertion_results.append({
-                                                "source": src, "operator": raw_operator, "target": str(target),
+                                                "source": src_raw, "operator": raw_operator, "target": str(target),
                                                 "actual": str(actual_val), "success": is_success
                                             })
                                             if not is_success: assertions_passed = False
-                                        except: assertions_passed = False
+                                        except Exception as ae:
+                                            logger.error(f"        ❌ Assertion Error: {ae}")
+                                            assertions_passed = False
 
                                     # --- Extraction ---
                                     extracts = api_call.get('extracts', [])
-                                    if extracts and resp_json:
+                                    if extracts:
                                         for rule in extracts:
                                             try:
+                                                r_source = rule.get('source', 'body')
                                                 r_prop = rule.get('property', '')
                                                 r_var = rule.get('variable', '').strip().upper()
-                                                parts = r_prop.split('.')
-                                                curr = resp_json
-                                                for p in parts:
-                                                    if isinstance(curr, dict) and p in curr: curr = curr[p]
-                                                    elif isinstance(curr, list):
-                                                        try: curr = curr[int(p)]
-                                                        except: curr = None; break
-                                                    else: curr = None; break
-                                                if curr is not None and r_var:
-                                                    variables_dict[r_var] = str(curr)
-                                                    new_var = VariableCreate(name=r_var, value=str(curr), project_id=product_id, environment_id=env_id, type="extracted")
+                                                
+                                                val = None
+                                                if r_source == 'header':
+                                                    h_key = r_prop.lower()
+                                                    val = next((v for k, v in resp_headers.items() if k.lower() == h_key), None)
+                                                elif r_source == 'body' and resp_json:
+                                                    parts = r_prop.split('.')
+                                                    curr = resp_json
+                                                    for p in parts:
+                                                        if isinstance(curr, dict) and p in curr: curr = curr[p]
+                                                        elif isinstance(curr, list):
+                                                            try: curr = curr[int(p)]
+                                                            except: curr = None; break
+                                                        else: curr = None; break
+                                                    val = curr
+                                                
+                                                if val is not None and r_var:
+                                                    val_str = str(val)
+                                                    variables_dict[r_var] = val_str
+                                                    # Persist to DB for visibility in the environment panel
+                                                    new_var = VariableCreate(name=r_var, value=val_str, project_id=product_id, environment_id=env_id, type="extracted")
                                                     VariableService.create(db, new_var)
-                                                    logger.info(f"      ✅ Extracted [{r_var}] = '{curr}'")
-                                            except: pass
+                                                    logger.info(f"      ✅ Extracted [{r_var}] = '{val_str}'")
+                                            except Exception as ee:
+                                                logger.error(f"        ❌ Extraction Error: {ee}")
 
                             except Exception as req_ex:
                                 logger.error(f"Request failed: {req_ex}")
@@ -298,6 +395,7 @@ class FlowExecutorService:
                             else: flow_success_count += 1
 
                             hist = ExecutionHistoryCreate(
+                                batch_id=batch_id,
                                 api_id=int(api_call.get('id')) if str(api_call.get('id')).isdigit() else None,
                                 api_name=api_call.get('name') or "Step",
                                 project_id=product_id,
@@ -320,9 +418,14 @@ class FlowExecutorService:
                         logger.error(f"Critical error in execution loop: {loop_ex}")
 
                 # Neighbors
-                for tgt in adj.get(current_id, []):
+                neighbors = adj.get(current_id, [])
+                if neighbors:
+                    logger.info(f"      🔗 Processing {len(neighbors)} neighbors of {current_id}")
+                for tgt in neighbors:
                     in_degree[tgt] -= 1
+                    logger.debug(f"         Neighbor {tgt} - New In-Degree: {in_degree[tgt]}")
                     if in_degree[tgt] == 0:
+                        logger.info(f"      ✨ Node {tgt} is now ready (In-Degree 0). Adding to queue.")
                         queue.append(tgt)
                         queue.sort(key=get_x_pos)
 

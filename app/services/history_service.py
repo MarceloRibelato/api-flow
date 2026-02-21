@@ -20,6 +20,7 @@ class HistoryService:
 
         db_history = ApiExecutionHistory(
             execution_id=execution_id,
+            batch_id=history.batch_id,
             api_id=history.api_id,
             api_name=history.api_name,
             project_id=history.project_id,
@@ -71,6 +72,7 @@ class HistoryService:
             
             db_history = ApiExecutionHistory(
                 execution_id=execution_id,
+                batch_id=history.batch_id,
                 api_id=history.api_id,
                 api_name=history.api_name,
                 project_id=history.project_id,
@@ -154,11 +156,7 @@ class HistoryService:
             # logger.info(f"🔍 Filtering History by Schedule ID: {schedule_id}")
             query = query.filter(ApiExecutionHistory.schedule_id == schedule_id)
         if node_id:
-            from sqlalchemy import or_
-            query = query.filter(or_(
-                ApiExecutionHistory.node_id == node_id,
-                ApiExecutionHistory.node_id.is_(None)
-            ))
+            query = query.filter(ApiExecutionHistory.node_id == node_id)
 
         if method:
             query = query.filter(ApiExecutionHistory.method == method.upper())
@@ -206,10 +204,10 @@ class HistoryService:
                 ApiExecutionHistory.environment_name,
                 ApiExecutionHistory.node_name,
                 ApiExecutionHistory.api_name,
-                ApiExecutionHistory.error_message, # Used for 'success' property logic if not direct
-                # assertions might be needed if summary shows them? Schema has assertions: Optional[List]
+                ApiExecutionHistory.error_message,
                 ApiExecutionHistory.assertions,
-                ApiExecutionHistory.node_id
+                ApiExecutionHistory.node_id,
+                ApiExecutionHistory.batch_id,
             )
         )
 
