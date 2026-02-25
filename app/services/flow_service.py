@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from sqlalchemy.orm import Session, joinedload
 
-from app.models.flow_models import FlowDB, FlowNodeDB, FlowEdgeDB, FlowCardDataDB
+from app.models.flow_models import FlowDB, FlowNodeDB, FlowEdgeDB, FlowCardDataDB, FlowE2EStepDB
 from app.schemas.flow_schemas import FlowSaveSchema
 from app.models.feature_models import FeatureModel
 from app.models.product_models import ProductModel
@@ -51,21 +51,21 @@ class FlowService:
         return new_flow
 
     @staticmethod
-    def load(db: Session, project_id: int, company_id: int, flow_id: int = None):
+    def load(db: Session, project_id: int, company_id: int, flow_id: int = None, flow_type: str = "api"):
         if not FlowService._verify_project_ownership(db, project_id, company_id):  
              return {"nodes": [], "edges": [], "cardData": {}, "id": None, "name": "", "project_id": project_id}
 
         query = db.query(FlowDB).options(
             joinedload(FlowDB.flow_nodes),
             joinedload(FlowDB.flow_edges),
-            joinedload(FlowDB.flow_card_data)
+            joinedload(FlowDB.flow_card_data).joinedload(FlowCardDataDB.e2e_steps_rel)
         )
 
         if flow_id:
             flow = query.filter(FlowDB.id == flow_id).first()
         else:
-            # Migration/Fallback: Load the most recently updated flow for the project
-            flow = query.filter(FlowDB.project_id == project_id).order_by(FlowDB.updated_at.desc()).first()
+            # Migration/Fallback: Load the most recently updated flow of the SPECIFIC TYPE for the project
+            flow = query.filter(FlowDB.project_id == project_id, FlowDB.flow_type == flow_type).order_by(FlowDB.updated_at.desc()).first()
 
         if not flow:
             print(f"❌ FlowService.load: Flow not found for project_id={project_id}, flow_id={flow_id}")
@@ -124,6 +124,15 @@ class FlowService:
                     "color": card.color,
                     "bddScenarios": card.bdd_scenarios or [],
                     "apiCalls": card.api_calls or [],
+                    "e2eSteps": [
+                        {
+                            "id": step.client_id,
+                            "type": step.type,
+                            "name": step.name,
+                            "description": step.description,
+                            "properties": step.properties
+                        } for step in card.e2e_steps_rel
+                    ] if card.e2e_steps_rel else (card.e2e_steps or []),
                     "envData": card.env_data or {}
                 }
         elif flow.card_data:
@@ -163,11 +172,11 @@ class FlowService:
              flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
         
         if not flow:
-             # Try find ANY flow for project to update (Legacy mode) or create new primary
-             flow = db.query(FlowDB).filter(FlowDB.project_id == project_id).order_by(FlowDB.updated_at.desc()).first()
+             # Try find SPECIFIC flow type for project to update
+             flow = db.query(FlowDB).filter(FlowDB.project_id == project_id, FlowDB.flow_type == data.flow_type).order_by(FlowDB.updated_at.desc()).first()
 
         if not flow:
-             flow = FlowDB(project_id=project_id, name=data.name or "Fluxo Principal")
+             flow = FlowDB(project_id=project_id, name=data.name or "Fluxo Principal", flow_type=data.flow_type)
              db.add(flow)
              db.commit()
              db.refresh(flow)
@@ -180,12 +189,21 @@ class FlowService:
         flow_id = flow.id
 
         # 2. Clear existing data (Full Replace Strategy)
-        db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == flow_id).delete()
-        db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == flow_id).delete()
-        db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow_id).delete()
+        # ⚠️ We MUST delete E2E steps FIRST because of FK card_db_id -> flow_card_data.db_id
+        # query.delete() bypasses ORM cascade, so we do it explicitly.
+        print(f"🧹 FlowService.save: Cleaning up old data for Flow ID {flow_id}")
+        
+        # Delete steps related to any card in this flow
+        existent_card_ids = [c.db_id for c in db.query(FlowCardDataDB.db_id).filter(FlowCardDataDB.flow_id == flow_id).all()]
+        if existent_card_ids:
+            db.query(FlowE2EStepDB).filter(FlowE2EStepDB.card_db_id.in_(existent_card_ids)).delete(synchronize_session=False)
+
+        db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow_id).delete(synchronize_session=False)
+        db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == flow_id).delete(synchronize_session=False)
+        db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == flow_id).delete(synchronize_session=False)
 
         # 3. Batch Insert Preparation
-        print(f"🛠️ FlowService.save: Inserting {len(nodes)} nodes and {len(edges)} edges for Flow ID {flow_id}")
+        print(f"🛠️ FlowService.save: Inserting {len(nodes)} nodes, {len(edges)} edges and {len(card_data)} cards for Flow ID {flow_id}")
         
         nodes_to_insert = []
         edges_to_insert = []
@@ -237,8 +255,10 @@ class FlowService:
                 color=cinfo.color,
                 bdd_scenarios=cinfo.bddScenarios,
                 api_calls=api_calls_payload,
+                e2e_steps=cinfo.e2eSteps or [],
                 env_data={k: v.model_dump() for k, v in cinfo.envData.items()}
             )
+            print(f"   - Card {cid}: {len(cinfo.apiCalls)} APIs, {len(cinfo.e2eSteps or [])} E2E Steps")
             cards_to_insert.append(db_card)
 
         # 4. Bulk Save
@@ -247,7 +267,33 @@ class FlowService:
         if edges_to_insert:
             db.bulk_save_objects(edges_to_insert)
         if cards_to_insert:
-            db.bulk_save_objects(cards_to_insert)
+            # Use add_all + flush instead of bulk_save_objects 
+            # so that db_id is populated back into the objects for the steps below
+            db.add_all(cards_to_insert)
+            db.flush() 
+            
+            # 3.1 Insert E2E Steps for each card
+            steps_to_insert = []
+            for db_card in cards_to_insert:
+                fe_card = card_data.get(db_card.node_id)
+                if fe_card and fe_card.e2eSteps:
+                    print(f"   - Relational steps for {db_card.node_id}: {len(fe_card.e2eSteps)}")
+                    for i, step in enumerate(fe_card.e2eSteps):
+                        # 'step' is usually a dict from JSON from frontend
+                        # depending on schema validation.
+                        db_step = FlowE2EStepDB(
+                            card_db_id=db_card.db_id,
+                            client_id=step.get('id'),
+                            type=step.get('type'),
+                            name=step.get('name'),
+                            description=step.get('description'),
+                            properties=step.get('properties', {}),
+                            order=i
+                        )
+                        steps_to_insert.append(db_step)
+            
+            if steps_to_insert:
+                db.bulk_save_objects(steps_to_insert)
 
         db.commit()
 

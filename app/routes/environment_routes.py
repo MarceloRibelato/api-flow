@@ -15,12 +15,16 @@ router = APIRouter(tags=["Environments"])
 from app.auth import get_current_user
 from app.models.user_models import UserDB
     
+from typing import List, Optional
+    
 @router.get("/environments", response_model=List[EnvironmentResponse])
 def get_environments(
-    project_id: int, 
+    project_id: Optional[int] = None, 
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
+    if project_id is None:
+        return []
     return EnvironmentService.get_by_project(db, project_id)
 
 

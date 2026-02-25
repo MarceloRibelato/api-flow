@@ -3,7 +3,7 @@ import os
 from contextlib import asynccontextmanager
 
 import httpx # Added for global client
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
@@ -118,7 +118,6 @@ app.include_router(schedule_router, prefix="/schedules")
 app.include_router(capture_router)
 app.include_router(analysis_router)
 app.include_router(agent_router)
-app.include_router(agent_router)
 app.include_router(execution_router)
 app.include_router(import_router)
 app.include_router(cicd_router)
@@ -131,6 +130,12 @@ app.include_router(dashboard_router)
 from app.routes.proxy_routes import router as proxy_router
 app.include_router(proxy_router)
 
+# Mount Videos Static Directory
+from fastapi.staticfiles import StaticFiles
+import os
+os.makedirs("/app/data/videos", exist_ok=True)
+app.mount("/videos", StaticFiles(directory="/app/data/videos"), name="videos")
+
 # Middleware para log de requests
 @app.middleware("http")
 async def log_requests(request, call_next):
@@ -139,9 +144,25 @@ async def log_requests(request, call_next):
         return await call_next(request)
 
     logger.info(f"REQUEST: {request.method} {request.url}")
+    # try:
+    #     body = await request.body()
+    #     if body:
+    #         logger.info(f"REQUEST BODY: {body.decode('utf-8', errors='ignore')[:1000]}")
+    # except:
+    #     pass
+
     try:
         response = await call_next(request)
         logger.info(f"RESPONSE: {request.method} {request.url} - Status: {response.status_code}")
+        
+        # Log response body for 422
+        if response.status_code == 422:
+            try:
+                # We can't read the response body here easily without consuming it, 
+                # but we can log the request url which is already done.
+                pass
+            except:
+                pass
         return response
     except Exception as e:
         logger.error(f"ERROR in {request.method} {request.url}: {str(e)}")

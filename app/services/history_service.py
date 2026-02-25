@@ -48,6 +48,7 @@ class HistoryService:
             assertions=[a.model_dump() for a in history.assertions]
             if history.assertions
             else None,
+            video_url=history.video_url, # Added
         )
 
         db.add(db_history)
@@ -98,6 +99,7 @@ class HistoryService:
                 environment_id=history.environment_id,
                 environment_name=history.environment_name,
                 assertions=[a.model_dump() for a in history.assertions] if history.assertions else None,
+                video_url=history.video_url, # Added
             )
             db_objects.append(db_history)
 
@@ -208,6 +210,7 @@ class HistoryService:
                 ApiExecutionHistory.assertions,
                 ApiExecutionHistory.node_id,
                 ApiExecutionHistory.batch_id,
+                ApiExecutionHistory.video_url, # Added
             )
         )
 
@@ -339,6 +342,7 @@ class HistoryService:
                         variables_used=rec.variables_used,
                         processed_url=rec.processed_url,
                         assertions=rec.assertions,
+                        video_url=rec.video_url, # Added
                         created_at=rec.created_at
                     )
                     archive_objects.append(archive_rec)

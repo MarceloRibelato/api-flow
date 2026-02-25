@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1
 # Set work directory
 WORKDIR /app
 
-# Install system dependencies (if needed for psycopg2 or others)
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
@@ -23,6 +23,9 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright browsers and their system dependencies
+RUN python -m playwright install chromium --with-deps
 
 # Copy project files
 COPY . .

@@ -1,14 +1,14 @@
-from typing import Any, Dict, List, Optional
-
-from pydantic import BaseModel
-
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from typing import Any, Dict, List, Optional, Union
+import json
 
 class AssertionRule(BaseModel):
     source: str  # status_code, body, header, response_time
     property: Optional[str] = None  # path for body/header (e.g. "data.id")
     operator: str  # eq, neq, gt, lt, contains, etc.
     target: Any
-
+    
+    # Allow target to be anything but coerce it if needed? (optional for now)
 
 class ExtractionRule(BaseModel):
     source: str  # body, header
@@ -22,12 +22,21 @@ class ApiCallSchema(BaseModel):
     method: str
     url: str
     headers: List[Dict[str, str]] = []
-    body: Optional[str] = None
+    body: Optional[Union[str, Dict[str, Any], List[Any]]] = None
     params: List[Dict[str, str]] = []
     description: str = ""
     timeout: int = 30000
     assertions: List[AssertionRule] = []
     extracts: List[ExtractionRule] = []
+
+    @field_validator('body')
+    @classmethod
+    def stringify_body(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, (dict, list)):
+            return json.dumps(v)
+        return str(v)
 
 
 
@@ -44,7 +53,6 @@ class NodeDataFull(BaseModel):
     description: str = ""
     childCount: int = 0
     isCollapsed: bool = False
-    bddScenarios: List[Dict[str, Any]] = []
     bddScenarios: List[Dict[str, Any]] = []
     apiCalls: List[ApiCallSchema] = []
 
@@ -73,6 +81,7 @@ class EnvSpecificData(BaseModel):
     description: str = ""
     bddScenarios: List[Dict[str, Any]] = []
     apiCalls: List[ApiCallSchema] = []
+    e2eSteps: List[Dict[str, Any]] = []
 
 
 class CardDataSchema(BaseModel):
@@ -81,6 +90,7 @@ class CardDataSchema(BaseModel):
     description: str = ""
     bddScenarios: List[Dict[str, Any]] = []
     apiCalls: List[ApiCallSchema] = []
+    e2eSteps: List[Dict[str, Any]] = []
     envData: Dict[str, EnvSpecificData] = {}
 
 
@@ -88,6 +98,7 @@ class CardDataSchema(BaseModel):
 class FlowSaveSchema(BaseModel):
     projectId: int
     flowId: Optional[int] = None  # New: ID of the flow being saved
+    flow_type: str = "api"        # Distinguish between 'api' and 'e2e'
     name: Optional[str] = None    # New: Name update
     nodes: List[NodeSchema]
     edges: List[EdgeSchema]

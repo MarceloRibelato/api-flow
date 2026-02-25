@@ -55,12 +55,13 @@ def create_flow(
 def load_flow(
     project_id: int, 
     flow_id: int = None, 
+    flow_type: str = "api", # New param
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
     """Carrega o fluxo completo."""
     try:
-        return FlowService.load(db, project_id, company_id=current_user.company_id, flow_id=flow_id)
+        return FlowService.load(db, project_id, company_id=current_user.company_id, flow_id=flow_id, flow_type=flow_type)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao carregar fluxo: {str(e)}")
 

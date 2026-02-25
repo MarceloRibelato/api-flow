@@ -14,12 +14,22 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+# Use DATABASE_URL from environment if available to override alembic.ini
+import os
+database_url = os.environ.get("DATABASE_URL")
+if database_url:
+    # Handle possible driver naming differences (postgresql vs postgresql+psycopg2)
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+    config.set_main_option("sqlalchemy.url", database_url)
+
 # add your model's MetaData object here
 # for 'autogenerate' support
 import sys
 import os
-sys.path.append(os.getcwd())
-sys.path.append(r'c:\Projetos\Flow\api-flow') # Force absolute path
+# Add the app directory to sys.path
+# This makes 'app' module available regardless of where alembic is run from
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
 from app.database import Base

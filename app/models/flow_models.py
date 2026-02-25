@@ -78,8 +78,25 @@ class FlowCardDataDB(Base):
     color = Column(String(7))
     
     # Content
-    bdd_scenarios = Column(JSON, default=dict) # Should be list, but schema says list[dict]
-    api_calls = Column(JSON, default=dict)
+    bdd_scenarios = Column(JSON, default=list) # Changed from dict to list for better default consistency
+    api_calls = Column(JSON, default=list)
+    e2e_steps = Column(JSON, default=list)
     env_data = Column(JSON, default=dict)
 
     flow = relationship("FlowDB", back_populates="flow_card_data")
+    e2e_steps_rel = relationship("FlowE2EStepDB", back_populates="card_data", cascade="all, delete-orphan", order_by="FlowE2EStepDB.order")
+
+
+class FlowE2EStepDB(Base):
+    __tablename__ = "flow_e2e_steps"
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    card_db_id = Column(Integer, ForeignKey("flow_card_data.db_id"), index=True)
+    client_id = Column(String(255), index=True) # step.id from frontend
+    
+    type = Column(String(50))
+    name = Column(String(255))
+    description = Column(Text, nullable=True)
+    properties = Column(JSON, default=dict)
+    order = Column(Integer, default=0)
+
+    card_data = relationship("FlowCardDataDB", back_populates="e2e_steps_rel")

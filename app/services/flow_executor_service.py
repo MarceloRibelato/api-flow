@@ -5,6 +5,7 @@ import json
 import re
 from datetime import datetime
 import requests
+import threading
 from jsonschema import validate, ValidationError
 from sqlalchemy.orm import Session
 from app.services.flow_service import FlowService
@@ -85,6 +86,22 @@ class FlowExecutorService:
 
     @staticmethod
     def execute_flow_logic(db: Session, flow_meta, product_id, env_id, company_id, variables_dict, feature_name: str = None, schedule_id: int = None, user_id: int = 1):
+        import uuid
+        import time
+        import os
+        from app.services.history_service import HistoryService
+        from app.schemas.history_schemas import ExecutionHistoryCreate
+
+        batch_id = f"sched_{uuid.uuid4().hex}"
+        history_buffer = []
+        flow_success_count = 0
+        flow_fail_count = 0
+        e2e_executor = None
+
+        # Video recording setup
+        video_dir = f"/app/data/videos/{batch_id}"
+        os.makedirs(video_dir, exist_ok=True)
+
         try:
             # Load full flow data with cards
             flow_data = FlowService.load(db, flow_meta['project_id'], company_id, flow_meta['id'])
@@ -92,7 +109,9 @@ class FlowExecutorService:
             nodes = flow_data.get('nodes', [])
             edges = flow_data.get('edges', [])
             
-            logger.info(f"📊 [execute_flow_logic] Loaded Flow: {len(nodes)} nodes, {len(edges)} edges")
+            logger.info(f"📊 [execute_flow_logic] Loaded Flow ID: {flow_meta.get('id')} - {len(nodes)} nodes, {len(edges)} edges")
+            if not nodes:
+                logger.warning("⚠️ No nodes found in flow data!")
             
             # Build Graph (Adjacency List)
             adj = {n['id']: [] for n in nodes}
@@ -130,11 +149,8 @@ class FlowExecutorService:
             # Use a shared session for the entire flow to persist Cookies (Auth)
             flow_session = requests.Session()
             flow_session.trust_env = False # Disable proxy for performance
-
+            
             visited = set()
-            history_buffer = []
-            # Generate a unique batch_id to tie all API calls in this run together
-            batch_id = f"sched_{uuid.uuid4().hex}"
 
             while queue:
                 current_id = queue.pop(0)
@@ -148,30 +164,81 @@ class FlowExecutorService:
                 card = cards.get(current_id)
                 if card:
                     api_calls = card.get('apiCalls', [])
-                    logger.info(f"      Running Node: {card.get('name')} ({len(api_calls)} calls)")
+                    e2e_steps = card.get('e2eSteps', [])
                     
-                    try:
-                        for api_call in api_calls:
-                            method = api_call.get('method', 'GET')
-                            url = FlowExecutorService.replace_vars(api_call.get('url', ''), variables_dict)
-                            
-                            resp_status = 0
-                            resp_reason = "Pending"
-                            resp_headers = {}
-                            resp_text = ""
-                            duration = 0
-                            assertion_results = []
-                            assertions_passed = True
-                            final_error_message = None
-                            headers = {}
-                            body = ""
+                    # Combine steps into a unified execution list
+                    # We process api_calls first for legacy/hybrid support, then e2e_steps
+                    all_steps = []
+                    for a in api_calls: all_steps.append({'data': a, 'type': 'api'})
+                    for e in e2e_steps: all_steps.append({'data': e, 'type': 'e2e'})
+                    
+                    execution_lock = threading.Lock()
 
-                            try:
+                    # --- Execution Helpers ---
+                    def execute_step_internal(step_entry):
+                        nonlocal flow_success_count, flow_fail_count, e2e_executor
+                        step_data = step_entry['data']
+                        step_type = step_entry['type']
+                        
+                        resp_status = 0
+                        resp_reason = "Pending"
+                        resp_headers = {}
+                        resp_text = ""
+                        duration = 0
+                        assertion_results = []
+                        assertions_passed = True
+                        final_error_message = None
+                        headers = {}
+                        body = ""
+                        url = ""
+                        method = ""
+
+                        try:
+                            if step_type == 'e2e':
+                                try:
+                                    if not e2e_executor:
+                                        from app.services.playwright_executor_service import PlaywrightExecutorService
+                                        e2e_executor = PlaywrightExecutorService()
+                                        e2e_executor.start(video_dir=video_dir)
+                                    # Resolve variables in E2E step data
+                                    step_data_str = json.dumps(step_data)
+                                    step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, variables_dict))
+
+                                    # Execute real Playwright step
+                                    start_time = time.time()
+                                    resp = e2e_executor.execute_step(step_data)
+                                    duration = int((time.time() - start_time) * 1000)
+                                    
+                                    resp_status = resp['status']
+                                    resp_reason = resp['reason']
+                                    resp_text = resp['text']
+                                    
+                                    method = "BROWSER"
+                                    url = step_data.get('properties', {}).get('value', '') or step_data.get('properties', {}).get('selector', '')
+                                except Exception as e:
+                                    logger.error(f"FATAL: E2E Execution Error: {str(e)}")
+                                    resp_status = 500
+                                    resp_reason = "E2E Error"
+                                    resp_text = str(e)
+                            else:
+                                method = step_data.get('method', 'GET')
+                                url = FlowExecutorService.replace_vars(step_data.get('url', ''), variables_dict)
+                                
                                 if method == 'PYTHON':
-                                    logger.info(f"      [SKIP] Logic Step: {api_call.get('name')} (PYTHON)")
-                                    resp_status = 200
-                                    resp_reason = "Logic Captured"
-                                    resp_text = api_call.get('description', 'Playwright Script Content')
+                                    try:
+                                        if not e2e_executor:
+                                            from app.services.playwright_executor_service import PlaywrightExecutorService
+                                            e2e_executor = PlaywrightExecutorService()
+                                            e2e_executor.start()
+                                        resp = e2e_executor.execute_step(step_data)
+                                        resp_status = resp['status']
+                                        resp_reason = resp['reason']
+                                        resp_text = resp['text']
+                                    except Exception as e:
+                                        logger.error(f"FATAL: Playwright Init Error: {str(e)}")
+                                        resp_status = 500
+                                        resp_reason = "E2E Driver Error"
+                                        resp_text = str(e)
                                 else:
                                     if url.startswith('/'):
                                         from app.config import settings
@@ -184,10 +251,10 @@ class FlowExecutorService:
 
                                     if FlowExecutorService.is_blocked_domain(url):
                                         logger.warning(f"      ⛔ Skipping Blocked/Ad Domain: {url}")
-                                        continue
+                                        return
                                     
                                     # --- 1. Headers Reconstruction ---
-                                    headers_raw = api_call.get('headers', {})
+                                    headers_raw = step_data.get('headers', {})
                                     if isinstance(headers_raw, list):
                                         mapping = {}
                                         for h in headers_raw:
@@ -204,7 +271,7 @@ class FlowExecutorService:
                                     headers = {str(k): str(v) for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
 
                                     # --- 2. Params Reconstruction (Query String) ---
-                                    params_raw = api_call.get('params', {})
+                                    params_raw = step_data.get('params', {})
                                     if isinstance(params_raw, list):
                                         mapping = {}
                                         for p in params_raw:
@@ -221,7 +288,7 @@ class FlowExecutorService:
                                     params = {str(k): str(v) for k, v in params.items() if v is not None}
 
                                     # --- 3. Body Reconstruction ---
-                                    body_raw = api_call.get('body', '')
+                                    body_raw = step_data.get('body', '')
                                     if isinstance(body_raw, (dict, list)):
                                         body_json_str = json.dumps(body_raw)
                                         body = FlowExecutorService.replace_vars(body_json_str, variables_dict)
@@ -254,7 +321,7 @@ class FlowExecutorService:
                                         resp_json = None
 
                                     # --- Assertions ---
-                                    assertions_raw = api_call.get('assertions', [])
+                                    assertions_raw = step_data.get('assertions', [])
                                     for assertion in assertions_raw:
                                         try:
                                             # Normalize Source
@@ -347,7 +414,10 @@ class FlowExecutorService:
                                             assertions_passed = False
 
                                     # --- Extraction ---
-                                    extracts = api_call.get('extracts', [])
+                                    # NOTE: In parallel mode, extractions are applied as they finish.
+                                    # Since they all use the shared `variables_dict`, subsequent steps in the FLOW
+                                    # will see them, but sibling steps in the SAME NODE might not (race condition).
+                                    extracts = step_data.get('extracts', [])
                                     if extracts:
                                         for rule in extracts:
                                             try:
@@ -372,50 +442,78 @@ class FlowExecutorService:
                                                 
                                                 if val is not None and r_var:
                                                     val_str = str(val)
-                                                    variables_dict[r_var] = val_str
-                                                    # Persist to DB for visibility in the environment panel
-                                                    new_var = VariableCreate(name=r_var, value=val_str, project_id=product_id, environment_id=env_id, type="extracted")
-                                                    VariableService.create(db, new_var)
-                                                    logger.info(f"      ✅ Extracted [{r_var}] = '{val_str}'")
+                                                    with execution_lock:
+                                                        variables_dict[r_var] = val_str
+                                                        # Persist to DB for visibility in the environment panel
+                                                        new_var = VariableCreate(name=r_var, value=val_str, project_id=product_id, environment_id=env_id, type="extracted")
+                                                        VariableService.create(db, new_var)
+                                                        logger.info(f"      ✅ Extracted [{r_var}] = '{val_str}'")
                                             except Exception as ee:
                                                 logger.error(f"        ❌ Extraction Error: {ee}")
+                        except Exception as req_ex:
+                            logger.error(f"Request failed: {req_ex}")
+                            resp_status = 500
+                            final_error_message = str(req_ex)
 
-                            except Exception as req_ex:
-                                logger.error(f"Request failed: {req_ex}")
-                                resp_status = 500
-                                final_error_message = str(req_ex)
+                        if not final_error_message:
+                            if step_data.get('assertions') and not assertions_passed:
+                                final_error_message = "Assertions Failed"
+                            elif resp_status >= 400:
+                                final_error_message = f"HTTP Error {resp_status}"
 
-                            if not final_error_message:
-                                if api_call.get('assertions') and not assertions_passed:
-                                    final_error_message = "Assertions Failed"
-                                elif resp_status >= 400:
-                                    final_error_message = f"HTTP Error {resp_status}"
-
+                        with execution_lock:
                             if final_error_message: flow_fail_count += 1
                             else: flow_success_count += 1
 
-                            hist = ExecutionHistoryCreate(
-                                batch_id=batch_id,
-                                api_id=int(api_call.get('id')) if str(api_call.get('id')).isdigit() else None,
-                                api_name=api_call.get('name') or "Step",
-                                project_id=product_id,
-                                flow_id=flow_meta['id'],
-                                node_id=current_id,
-                                schedule_id=schedule_id,
-                                feature_name=feature_name,
-                                node_name=card.get('name'),
-                                method=method,
-                                url=url,
-                                status_code=resp_status,
-                                response_body=resp_text,
-                                response_time=duration,
-                                environment_id=env_id,
-                                error_message=final_error_message,
-                                assertions=assertion_results
-                            )
-                            history_buffer.append(hist)
+                        hist = ExecutionHistoryCreate(
+                            batch_id=batch_id,
+                            api_id=int(step_data.get('id')) if str(step_data.get('id')).isdigit() else None,
+                            api_name=step_data.get('name') or "Step",
+                            project_id=product_id,
+                            flow_id=flow_meta['id'],
+                            node_id=current_id,
+                            schedule_id=schedule_id,
+                            feature_name=feature_name,
+                            node_name=card.get('name'),
+                            method=method,
+                            url=url,
+                            status_code=resp_status,
+                            response_body=resp_text,
+                            response_time=duration,
+                            environment_id=env_id,
+                            error_message=final_error_message,
+                            assertions=assertion_results
+                        )
+                        history_buffer.append(hist)
+
+                    # --- Execution Loop ---
+                    try:
+                        # --- HIBRID EXECUTION: Group contiguous parallel blocks ---
+                        i = 0
+                        while i < len(all_steps):
+                            step_entry = all_steps[i]
+                            is_parallel_step = step_entry['data'].get('parallel', False)
+                            
+                            if is_parallel_step:
+                                # Gather contiguous parallel steps
+                                parallel_batch = []
+                                while i < len(all_steps) and all_steps[i]['data'].get('parallel', False):
+                                    parallel_batch.append(all_steps[i])
+                                    i += 1
+                                
+                                logger.info(f"      ⚡ PARALLEL BATCH: Running {len(parallel_batch)} steps for Node {current_id}")
+                                import concurrent.futures
+                                with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_batch)) as node_executor:
+                                    list(node_executor.map(execute_step_internal, parallel_batch))
+                            else:
+                                # Sequential Step
+                                logger.info(f"      ▶️ SEQUENTIAL STEP: Running 1 step for Node {current_id}")
+                                execute_step_internal(step_entry)
+                                i += 1
                     except Exception as loop_ex:
                         logger.error(f"Critical error in execution loop: {loop_ex}")
+
+                # Neighbors
 
                 # Neighbors
                 neighbors = adj.get(current_id, [])
@@ -428,6 +526,20 @@ class FlowExecutorService:
                         logger.info(f"      ✨ Node {tgt} is now ready (In-Degree 0). Adding to queue.")
                         queue.append(tgt)
                         queue.sort(key=get_x_pos)
+
+            # Finalize Video Recording
+            if e2e_executor:
+                logger.info("⏳ Waiting 2s for video to capture final state...")
+                time.sleep(2)  # Give it a moment to capture the last validation visual result
+                e2e_executor.stop()
+                # Find the recording in the video_dir (Playwright auto-names it)
+                videos = [f for f in os.listdir(video_dir) if f.endswith('.webm')]
+                if videos:
+                    video_url = f"/videos/{batch_id}/{videos[0]}"
+                    for hist in history_buffer:
+                        # Optional: only map video to E2E steps or all steps in this batch?
+                        # User wants to see "executing", so all steps in this batch point to this video.
+                        hist.video_url = video_url
 
             if history_buffer:
                 HistoryService.save_batch(db, history_buffer, user_id)
