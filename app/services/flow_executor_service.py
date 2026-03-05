@@ -192,8 +192,15 @@ class FlowExecutorService:
                         all_steps = []
                         is_e2e_flow = flow_data.get('flow_type') == 'e2e' or flow_meta.get('flow_type') == 'e2e'
                         
-                        # Execute API steps as well (for setup/teardown/seed data) before E2E steps
-                        for a in api_calls: all_steps.append({'data': a, 'type': 'api'})
+                        # Do NOT execute api_calls if this is an E2E node,
+                        # because they are mapped APIs from the browser extension.
+                        # Manual APIs inside E2E nodes are now added to e2e_steps.
+                        node_metadata = next((n for n in nodes if n['id'] == current_id), {})
+                        is_e2e_node = node_metadata.get('type') == 'e2e' or len(e2e_steps) > 0
+                        
+                        if not is_e2e_node:
+                            for a in api_calls: all_steps.append({'data': a, 'type': 'api'})
+
                         for e in e2e_steps:
                             if e.get('type') == 'api_request':
                                 props = e.get('properties', {})
@@ -556,8 +563,11 @@ class FlowExecutorService:
                                 assertions=assertion_results
                             )
                             
+                            # The main action step (e.g., Click, Type) is appended FIRST
+                            history_buffer.append(hist)
+                            
                             # Fetch any background HTTP requests intercepted by the browser during this step
-                            # We append them FIRST so they appear in history *before* the step resolves
+                            # We append them AFTER the main step so the sequence makes sense (Action -> Resulting Requests)
                             if step_type == 'e2e' and e2e_executor:
                                 intercepted = e2e_executor.pop_captured_requests()
                                 for req in intercepted:
@@ -590,8 +600,6 @@ class FlowExecutorService:
                                                 path_success = False
                                         else:
                                             flow_success_count += 1
-                                            
-                            history_buffer.append(hist)
 
                         # --- Execution Loop ---
                         try:

@@ -503,64 +503,85 @@ class PDFService:
             pdf.cell(0, 8, label, fill=True, ln=True)
             pdf.ln(1)
 
-            # Split: browser/E2E steps vs API calls
-            e2e_steps  = [i for i in items if (i.method or '').upper() not in HTTP_METHODS]
-            api_calls  = [i for i in items if (i.method or '').upper() in HTTP_METHODS]
-
-            # Deduplicate consecutive E2E steps with the same api_name
-            # (e.g. recorder may produce both '[name="x"]' and 'input[name="x"]' for the same field)
-            deduped_e2e = []
-            for step in e2e_steps:
-                step_name = (step.api_name or '').strip().lower()
-                if deduped_e2e and (deduped_e2e[-1].api_name or '').strip().lower() == step_name:
-                    # Keep the entry that has the longest (most realistic) response_time
-                    prev = deduped_e2e[-1]
-                    if (step.response_time or 0) > (prev.response_time or 0):
-                        deduped_e2e[-1] = step
+            # Deduplicate contiguous duplicate E2E steps to prevent noise
+            deduped_items = []
+            for step in items:
+                step_is_api = (step.method or '').upper() in HTTP_METHODS
+                if not step_is_api:
+                    step_name = (step.api_name or '').strip().lower()
+                    if deduped_items and not ((deduped_items[-1].method or '').upper() in HTTP_METHODS) and (deduped_items[-1].api_name or '').strip().lower() == step_name:
+                        prev = deduped_items[-1]
+                        if (step.response_time or 0) > (prev.response_time or 0):
+                            deduped_items[-1] = step
+                    else:
+                        deduped_items.append(step)
                 else:
-                    deduped_e2e.append(step)
-            e2e_steps = deduped_e2e
+                    deduped_items.append(step)
 
-            # ── 1. Browser / E2E Steps sub-table ──
-            if e2e_steps:
+            # ── Unified Chronological Table ──
+            if deduped_items:
                 pdf.set_font('Arial', 'B', 7)
                 pdf.set_text_color(99, 102, 241)
-                pdf.cell(0, 5, PDFService._s('  Passos do Navegador (E2E)'), ln=True)
+                pdf.cell(0, 5, PDFService._s('  Comandos Executados e APIs Interceptadas (Cronológico)'), ln=True)
 
                 pdf.set_fill_color(71, 85, 105)
                 pdf.set_text_color(255, 255, 255)
                 pdf.set_font('Arial', 'B', 7)
-                for i, h in enumerate(['Passo', 'Descricao', 'Tempo', 'Resultado']):
-                    pdf.cell(col_w_e2e[i], 6, h, border=1, fill=True, align='C')
+                col_w = [45, 95, 16, 16, 18] # Total 190
+                headers = ['Passo / Metodo', 'Descricao / URL', 'Status', 'Tempo', 'Resultado']
+                for i, h in enumerate(headers):
+                    pdf.cell(col_w[i], 6, h, border=1, fill=True, align='C')
                 pdf.ln()
 
-                for idx_e, item in enumerate(e2e_steps):
+                for item in deduped_items:
                     if pdf.get_y() > 262:
                         pdf.add_page()
 
+                    is_api = (item.method or '').upper() in HTTP_METHODS
                     status_ok  = (item.status_code and item.status_code < 400 and not item.error_message)
-                    fill_color = (240, 253, 244) if status_ok else (255, 241, 242)
+                    
+                    if is_api:
+                        fill_color = (240, 253, 244) if status_ok else (255, 241, 242)
+                        name = PDFService._s(f"[{item.method}] {(item.api_name or 'API')[:30]}")
+                        url  = (item.processed_url or item.url or '')
+                        desc = PDFService._s((url[:65] + '...') if len(url) > 65 else url)
+                        status_str = str(item.status_code or '-')
+                    else:
+                        fill_color = (250, 252, 255) if status_ok else (255, 241, 242) # Light blueish for E2E
+                        name = PDFService._s((item.api_name or 'Passo E2E')[:30])
+                        desc = PDFService._s(PDFService._get_browser_description(item)[:65])
+                        status_str = '-'
+
                     res_text   = 'OK' if status_ok else 'ERRO'
                     res_color  = (22, 163, 74) if status_ok else (220, 38, 38)
-                    name = PDFService._s((item.api_name or 'Passo')[:30])
-                    desc = PDFService._s(PDFService._get_browser_description(item)[:55])
 
                     pdf.set_fill_color(*fill_color)
                     pdf.set_text_color(30, 41, 59)
-                    pdf.set_font('Arial', '', 7)
-                    row_y = pdf.get_y()
-
-                    pdf.cell(col_w_e2e[0], 6, name, border=1, fill=True)
+                    
+                    # Nome (Bold se for E2E)
+                    pdf.set_font('Arial', 'B' if not is_api else '', 7)
+                    pdf.cell(col_w[0], 6, name, border=1, fill=True)
+                    
+                    # Desc
+                    pdf.set_font('Arial', '', 6)
                     pdf.set_text_color(80, 80, 120)
-                    pdf.set_font('Arial', 'I', 6)
-                    pdf.cell(col_w_e2e[1], 6, desc, border=1, fill=True)
-                    pdf.set_text_color(30, 41, 59)
+                    pdf.cell(col_w[1], 6, desc, border=1, fill=True)
+                    
+                    # Variados
                     pdf.set_font('Arial', '', 7)
-                    pdf.cell(col_w_e2e[2], 6, PDFService._s(f'{item.response_time or 0}ms'), border=1, fill=True, align='C')
+                    if is_api:
+                        pdf.set_text_color(*((22, 163, 74) if status_ok else (220, 38, 38)))
+                    else:
+                        pdf.set_text_color(30, 41, 59)
+                    pdf.cell(col_w[2], 6, PDFService._s(status_str), border=1, fill=True, align='C')
+                    
+                    pdf.set_text_color(30, 41, 59)
+                    pdf.cell(col_w[3], 6, PDFService._s(f'{item.response_time or 0}ms'), border=1, fill=True, align='C')
+                    
                     pdf.set_text_color(*res_color)
                     pdf.set_font('Arial', 'B', 7)
-                    pdf.cell(col_w_e2e[3], 6, PDFService._s(res_text), border=1, fill=True, align='C')
-                    pdf.set_font('Arial', '', 7)
+                    pdf.cell(col_w[4], 6, PDFService._s(res_text), border=1, fill=True, align='C')
+                    
                     pdf.set_text_color(0, 0, 0)
                     pdf.ln()
 
@@ -568,91 +589,24 @@ class PDFService:
                         pdf.set_x(15)
                         pdf.set_font('Arial', 'I', 6)
                         pdf.set_text_color(180, 0, 0)
-                        err = PDFService._s((item.error_message or '')[:155])
-                        if len(item.error_message or '') > 155:
-                            err += '...'
-                        pdf.cell(190, 4, err, ln=True)
+                        err_msg = PDFService._s((item.error_message or '')[:155])
+                        if len(item.error_message or '') > 155: err_msg += '...'
+                        pdf.cell(190, 4, err_msg, ln=True)
                         pdf.set_text_color(0, 0, 0)
 
-                    # Screenshot: collect all and embed thumbnail inline
-                    combo = (item.response_body or '') + (item.error_message or '')
-                    shot_rel = PDFService._extract_screenshot_path(combo)
-                    if shot_rel:
-                        shot_path = PDFService._resolve_media_path(shot_rel)
-                        if shot_path:
-                            global_idx = list(history).index(item) + 1
-                            screenshot_gallery.append({
-                                'path': shot_path,
-                                'name': item.api_name or 'Passo',
-                                'ok': status_ok,
-                                'idx': global_idx
-                            })
-                            
-                            try:
-                                # Calculate aspect ratio based roughly on a 16:9 screen
-                                # Insert vertically inline instead of absolutely positioned
-                                pdf.ln(2)
-                                pdf.image(shot_path, x=15, w=80)
-                                pdf.ln(2)
-                            except Exception:
-                                pass
-
-                pdf.ln(2)
-
-            # ── 2. API Calls sub-table ──
-            if api_calls:
-                if pdf.get_y() > 240:
-                    pdf.add_page()
-
-                pdf.set_font('Arial', 'B', 7)
-                pdf.set_text_color(16, 185, 129)
-                pdf.cell(0, 5, PDFService._s('  Chamadas de API'), ln=True)
-
-                pdf.set_fill_color(16, 120, 85)
-                pdf.set_text_color(255, 255, 255)
-                pdf.set_font('Arial', 'B', 7)
-                for i, h in enumerate(['Nome / Endpoint', 'Metodo', 'Status', 'Tempo', 'URL']):
-                    pdf.cell(col_w_api[i], 6, h, border=1, fill=True, align='C')
-                pdf.ln()
-
-                for item in api_calls:
-                    if pdf.get_y() > 262:
-                        pdf.add_page()
-
-                    status_ok  = (item.status_code and item.status_code < 400 and not item.error_message)
-                    fill_color = (240, 253, 244) if status_ok else (255, 241, 242)
-                    res_color  = (22, 163, 74) if status_ok else (220, 38, 38)
-                    name = (item.api_name or item.node_name or 'API')[:38]
-                    url  = (item.processed_url or item.url or '')[:60]
-                    if len(item.processed_url or item.url or '') > 60:
-                        url += '...'
-
-                    pdf.set_fill_color(*fill_color)
-                    pdf.set_text_color(30, 41, 59)
-                    pdf.set_font('Arial', '', 7)
-
-                    pdf.cell(col_w_api[0], 6, PDFService._s(name), border=1, fill=True)
-                    pdf.set_text_color(*res_color)
-                    pdf.set_font('Arial', 'B', 7)
-                    pdf.cell(col_w_api[1], 6, PDFService._s((item.method or '-').upper()), border=1, fill=True, align='C')
-                    pdf.set_text_color(30, 41, 59)
-                    pdf.set_font('Arial', '', 7)
-                    code_color = (22, 163, 74) if status_ok else (220, 38, 38)
-                    pdf.set_text_color(*code_color)
-                    pdf.cell(col_w_api[2], 6, PDFService._s(str(item.status_code or '-')), border=1, fill=True, align='C')
-                    pdf.set_text_color(30, 41, 59)
-                    pdf.cell(col_w_api[3], 6, PDFService._s(f'{item.response_time or 0}ms'), border=1, fill=True, align='C')
-                    pdf.set_font('Arial', '', 6)
-                    pdf.set_text_color(71, 85, 105)
-                    pdf.cell(col_w_api[4], 6, PDFService._s(url), border=1, fill=True)
-                    pdf.ln()
-
-                    if not status_ok and item.error_message:
-                        pdf.set_x(15)
-                        pdf.set_font('Arial', 'I', 6)
-                        pdf.set_text_color(180, 0, 0)
-                        pdf.cell(185, 4, PDFService._s((item.error_message or '')[:160]), ln=True)
-                        pdf.set_text_color(0, 0, 0)
+                    # Display Inline Screenshots for E2E steps
+                    if not is_api:
+                        combo = (item.response_body or '') + (item.error_message or '')
+                        shot_rel = PDFService._extract_screenshot_path(combo)
+                        if shot_rel:
+                            shot_path = PDFService._resolve_media_path(shot_rel)
+                            if shot_path:
+                                try:
+                                    pdf.ln(2)
+                                    pdf.image(shot_path, x=15, w=80)
+                                    pdf.ln(2)
+                                except Exception:
+                                    pass
 
                 pdf.ln(2)
 
