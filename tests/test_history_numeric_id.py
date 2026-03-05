@@ -2,8 +2,12 @@
 def test_get_execution_detail_by_numeric_id(client):
     headers = None
     # Assuming helper to get headers exists or we need to login
-    client.post("/auth/create", json={"username": "numiduser", "password": "password"})
-    login_resp = client.post("/auth/login", data={"username": "numiduser", "password": "password"})
+    client.post("/auth/create", json={
+        "username": "numiduser",
+        "password": "Password123!",
+        "accepted_terms": True
+    })
+    login_resp = client.post("/auth/login", json={"username": "numiduser", "password": "Password123!"})
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 

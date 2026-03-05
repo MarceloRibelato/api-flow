@@ -80,6 +80,7 @@ def delete_variable_by_name(
     project_id: int,
     environment_id: Optional[int] = None,
     db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
     success = VariableService.delete_by_name(db, name, project_id, environment_id)
     if not success:

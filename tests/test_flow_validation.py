@@ -1,18 +1,23 @@
 import pytest
 
 def get_headers(client, username="flowvaluser"):
-    client.post("/auth/create", json={"username": username, "password": "password"})
+    client.post("/auth/create", json={
+        "username": username,
+        "password": "Password123!",
+        "accepted_terms": True
+    })
     token = client.post(
-        "/auth/login", data={"username": username, "password": "password"}
+        "/auth/login", json={"username": username, "password": "Password123!"}
     ).json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
 
 def test_save_empty_flow(client):
     headers = get_headers(client, "emptyuser")
-    proj = client.post("/projects/", headers=headers, json={"name": "Empty Project"}).json()
+    prod = client.post("/products/", headers=headers, json={"name": "Empty Product"}).json()
+    feat = client.post("/features/", headers=headers, json={"name": "Empty Feature", "product_id": prod["id"]}).json()
 
     flow_data = {
-        "projectId": proj["id"],
+        "projectId": feat["id"],
         "nodes": [],
         "edges": []
     }
@@ -21,7 +26,7 @@ def test_save_empty_flow(client):
     assert resp.status_code == 200
     
     # Verify load
-    load_resp = client.get(f"/flow/load/{proj['id']}", headers=headers)
+    load_resp = client.get(f"/flow/load/{feat['id']}", headers=headers)
     assert load_resp.json()["nodes"] == []
 
 def test_save_flow_with_orphaned_edges(client):
@@ -31,15 +36,16 @@ def test_save_flow_with_orphaned_edges(client):
     but mostly we want to ensure it doesn't Crash.
     """
     headers = get_headers(client, "orphanuser")
-    proj = client.post("/projects/", headers=headers, json={"name": "Orphan Project"}).json()
+    prod = client.post("/products/", headers=headers, json={"name": "Orphan Project"}).json()
+    feat = client.post("/features/", headers=headers, json={"name": "Orphan Feature", "product_id": prod["id"]}).json()
 
     flow_data = {
-        "projectId": proj["id"],
+        "projectId": feat["id"],
         "nodes": [
-            {"id": "1", "type": "custom", "position": {"x": 0, "y": 0}, "data": {}}
+            {"id": "1", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"name": "Node 1"}}
         ],
         "edges": [
-            {"id": "e1-2", "source": "1", "target": "2"} # Node 2 does not exist
+            {"id": "e1-2", "source": "1", "target": "2", "type": "buttonedge"} # Node 2 does not exist
         ]
     }
     
@@ -47,7 +53,7 @@ def test_save_flow_with_orphaned_edges(client):
     resp = client.post("/flow/save", headers=headers, json=flow_data)
     assert resp.status_code == 200
 
-    load_resp = client.get(f"/flow/load/{proj['id']}", headers=headers)
+    load_resp = client.get(f"/flow/load/{feat['id']}", headers=headers)
     saved_edges = load_resp.json()["edges"]
     # Depending on logic, it might be saved or filtered. Currently straightforward save.
     assert len(saved_edges) == 1
@@ -59,13 +65,14 @@ def test_save_duplicate_node_ids(client):
     The backend usually invalidates or updates the existing one.
     """
     headers = get_headers(client, "dupnodeuser")
-    proj = client.post("/projects/", headers=headers, json={"name": "Dup Project"}).json()
+    prod = client.post("/products/", headers=headers, json={"name": "Dup Project"}).json()
+    feat = client.post("/features/", headers=headers, json={"name": "Dup Feature", "product_id": prod["id"]}).json()
 
     flow_data = {
-        "projectId": proj["id"],
+        "projectId": feat["id"],
         "nodes": [
-            {"id": "1", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"label": "A"}},
-            {"id": "1", "type": "custom", "position": {"x": 100, "y": 100}, "data": {"label": "B"}} # Duplicate ID
+            {"id": "1", "type": "custom", "position": {"x": 0, "y": 0}, "data": {"name": "Node A"}},
+            {"id": "1", "type": "custom", "position": {"x": 100, "y": 100}, "data": {"name": "Node B"}} # Duplicate ID
         ],
         "edges": []
     }
@@ -77,7 +84,7 @@ def test_save_duplicate_node_ids(client):
     # Current implementation uses JSON/Mongo-like structure or localized tables? 
     # It likely replaces the list entirely. 
     # If the nodes list is just a JSON blob, it stores both.
-    load_resp = client.get(f"/flow/load/{proj['id']}", headers=headers)
+    load_resp = client.get(f"/flow/load/{feat['id']}", headers=headers)
     nodes = load_resp.json()["nodes"]
     
     # If standard JSON list, it allows duplicates. If processed, maybe not.

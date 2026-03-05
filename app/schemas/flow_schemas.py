@@ -26,6 +26,8 @@ class ApiCallSchema(BaseModel):
     params: List[Dict[str, str]] = []
     description: str = ""
     timeout: int = 30000
+    delay: int = 0
+    parallel: bool = False
     assertions: List[AssertionRule] = []
     extracts: List[ExtractionRule] = []
 
@@ -119,6 +121,5 @@ class FlowResponse(BaseModel):
     nodes_count: int
     edges_count: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 

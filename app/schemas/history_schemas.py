@@ -102,6 +102,9 @@ class ExecutionHistorySummary(BaseModel):
     node_id: Optional[str] = None  # Added node_id
     api_name: Optional[str] = None  # RESTORED: Critical for matching in frontend
     success: bool # Read directly from Model property
+    error_message: Optional[str] = None # Critical for diagnostics
+    request_body: Optional[Any] = None # Added for visibility
+    response_body: Optional[Any] = None # Added for visibility (used for screenshots)
     assertions: Optional[List[AssertionResult]] = None # Added assertions for report summary
     video_url: Optional[str] = None  # Added for E2E recordings
     

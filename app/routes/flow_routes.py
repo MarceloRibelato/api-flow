@@ -121,3 +121,14 @@ def delete_flow(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao remover fluxo: {str(e)}")
+@router.get("/stats/{project_id}")
+def get_flow_stats(
+    project_id: int, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """Retorna estatísticas do fluxo (nós, arestas, cards, bdd, api)"""
+    try:
+        return FlowService.get_stats(db, project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao obter estatísticas: {str(e)}")

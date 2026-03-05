@@ -99,7 +99,7 @@ class AuthService:
             hashed_password=hashed_pwd,
             full_name=user.full_name,
             cpf=cpf_clean,
-            old_company_name=user.company, # Legacy text field
+            company=user.company, # Legacy text field
             company_id=company_id,
             role=role,
             status=status,

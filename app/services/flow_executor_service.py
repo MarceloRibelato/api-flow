@@ -92,15 +92,11 @@ class FlowExecutorService:
         from app.services.history_service import HistoryService
         from app.schemas.history_schemas import ExecutionHistoryCreate
 
-        batch_id = f"sched_{uuid.uuid4().hex}"
+        base_batch_id = f"sched_{uuid.uuid4().hex}"
         history_buffer = []
         flow_success_count = 0
         flow_fail_count = 0
         e2e_executor = None
-
-        # Video recording setup
-        video_dir = f"/app/data/videos/{batch_id}"
-        os.makedirs(video_dir, exist_ok=True)
 
         try:
             # Load full flow data with cards
@@ -129,251 +125,323 @@ class FlowExecutorService:
                 in_degree[tgt] += 1
                 logger.debug(f"   Edge: {src} -> {tgt}")
 
-            # BFS / Kahn's Algorithm for Topological Sort/Traversal
-            # Start with nodes having in_degree 0 (Roots)
-            queue = [n['id'] for n in nodes if in_degree[n['id']] == 0]
+            # FIND ALL PATHS (Scenarios) to run from START to END independently
+            roots = [n['id'] for n in nodes if in_degree[n['id']] == 0]
             
-            logger.info(f"🌱 Initial Roots (queue): {queue}")
-            
-            flow_failed = False  # Track if any step fails
-            flow_success_count = 0
-            flow_fail_count = 0 
-            
-            # Sort roots by position.x to respect visual order
             def get_x_pos(nid):
                 n = next((x for x in nodes if x['id'] == nid), None)
                 return n['position']['x'] if n else 0
-            
-            queue.sort(key=get_x_pos)
-            
-            # Use a shared session for the entire flow to persist Cookies (Auth)
-            flow_session = requests.Session()
-            flow_session.trust_env = False # Disable proxy for performance
-            
-            visited = set()
+            roots.sort(key=get_x_pos)
 
-            while queue:
-                current_id = queue.pop(0)
-                logger.info(f"➡️  [Step] Processing Node: {current_id} (Queue: {len(queue)})")
+            all_paths = []
+            def dfs_paths(current_id, current_path):
+                neighbors = adj.get(current_id, [])
+                if not neighbors:
+                    all_paths.append(current_path)
+                else:
+                    for nxt in neighbors:
+                        if nxt not in current_path: # Detect cycle
+                            dfs_paths(nxt, current_path + [nxt])
+                        else:
+                            all_paths.append(current_path)
+
+            for r in roots:
+                dfs_paths(r, [r])
                 
-                if current_id in visited:
-                    continue
-                visited.add(current_id)
+            logger.info(f"🛣️ Found {len(all_paths)} possible execution paths (scenarios).")
 
-                # Execute Card for this Node
-                card = cards.get(current_id)
-                if card:
-                    api_calls = card.get('apiCalls', [])
-                    e2e_steps = card.get('e2eSteps', [])
-                    
-                    # Combine steps into a unified execution list
-                    # We process api_calls first for legacy/hybrid support, then e2e_steps
-                    all_steps = []
-                    for a in api_calls: all_steps.append({'data': a, 'type': 'api'})
-                    for e in e2e_steps: all_steps.append({'data': e, 'type': 'e2e'})
-                    
-                    execution_lock = threading.Lock()
+            flow_failed = False
+            flow_success_count = 0
+            flow_fail_count = 0 
 
-                    # --- Execution Helpers ---
-                    def execute_step_internal(step_entry):
-                        nonlocal flow_success_count, flow_fail_count, e2e_executor
-                        step_data = step_entry['data']
-                        step_type = step_entry['type']
+            import copy
+            base_variables_dict = copy.deepcopy(variables_dict)
+
+            for path_index, path_nodes in enumerate(all_paths):
+                logger.info(f"🛣️ === Executing Scenario Path {path_index + 1}/{len(all_paths)} === 🛣️")
+                
+                # Each path is a separate logical execution batch
+                batch_id = f"{base_batch_id}_path_{path_index+1}"
+                video_dir = f"/app/data/videos/{batch_id}"
+                os.makedirs(video_dir, exist_ok=True)
+                
+                # Reset states fully for each scenario path
+                variables_dict = copy.deepcopy(base_variables_dict)
+                flow_session = requests.Session()
+                flow_session.trust_env = False
+                
+                # Reset e2e executor inside if used
+                e2e_executor = None
+
+                path_success = True
+
+                for current_id in path_nodes:
+                    if not path_success:
+                        logger.warning(f"  🛑 Skipping node {current_id} because path previously failed.")
+                        break
+
+                    logger.info(f"➡️  [Step] Processing Node: {current_id}")
+                    
+                        # Execute Card for this Node
+                    card = cards.get(current_id)
+                    if card:
+                        api_calls = card.get('apiCalls', [])
+                        e2e_steps = card.get('e2eSteps', [])
                         
-                        resp_status = 0
-                        resp_reason = "Pending"
-                        resp_headers = {}
-                        resp_text = ""
-                        duration = 0
-                        assertion_results = []
-                        assertions_passed = True
-                        final_error_message = None
-                        headers = {}
-                        body = ""
-                        url = ""
-                        method = ""
-
-                        try:
-                            if step_type == 'e2e':
-                                try:
-                                    if not e2e_executor:
-                                        from app.services.playwright_executor_service import PlaywrightExecutorService
-                                        e2e_executor = PlaywrightExecutorService()
-                                        e2e_executor.start(video_dir=video_dir)
-                                    # Resolve variables in E2E step data
-                                    step_data_str = json.dumps(step_data)
-                                    step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, variables_dict))
-
-                                    # Execute real Playwright step
-                                    start_time = time.time()
-                                    resp = e2e_executor.execute_step(step_data)
-                                    duration = int((time.time() - start_time) * 1000)
-                                    
-                                    resp_status = resp['status']
-                                    resp_reason = resp['reason']
-                                    resp_text = resp['text']
-                                    
-                                    method = "BROWSER"
-                                    url = step_data.get('properties', {}).get('value', '') or step_data.get('properties', {}).get('selector', '')
-                                except Exception as e:
-                                    logger.error(f"FATAL: E2E Execution Error: {str(e)}")
-                                    resp_status = 500
-                                    resp_reason = "E2E Error"
-                                    resp_text = str(e)
+                        # Combine steps into a unified execution list
+                        all_steps = []
+                        is_e2e_flow = flow_data.get('flow_type') == 'e2e' or flow_meta.get('flow_type') == 'e2e'
+                        
+                        # Execute API steps as well (for setup/teardown/seed data) before E2E steps
+                        for a in api_calls: all_steps.append({'data': a, 'type': 'api'})
+                        for e in e2e_steps:
+                            if e.get('type') == 'api_request':
+                                props = e.get('properties', {})
+                                headers_val = props.get('headers', [])
+                                if isinstance(headers_val, str):
+                                    try: headers_val = json.loads(headers_val)
+                                    except: headers_val = []
+                                assertions_val = props.get('assertions', [])
+                                if isinstance(assertions_val, str):
+                                    try: assertions_val = json.loads(assertions_val)
+                                    except: assertions_val = []
+                                api_data = {
+                                    'id': e.get('id'),
+                                    'name': e.get('name', 'API Request (E2E)'),
+                                    'method': props.get('method', 'GET'),
+                                    'url': props.get('url', ''),
+                                    'headers': headers_val,
+                                    'body': props.get('body', ''),
+                                    'assertions': assertions_val,
+                                    'parallel': False,
+                                    'extracts': []
+                                }
+                                all_steps.append({'data': api_data, 'type': 'api'})
                             else:
-                                method = step_data.get('method', 'GET')
-                                url = FlowExecutorService.replace_vars(step_data.get('url', ''), variables_dict)
-                                
-                                if method == 'PYTHON':
+                                all_steps.append({'data': e, 'type': 'e2e'})
+                        
+                        execution_lock = threading.Lock()
+
+                        # --- Execution Helpers ---
+                        def execute_step_internal(step_entry):
+                            nonlocal flow_success_count, flow_fail_count, e2e_executor, path_success
+                            step_data = step_entry['data']
+                            step_type = step_entry['type']
+                            
+                            resp_status = 0
+                            resp_reason = "Pending"
+                            resp_headers = {}
+                            resp_text = ""
+                            duration = 0
+                            assertion_results = []
+                            assertions_passed = True
+                            final_error_message = None
+                            headers = {}
+                            body = ""
+                            url = ""
+                            method = ""
+
+                            try:
+                                if step_type == 'e2e':
                                     try:
                                         if not e2e_executor:
                                             from app.services.playwright_executor_service import PlaywrightExecutorService
                                             e2e_executor = PlaywrightExecutorService()
-                                            e2e_executor.start()
+                                            e2e_executor.start(video_dir=video_dir)
+                                        # Resolve variables in E2E step data
+                                        step_data_str = json.dumps(step_data)
+                                        step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, variables_dict))
+
+                                        # Sanitize E2E URL for Docker (e.g. localhost -> flow-frontend)
+                                        if step_data.get('type') == 'browser' and step_data.get('properties', {}).get('value'):
+                                            val = step_data['properties']['value'].strip()
+                                            if val and not val.startswith(('http://', 'https://')):
+                                                val = f"http://{val}"
+                                            step_data['properties']['value'] = FlowExecutorService.sanitize_url_for_docker(val)
+                                            logger.info(f"      🔗 Sanitize E2E URL: {val} -> {step_data['properties']['value']}")
+
+                                        # Execute real Playwright step
+                                        start_time = time.time()
                                         resp = e2e_executor.execute_step(step_data)
+                                        duration = int((time.time() - start_time) * 1000)
+                                        
                                         resp_status = resp['status']
                                         resp_reason = resp['reason']
                                         resp_text = resp['text']
+                                        
+                                        method = "BROWSER"
+                                        url = step_data.get('properties', {}).get('value', '') or step_data.get('properties', {}).get('selector', '')
                                     except Exception as e:
-                                        logger.error(f"FATAL: Playwright Init Error: {str(e)}")
+                                        logger.error(f"FATAL: E2E Execution Error: {str(e)}")
                                         resp_status = 500
-                                        resp_reason = "E2E Driver Error"
+                                        resp_reason = "E2E Error"
                                         resp_text = str(e)
                                 else:
-                                    if url.startswith('/'):
-                                        from app.config import settings
-                                        base = settings.API_BASE_URL.rstrip('/')
-                                        path = url.lstrip('/')
-                                        url = f"{base}/{path}"
+                                    method = step_data.get('method', 'GET')
+                                    url = FlowExecutorService.replace_vars(step_data.get('url', ''), variables_dict)
                                     
-                                    # ✅ RE-ENABLED: Normalize URL for Docker internal networking
-                                    url = FlowExecutorService.sanitize_url_for_docker(url)
-
-                                    if FlowExecutorService.is_blocked_domain(url):
-                                        logger.warning(f"      ⛔ Skipping Blocked/Ad Domain: {url}")
-                                        return
-                                    
-                                    # --- 1. Headers Reconstruction ---
-                                    headers_raw = step_data.get('headers', {})
-                                    if isinstance(headers_raw, list):
-                                        mapping = {}
-                                        for h in headers_raw:
-                                            if isinstance(h, dict):
-                                                k = h.get('key')
-                                                v = h.get('value')
-                                                if k is not None: mapping[k] = v
-                                                else: mapping.update(h)
-                                        headers_raw = mapping
-                                    
-                                    headers_json_str = json.dumps(headers_raw)
-                                    headers = json.loads(FlowExecutorService.replace_vars(headers_json_str, variables_dict))
-                                    if not isinstance(headers, dict): headers = {}
-                                    headers = {str(k): str(v) for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
-
-                                    # --- 2. Params Reconstruction (Query String) ---
-                                    params_raw = step_data.get('params', {})
-                                    if isinstance(params_raw, list):
-                                        mapping = {}
-                                        for p in params_raw:
-                                            if isinstance(p, dict):
-                                                k = p.get('key')
-                                                v = p.get('value')
-                                                if k is not None: mapping[k] = v
-                                                else: mapping.update(p)
-                                        params_raw = mapping
-                                    
-                                    params_json_str = json.dumps(params_raw)
-                                    params = json.loads(FlowExecutorService.replace_vars(params_json_str, variables_dict))
-                                    if not isinstance(params, dict): params = {}
-                                    params = {str(k): str(v) for k, v in params.items() if v is not None}
-
-                                    # --- 3. Body Reconstruction ---
-                                    body_raw = step_data.get('body', '')
-                                    if isinstance(body_raw, (dict, list)):
-                                        body_json_str = json.dumps(body_raw)
-                                        body = FlowExecutorService.replace_vars(body_json_str, variables_dict)
-                                    else:
-                                        body = FlowExecutorService.replace_vars(str(body_raw), variables_dict)
-                                    
-                                    if body is None: body = ""
-
-                                    ct_key = next((k for k in headers.keys() if k.lower() == 'content-type'), None)
-                                    body_is_urlencoded = isinstance(body, str) and ('=' in body or '&' in body) and not body.strip().startswith('{')
-                                    
-                                    if ct_key and 'multipart/form-data' in str(headers[ct_key]).lower() and body_is_urlencoded:
-                                        headers[ct_key] = 'application/x-www-form-urlencoded'
-                                    
-                                    if 'auth/login' in url and body_is_urlencoded:
-                                        if not ct_key: headers['Content-Type'] = 'application/x-www-form-urlencoded'
-                                        elif 'json' in headers[ct_key]: headers[ct_key] = 'application/x-www-form-urlencoded'
-
-                                    start_time = time.time()
-                                    resp = flow_session.request(method, url, headers=headers, data=body, params=params, timeout=30)
-                                    duration = int((time.time() - start_time) * 1000)
-                                    resp_status = resp.status_code
-                                    resp_reason = resp.reason
-                                    resp_headers = dict(resp.headers)
-                                    resp_text = resp.text
-                                    
-                                    try:
-                                        resp_json = resp.json()
-                                    except ValueError:
-                                        resp_json = None
-
-                                    # --- Assertions ---
-                                    assertions_raw = step_data.get('assertions', [])
-                                    for assertion in assertions_raw:
+                                    if method == 'PYTHON':
                                         try:
-                                            # Normalize Source
-                                            src_raw = assertion.get('source') or assertion.get('type') or 'statusCode'
-                                            src = 'statusCode' if src_raw in ['status', 'statusCode'] else src_raw
-                                            
-                                            raw_operator = assertion.get('operator', 'equals')
-                                            op = str(raw_operator).lower()
-                                            
-                                            target = assertion.get('value') if assertion.get('value') is not None else assertion.get('target')
-                                            prop = assertion.get('property') or assertion.get('path')
-                                            
-                                            actual_val = None
-                                            is_success = False
-                                            
-                                            if src == 'statusCode':
-                                                actual_val = resp_status
-                                                try:
-                                                    t_int = int(str(target).strip())
-                                                    if op in ['equals', 'eq', '==', 'is']: is_success = (actual_val == t_int)
-                                                    elif op in ['notequals', 'neq', '!=']: is_success = (actual_val != t_int)
-                                                    elif op in ['gt', 'greaterthan', '>']: is_success = (actual_val > t_int)
-                                                    elif op in ['lt', 'lessthan', '<']: is_success = (actual_val < t_int)
-                                                    elif op in ['gte', '>=']: is_success = (actual_val >= t_int)
-                                                    elif op in ['lte', '<=']: is_success = (actual_val <= t_int)
-                                                except: is_success = False
-                                            elif src == 'header':
-                                                # Case insensitive header lookup
-                                                h_key = str(prop).lower() if prop else ""
-                                                actual_val = next((v for k, v in resp_headers.items() if k.lower() == h_key), None)
-                                                str_act = str(actual_val) if actual_val is not None else ""
-                                                str_tar = str(target)
-                                                if op in ['equals', 'eq', 'is']: is_success = (str_act == str_tar)
-                                                elif op in ['contains', 'in']: is_success = (str_tar in str_act)
-                                                elif op in ['exists', 'not_null']: is_success = (actual_val is not None)
-                                            elif src == 'responseTime':
-                                                actual_val = duration
-                                                try:
-                                                    t_int = int(str(target).strip())
-                                                    if op in ['lt', 'lessthan', '<']: is_success = (actual_val < t_int)
-                                                    elif op in ['lte', '<=']: is_success = (actual_val <= t_int)
-                                                    elif op in ['gt', 'greaterthan', '>']: is_success = (actual_val > t_int)
-                                                    elif op in ['equals', 'eq']: is_success = (actual_val == t_int)
-                                                except: is_success = False
-                                            elif src == 'body':
-                                                if op == 'exists':
-                                                    # Check if path exists
-                                                    if not prop: 
-                                                        is_success = (resp_json is not None)
-                                                        actual_val = "Body Received" if is_success else None
-                                                    else:
-                                                        parts = str(prop).split('.')
+                                            if not e2e_executor:
+                                                from app.services.playwright_executor_service import PlaywrightExecutorService
+                                                e2e_executor = PlaywrightExecutorService()
+                                                e2e_executor.start()
+                                            resp = e2e_executor.execute_step(step_data)
+                                            resp_status = resp['status']
+                                            resp_reason = resp['reason']
+                                            resp_text = resp['text']
+                                        except Exception as e:
+                                            logger.error(f"FATAL: Playwright Init Error: {str(e)}")
+                                            resp_status = 500
+                                            resp_reason = "E2E Driver Error"
+                                            resp_text = str(e)
+                                    else:
+                                        if url.startswith('/'):
+                                            from app.config import settings
+                                            base = settings.API_BASE_URL.rstrip('/')
+                                            path = url.lstrip('/')
+                                            url = f"{base}/{path}"
+                                        
+                                        # ✅ RE-ENABLED: Normalize URL for Docker internal networking
+                                        url = FlowExecutorService.sanitize_url_for_docker(url)
+
+                                        if FlowExecutorService.is_blocked_domain(url):
+                                            logger.warning(f"      ⛔ Skipping Blocked/Ad Domain: {url}")
+                                            return
+                                        
+                                        # --- 1. Headers Reconstruction ---
+                                        headers_raw = step_data.get('headers', {})
+                                        if isinstance(headers_raw, list):
+                                            mapping = {}
+                                            for h in headers_raw:
+                                                if isinstance(h, dict):
+                                                    k = h.get('key')
+                                                    v = h.get('value')
+                                                    if k is not None: mapping[k] = v
+                                                    else: mapping.update(h)
+                                            headers_raw = mapping
+                                        
+                                        headers_json_str = json.dumps(headers_raw)
+                                        headers = json.loads(FlowExecutorService.replace_vars(headers_json_str, variables_dict))
+                                        if not isinstance(headers, dict): headers = {}
+                                        headers = {str(k): str(v) for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
+
+                                        # --- 2. Params Reconstruction (Query String) ---
+                                        params_raw = step_data.get('params', {})
+                                        if isinstance(params_raw, list):
+                                            mapping = {}
+                                            for p in params_raw:
+                                                if isinstance(p, dict):
+                                                    k = p.get('key')
+                                                    v = p.get('value')
+                                                    if k is not None: mapping[k] = v
+                                                    else: mapping.update(p)
+                                            params_raw = mapping
+                                        
+                                        params_json_str = json.dumps(params_raw)
+                                        params = json.loads(FlowExecutorService.replace_vars(params_json_str, variables_dict))
+                                        if not isinstance(params, dict): params = {}
+                                        params = {str(k): str(v) for k, v in params.items() if v is not None}
+
+                                        # --- 3. Body Reconstruction ---
+                                        body_raw = step_data.get('body', '')
+                                        if isinstance(body_raw, (dict, list)):
+                                            body_json_str = json.dumps(body_raw)
+                                            body = FlowExecutorService.replace_vars(body_json_str, variables_dict)
+                                        else:
+                                            body = FlowExecutorService.replace_vars(str(body_raw), variables_dict)
+                                        
+                                        if body is None: body = ""
+
+                                        ct_key = next((k for k in headers.keys() if k.lower() == 'content-type'), None)
+                                        body_is_urlencoded = isinstance(body, str) and ('=' in body or '&' in body) and not body.strip().startswith('{')
+                                        
+                                        if ct_key and 'multipart/form-data' in str(headers[ct_key]).lower() and body_is_urlencoded:
+                                            headers[ct_key] = 'application/x-www-form-urlencoded'
+                                        
+                                        if 'auth/login' in url and body_is_urlencoded:
+                                            if not ct_key: headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                                            elif 'json' in headers[ct_key]: headers[ct_key] = 'application/x-www-form-urlencoded'
+
+                                        start_time = time.time()
+                                        resp = flow_session.request(method, url, headers=headers, data=body, params=params, timeout=30)
+                                        duration = int((time.time() - start_time) * 1000)
+                                        resp_status = resp.status_code
+                                        resp_reason = resp.reason
+                                        resp_headers = dict(resp.headers)
+                                        resp_text = resp.text
+                                        
+                                        try:
+                                            resp_json = resp.json()
+                                        except ValueError:
+                                            resp_json = None
+
+                                        # --- Assertions ---
+                                        assertions_raw = step_data.get('assertions', [])
+                                        for assertion in assertions_raw:
+                                            try:
+                                                # Normalize Source
+                                                src_raw = assertion.get('source') or assertion.get('type') or 'statusCode'
+                                                src = 'statusCode' if src_raw in ['status', 'statusCode'] else src_raw
+                                                
+                                                raw_operator = assertion.get('operator', 'equals')
+                                                op = str(raw_operator).lower()
+                                                
+                                                target = assertion.get('value') if assertion.get('value') is not None else assertion.get('target')
+                                                prop = assertion.get('property') or assertion.get('path')
+                                                
+                                                actual_val = None
+                                                is_success = False
+                                                
+                                                if src == 'statusCode':
+                                                    actual_val = resp_status
+                                                    try:
+                                                        t_int = int(str(target).strip())
+                                                        if op in ['equals', 'eq', '==', 'is']: is_success = (actual_val == t_int)
+                                                        elif op in ['notequals', 'neq', '!=']: is_success = (actual_val != t_int)
+                                                        elif op in ['gt', 'greaterthan', '>']: is_success = (actual_val > t_int)
+                                                        elif op in ['lt', 'lessthan', '<']: is_success = (actual_val < t_int)
+                                                        elif op in ['gte', '>=']: is_success = (actual_val >= t_int)
+                                                        elif op in ['lte', '<=']: is_success = (actual_val <= t_int)
+                                                    except: is_success = False
+                                                elif src == 'header':
+                                                    # Case insensitive header lookup
+                                                    h_key = str(prop).lower() if prop else ""
+                                                    actual_val = next((v for k, v in resp_headers.items() if k.lower() == h_key), None)
+                                                    str_act = str(actual_val) if actual_val is not None else ""
+                                                    str_tar = str(target)
+                                                    if op in ['equals', 'eq', 'is']: is_success = (str_act == str_tar)
+                                                    elif op in ['contains', 'in']: is_success = (str_tar in str_act)
+                                                    elif op in ['exists', 'not_null']: is_success = (actual_val is not None)
+                                                elif src == 'responseTime':
+                                                    actual_val = duration
+                                                    try:
+                                                        t_int = int(str(target).strip())
+                                                        if op in ['lt', 'lessthan', '<']: is_success = (actual_val < t_int)
+                                                        elif op in ['lte', '<=']: is_success = (actual_val <= t_int)
+                                                        elif op in ['gt', 'greaterthan', '>']: is_success = (actual_val > t_int)
+                                                        elif op in ['equals', 'eq']: is_success = (actual_val == t_int)
+                                                    except: is_success = False
+                                                elif src == 'body':
+                                                    if op == 'exists':
+                                                        # Check if path exists
+                                                        if not prop: 
+                                                            is_success = (resp_json is not None)
+                                                            actual_val = "Body Received" if is_success else None
+                                                        else:
+                                                            parts = str(prop).split('.')
+                                                            curr = resp_json
+                                                            for p in parts:
+                                                                if isinstance(curr, dict) and p in curr: curr = curr[p]
+                                                                elif isinstance(curr, list):
+                                                                    try: curr = curr[int(p)]
+                                                                    except: curr = None; break
+                                                                else: curr = None; break
+                                                            is_success = (curr is not None)
+                                                            actual_val = str(curr) if is_success else None
+                                                    elif resp_json:
+                                                        # Path validation
+                                                        parts = str(prop).split('.') if prop else []
                                                         curr = resp_json
                                                         for p in parts:
                                                             if isinstance(curr, dict) and p in curr: curr = curr[p]
@@ -381,168 +449,215 @@ class FlowExecutorService:
                                                                 try: curr = curr[int(p)]
                                                                 except: curr = None; break
                                                             else: curr = None; break
-                                                        is_success = (curr is not None)
-                                                        actual_val = str(curr) if is_success else None
-                                                elif resp_json:
-                                                    # Path validation
-                                                    parts = str(prop).split('.') if prop else []
-                                                    curr = resp_json
-                                                    for p in parts:
-                                                        if isinstance(curr, dict) and p in curr: curr = curr[p]
-                                                        elif isinstance(curr, list):
-                                                            try: curr = curr[int(p)]
-                                                            except: curr = None; break
-                                                        else: curr = None; break
-                                                    actual_val = curr
-                                                    str_act = str(actual_val) if actual_val is not None else ""
-                                                    str_tar = str(target)
-                                                    if op in ['equals', 'eq', 'is']: is_success = (str_act == str_tar)
-                                                    elif op in ['contains', 'in']: is_success = (str_tar in str_act)
-                                                    elif op in ['exists', 'not_null']: is_success = (actual_val is not None)
-                                            elif src == 'contract':
-                                                # Placeholder for schema validation if target is 'Valid Contract'
-                                                is_success = True if resp_status < 400 else False
-                                                actual_val = "Schema Match" if is_success else "Invalid"
-                                            
-                                            assertion_results.append({
-                                                "source": src_raw, "operator": raw_operator, "target": str(target),
-                                                "actual": str(actual_val), "success": is_success
-                                            })
-                                            if not is_success: assertions_passed = False
-                                        except Exception as ae:
-                                            logger.error(f"        ❌ Assertion Error: {ae}")
-                                            assertions_passed = False
-
-                                    # --- Extraction ---
-                                    # NOTE: In parallel mode, extractions are applied as they finish.
-                                    # Since they all use the shared `variables_dict`, subsequent steps in the FLOW
-                                    # will see them, but sibling steps in the SAME NODE might not (race condition).
-                                    extracts = step_data.get('extracts', [])
-                                    if extracts:
-                                        for rule in extracts:
-                                            try:
-                                                r_source = rule.get('source', 'body')
-                                                r_prop = rule.get('property', '')
-                                                r_var = rule.get('variable', '').strip().upper()
+                                                        actual_val = curr
+                                                        str_act = str(actual_val) if actual_val is not None else ""
+                                                        str_tar = str(target)
+                                                        if op in ['equals', 'eq', 'is']: is_success = (str_act == str_tar)
+                                                        elif op in ['contains', 'in']: is_success = (str_tar in str_act)
+                                                        elif op in ['exists', 'not_null']: is_success = (actual_val is not None)
+                                                elif src == 'contract':
+                                                    # Placeholder for schema validation if target is 'Valid Contract'
+                                                    is_success = True if resp_status < 400 else False
+                                                    actual_val = "Schema Match" if is_success else "Invalid"
                                                 
-                                                val = None
-                                                if r_source == 'header':
-                                                    h_key = r_prop.lower()
-                                                    val = next((v for k, v in resp_headers.items() if k.lower() == h_key), None)
-                                                elif r_source == 'body' and resp_json:
-                                                    parts = r_prop.split('.')
-                                                    curr = resp_json
-                                                    for p in parts:
-                                                        if isinstance(curr, dict) and p in curr: curr = curr[p]
-                                                        elif isinstance(curr, list):
-                                                            try: curr = curr[int(p)]
-                                                            except: curr = None; break
-                                                        else: curr = None; break
-                                                    val = curr
-                                                
-                                                if val is not None and r_var:
-                                                    val_str = str(val)
-                                                    with execution_lock:
-                                                        variables_dict[r_var] = val_str
-                                                        # Persist to DB for visibility in the environment panel
-                                                        new_var = VariableCreate(name=r_var, value=val_str, project_id=product_id, environment_id=env_id, type="extracted")
-                                                        VariableService.create(db, new_var)
-                                                        logger.info(f"      ✅ Extracted [{r_var}] = '{val_str}'")
-                                            except Exception as ee:
-                                                logger.error(f"        ❌ Extraction Error: {ee}")
-                        except Exception as req_ex:
-                            logger.error(f"Request failed: {req_ex}")
-                            resp_status = 500
-                            final_error_message = str(req_ex)
+                                                assertion_results.append({
+                                                    "source": src_raw, "operator": raw_operator, "target": str(target),
+                                                    "actual": str(actual_val), "success": is_success
+                                                })
+                                                if not is_success: assertions_passed = False
+                                            except Exception as ae:
+                                                logger.error(f"        ❌ Assertion Error: {ae}")
+                                                assertions_passed = False
 
-                        if not final_error_message:
-                            if step_data.get('assertions') and not assertions_passed:
-                                final_error_message = "Assertions Failed"
-                            elif resp_status >= 400:
-                                final_error_message = f"HTTP Error {resp_status}"
+                                        # --- Extraction ---
+                                        # NOTE: In parallel mode, extractions are applied as they finish.
+                                        # Since they all use the shared `variables_dict`, subsequent steps in the FLOW
+                                        # will see them, but sibling steps in the SAME NODE might not (race condition).
+                                        extracts = step_data.get('extracts', [])
+                                        if extracts:
+                                            for rule in extracts:
+                                                try:
+                                                    r_source = rule.get('source', 'body')
+                                                    r_prop = rule.get('property', '')
+                                                    r_var = rule.get('variable', '').strip().upper()
+                                                    
+                                                    val = None
+                                                    if r_source == 'header':
+                                                        h_key = r_prop.lower()
+                                                        val = next((v for k, v in resp_headers.items() if k.lower() == h_key), None)
+                                                    elif r_source == 'body' and resp_json:
+                                                        parts = r_prop.split('.')
+                                                        curr = resp_json
+                                                        for p in parts:
+                                                            if isinstance(curr, dict) and p in curr: curr = curr[p]
+                                                            elif isinstance(curr, list):
+                                                                try: curr = curr[int(p)]
+                                                                except: curr = None; break
+                                                            else: curr = None; break
+                                                        val = curr
+                                                    
+                                                    if val is not None and r_var:
+                                                        val_str = str(val)
+                                                        with execution_lock:
+                                                            variables_dict[r_var] = val_str
+                                                            # Persist to DB for visibility in the environment panel
+                                                            new_var = VariableCreate(name=r_var, value=val_str, project_id=product_id, environment_id=env_id, type="extracted")
+                                                            VariableService.create(db, new_var)
+                                                            logger.info(f"      ✅ Extracted [{r_var}] = '{val_str}'")
+                                                except Exception as ee:
+                                                    logger.error(f"        ❌ Extraction Error: {ee}")
+                            except Exception as req_ex:
+                                logger.error(f"Request failed: {req_ex}")
+                                resp_status = 500
+                                final_error_message = str(req_ex)
 
-                        with execution_lock:
-                            if final_error_message: flow_fail_count += 1
-                            else: flow_success_count += 1
+                            if not final_error_message:
+                                if step_data.get('assertions') and not assertions_passed:
+                                    final_error_message = "Assertions Failed"
+                                elif resp_status >= 400:
+                                    final_error_message = f"HTTP Error {resp_status}"
+                                elif resp_status == 0:
+                                    final_error_message = "Step Timeout/Incomplete"
 
-                        hist = ExecutionHistoryCreate(
-                            batch_id=batch_id,
-                            api_id=int(step_data.get('id')) if str(step_data.get('id')).isdigit() else None,
-                            api_name=step_data.get('name') or "Step",
-                            project_id=product_id,
-                            flow_id=flow_meta['id'],
-                            node_id=current_id,
-                            schedule_id=schedule_id,
-                            feature_name=feature_name,
-                            node_name=card.get('name'),
-                            method=method,
-                            url=url,
-                            status_code=resp_status,
-                            response_body=resp_text,
-                            response_time=duration,
-                            environment_id=env_id,
-                            error_message=final_error_message,
-                            assertions=assertion_results
-                        )
-                        history_buffer.append(hist)
+                            with execution_lock:
+                                if final_error_message: 
+                                    # ONLY abort path if:
+                                    # 1. It's an API flow
+                                    # 2. Or an assertion explicitly failed
+                                    # 3. Or it's an E2E driver error
+                                    is_e2e_flow = flow_data.get('flow_type') == 'e2e' or flow_meta.get('flow_type') == 'e2e'
+                                    if not is_e2e_flow or "Assertions" in final_error_message or step_type == 'e2e' or "Driver" in final_error_message:
+                                        path_success = False
+                                        flow_fail_count += 1
+                                    else:
+                                        logger.warning(f"        ⚠️ Warning: API Step failed in E2E flow, but continuing path. Error: {final_error_message}")
+                                        # Count as success visually for the suite metrics since it's just a background trace
+                                        flow_success_count += 1
+                                else: 
+                                    flow_success_count += 1
 
-                    # --- Execution Loop ---
-                    try:
-                        # --- HIBRID EXECUTION: Group contiguous parallel blocks ---
-                        i = 0
-                        while i < len(all_steps):
-                            step_entry = all_steps[i]
-                            is_parallel_step = step_entry['data'].get('parallel', False)
+                            hist = ExecutionHistoryCreate(
+                                batch_id=batch_id,
+                                api_id=int(step_data.get('id')) if str(step_data.get('id')).isdigit() else None,
+                                api_name=step_data.get('name') or "Step",
+                                project_id=product_id,
+                                flow_id=flow_meta['id'],
+                                node_id=current_id,
+                                schedule_id=schedule_id,
+                                feature_name=feature_name,
+                                node_name=card.get('name'),
+                                method=method,
+                                url=url,
+                                status_code=resp_status,
+                                response_body=resp_text,
+                                response_time=duration,
+                                environment_id=env_id,
+                                error_message=final_error_message,
+                                assertions=assertion_results
+                            )
                             
-                            if is_parallel_step:
-                                # Gather contiguous parallel steps
-                                parallel_batch = []
-                                while i < len(all_steps) and all_steps[i]['data'].get('parallel', False):
-                                    parallel_batch.append(all_steps[i])
-                                    i += 1
+                            # Fetch any background HTTP requests intercepted by the browser during this step
+                            # We append them FIRST so they appear in history *before* the step resolves
+                            if step_type == 'e2e' and e2e_executor:
+                                intercepted = e2e_executor.pop_captured_requests()
+                                for req in intercepted:
+                                    bg_hist = ExecutionHistoryCreate(
+                                        batch_id=batch_id,
+                                        api_id=None,
+                                        api_name=f"{req['method']} {(req['url'][:40] + '...') if len(req['url']) > 40 else req['url']}",
+                                        project_id=product_id,
+                                        flow_id=flow_meta['id'],
+                                        node_id=current_id,
+                                        schedule_id=schedule_id,
+                                        feature_name=feature_name,
+                                        node_name=card.get('name'),
+                                        method=req['method'],
+                                        url=req['url'],
+                                        status_code=req['status'],
+                                        response_body="", 
+                                        response_time=req['duration_ms'],
+                                        environment_id=env_id,
+                                        error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
+                                        assertions=None
+                                    )
+                                    history_buffer.append(bg_hist)
+                                    
+                                    # Visually count intercepted requests for suite metrics (optional, avoids '0 steps' visual bug)
+                                    with execution_lock:
+                                        if req['status'] >= 400:
+                                            flow_fail_count += 1
+                                            if not is_e2e_flow:
+                                                path_success = False
+                                        else:
+                                            flow_success_count += 1
+                                            
+                            history_buffer.append(hist)
+
+                        # --- Execution Loop ---
+                        try:
+                            # --- HIBRID EXECUTION: Group contiguous parallel blocks ---
+                            i = 0
+                            while i < len(all_steps):
+                                if not path_success: break
                                 
-                                logger.info(f"      ⚡ PARALLEL BATCH: Running {len(parallel_batch)} steps for Node {current_id}")
-                                import concurrent.futures
-                                with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_batch)) as node_executor:
-                                    list(node_executor.map(execute_step_internal, parallel_batch))
-                            else:
-                                # Sequential Step
-                                logger.info(f"      ▶️ SEQUENTIAL STEP: Running 1 step for Node {current_id}")
-                                execute_step_internal(step_entry)
-                                i += 1
-                    except Exception as loop_ex:
-                        logger.error(f"Critical error in execution loop: {loop_ex}")
+                                step_entry = all_steps[i]
+                                is_parallel_step = step_entry['data'].get('parallel', False)
+                                
+                                if is_parallel_step:
+                                    # Gather contiguous parallel steps
+                                    parallel_batch = []
+                                    while i < len(all_steps) and all_steps[i]['data'].get('parallel', False):
+                                        parallel_batch.append(all_steps[i])
+                                        i += 1
+                                    
+                                    logger.info(f"      ⚡ PARALLEL BATCH: Running {len(parallel_batch)} steps for Node {current_id}")
+                                    import concurrent.futures
+                                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_batch)) as node_executor:
+                                        list(node_executor.map(execute_step_internal, parallel_batch))
+                                    
+                                    # Save history after batch
+                                    if history_buffer:
+                                        HistoryService.save_batch(db, history_buffer, user_id)
+                                        history_buffer.clear()
+                                else:
+                                    # Sequential Step
+                                    logger.info(f"      ▶️ SEQUENTIAL STEP: Running 1 step for Node {current_id}")
+                                    execute_step_internal(step_entry)
+                                    i += 1
+                                    
+                                    # Save history after each step for real-time monitor
+                                    if history_buffer:
+                                        HistoryService.save_batch(db, history_buffer, user_id)
+                                        history_buffer.clear()
+                                        
+                                    if not path_success: break
+                        except Exception as loop_ex:
+                            logger.error(f"Critical error in execution loop: {loop_ex}")
 
-                # Neighbors
 
-                # Neighbors
-                neighbors = adj.get(current_id, [])
-                if neighbors:
-                    logger.info(f"      🔗 Processing {len(neighbors)} neighbors of {current_id}")
-                for tgt in neighbors:
-                    in_degree[tgt] -= 1
-                    logger.debug(f"         Neighbor {tgt} - New In-Degree: {in_degree[tgt]}")
-                    if in_degree[tgt] == 0:
-                        logger.info(f"      ✨ Node {tgt} is now ready (In-Degree 0). Adding to queue.")
-                        queue.append(tgt)
-                        queue.sort(key=get_x_pos)
+                # Finalize Video Recording PER PATH
+                if e2e_executor:
+                    try:
+                        logger.info(f"⏳ Waiting 5s for video to capture final state (Scenario {path_index+1})...")
+                        time.sleep(5)
+                        e2e_executor.stop()
+                        
+                        if os.path.exists(video_dir):
+                            import glob
+                            videos_files = glob.glob(os.path.join(video_dir, '*.[wm][pe][b4]*'))
+                            if videos_files:
+                                latest_file = max(videos_files, key=os.path.getctime)
+                                video_name = os.path.basename(latest_file)
+                                video_url = f"/videos/{batch_id}/{video_name}"
+                                logger.info(f"✅ Video Path {path_index+1} recorded successfully: {video_url}")
+                                HistoryService.update_video_url_by_batch(db, batch_id, video_url)
+                    except Exception as ve:
+                        logger.warning(f"Video finalize failed for path: {ve}")
 
-            # Finalize Video Recording
-            if e2e_executor:
-                logger.info("⏳ Waiting 2s for video to capture final state...")
-                time.sleep(2)  # Give it a moment to capture the last validation visual result
-                e2e_executor.stop()
-                # Find the recording in the video_dir (Playwright auto-names it)
-                videos = [f for f in os.listdir(video_dir) if f.endswith('.webm')]
-                if videos:
-                    video_url = f"/videos/{batch_id}/{videos[0]}"
-                    for hist in history_buffer:
-                        # Optional: only map video to E2E steps or all steps in this batch?
-                        # User wants to see "executing", so all steps in this batch point to this video.
-                        hist.video_url = video_url
-
+            # Any remaining history (usually none as it is saved in loop)
             if history_buffer:
                 HistoryService.save_batch(db, history_buffer, user_id)
+                history_buffer.clear()
 
             return flow_success_count, flow_fail_count
 

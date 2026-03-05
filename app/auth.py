@@ -84,7 +84,7 @@ def get_current_user(
         
         if service_token:
             # Update last used
-            service_token.last_used_at = datetime.utcnow()
+            service_token.last_used_at = datetime.now(timezone.utc)
             db.commit()
             
             user = db.query(UserDB).filter(UserDB.id == service_token.user_id).first()

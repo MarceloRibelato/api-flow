@@ -2,10 +2,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import logging
 
 from app.models.schedule_models import ScheduleModel
+from app.models.api_test_history_models import ApiExecutionHistory
 from app.database import SessionLocal
 # Import services to execute logic - avoiding circular imports might be tricky
 # ideally we move execution logic to a common place or import inside function
@@ -33,17 +34,17 @@ def execute_job(schedule_id: int):
             logger.error(f"Schedule {schedule_id} not found during execution")
             return
 
-        schedule.last_run = datetime.utcnow()
+        schedule.last_run = datetime.now(timezone.utc)
         
         job = scheduler.get_job(str(schedule_id))
         if job:
-             schedule.next_run = job.next_run_time
+             schedule.next_run = getattr(job, 'next_run_time', None)
         else:
              # Job is gone from scheduler (one-time job finished)
              schedule.next_run = None
              if not schedule.cron_expression:
-                 schedule.status = 'completed'
-                 logger.info(f"Marking one-time schedule {schedule_id} as completed")
+                 schedule.status = 'running'
+                 logger.info(f"Marking one-time schedule {schedule_id} as running")
         
         db.commit()
 
@@ -117,6 +118,11 @@ def execute_job(schedule_id: int):
             schedule.last_run_status = 'failure' if fail_count > 0 else 'success'
             db.commit()
 
+        # Mark one-time schedule as actually completed
+        if not schedule.cron_expression:
+            schedule.status = 'completed'
+            db.commit()
+
         # --- 4. Send Webhook Notification ---
         # Logic: Use Schedule URL > Fallback to Product URL
         
@@ -168,13 +174,19 @@ def execute_job(schedule_id: int):
                     urls = [u.strip() for u in target_urls.split(',') if u.strip()]
                     logger.info(f"Parsed URLs: {urls}")
                     
+                    # Use UTC-3 for execution time in notifications
+                    from datetime import timedelta
+                    tz_adjust = timedelta(hours=3)
+                    exec_time_dt = schedule.last_run if schedule.last_run else datetime.now(timezone.utc)
+                    br_time = (exec_time_dt - tz_adjust).strftime("%d/%m/%Y, %H:%M:%S")
+
                     payload = {
                         "schedule_id": schedule.id,
                         "schedule_name": schedule.name,
                         "type": schedule.type,
                         "target_id": schedule.target_id,
                         "status": schedule.last_run_status,
-                        "execution_time": schedule.last_run.isoformat() if schedule.last_run else datetime.utcnow().isoformat(),
+                        "execution_time": br_time,
                         "success_count": success_count,
                         "fail_count": fail_count
                     }
@@ -304,7 +316,7 @@ class SchedulerService:
             # Update next_run immediately
             job = scheduler.get_job(job_id)
             if job:
-                schedule.next_run = job.next_run_time
+                schedule.next_run = getattr(job, "next_run_time", None)
                 db.commit()
 
     def remove_job(self, schedule_id: int):
@@ -338,6 +350,25 @@ def purge_history_job():
         logger.info(f"💾 Starting history archiving (Threshold: {retain_days} days)")
         archived_count = HistoryService.archive_old_records(db, retain_days)
         logger.info(f"✅ Archived {archived_count} records.")
+        
+        # 🔗 Cleanup Files associated with Archived Batches
+        if archived_count > 0:
+            import os
+            import shutil
+            BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            VIDEO_ROOT = os.path.join(BASE_DIR, "data", "videos")
+            
+            # Use same threshold as Tier 1 Archive
+            threshold = datetime.now(timezone.utc) - timedelta(days=retain_days)
+            
+            # Find unique batch IDs that were archived
+            archived_batches = db.query(ApiExecutionHistory.batch_id).filter(ApiExecutionHistory.created_at < threshold).distinct().all()
+            for (batch_id,) in archived_batches:
+                if batch_id:
+                    batch_path = os.path.join(VIDEO_ROOT, batch_id)
+                    if os.path.exists(batch_path):
+                        logger.info(f"🧹 Deleting archived recording: {batch_path}")
+                        shutil.rmtree(batch_path, ignore_errors=True)
         
         # Tier 2: Purge
         archive_retain_days = settings.HISTORY_ARCHIVE_RETENTION_DAYS

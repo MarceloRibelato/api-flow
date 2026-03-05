@@ -1,7 +1,11 @@
 def get_headers(client, username="envuser"):
-    client.post("/auth/create", json={"username": username, "password": "password"})
+    client.post("/auth/create", json={
+        "username": username,
+        "password": "Password123!",
+        "accepted_terms": True
+    })
     token = client.post(
-        "/auth/login", data={"username": username, "password": "password"}
+        "/auth/login", json={"username": username, "password": "Password123!"}
     ).json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
 
@@ -9,11 +13,11 @@ def get_headers(client, username="envuser"):
 def test_create_environment(client):
     headers = get_headers(client, "createenvuser")
     proj = client.post(
-        "/projects/", headers=headers, json={"name": "Env Project"}
+        "/products/", headers=headers, json={"name": "Env Project"}
     ).json()
 
     response = client.post(
-        "/environments", json={"name": "Dev", "project_id": proj["id"]}
+        "/environments", headers=headers, json={"name": "Dev", "project_id": proj["id"]}
     )
     assert response.status_code == 200
     data = response.json()
@@ -23,36 +27,37 @@ def test_create_environment(client):
 def test_delete_environment(client):
     headers = get_headers(client, "delenvuser")
     proj = client.post(
-        "/projects/", headers=headers, json={"name": "Del Env Project"}
+        "/products/", headers=headers, json={"name": "Del Env Project"}
     ).json()
 
     env = client.post(
-        "/environments", json={"name": "To Delete", "project_id": proj["id"]}
+        "/environments", headers=headers, json={"name": "To Delete", "project_id": proj["id"]}
     ).json()
 
-    response = client.delete(f"/environments/{env['id']}")
+    response = client.delete(f"/environments/{env['id']}", headers=headers)
     assert response.status_code == 200
 
     # Try creating var in deleted env (should fail or just not working logically, usually we check get)
     # Since we don't have get_by_id for env exposed in routes easily (only get_all), we check get_all list
-    list_resp = client.get(f"/environments?project_id={proj['id']}")
+    list_resp = client.get(f"/environments?project_id={proj['id']}", headers=headers)
     assert len(list_resp.json()) == 0
 
 
 def test_environment_cloning(client):
     headers = get_headers(client, "cloneuser")
     proj = client.post(
-        "/projects/", headers=headers, json={"name": "Clone Project"}
+        "/products/", headers=headers, json={"name": "Clone Project"}
     ).json()
 
     # Create Source Env
     source_env = client.post(
-        "/environments", json={"name": "Source", "project_id": proj["id"]}
+        "/environments", headers=headers, json={"name": "Source", "project_id": proj["id"]}
     ).json()
 
     # Add variable to source
     client.post(
         "/variables",
+        headers=headers,
         json={
             "name": "VAR1",
             "value": "val1",
@@ -64,6 +69,7 @@ def test_environment_cloning(client):
     # Clone Env
     clone_resp = client.post(
         "/environments",
+        headers=headers,
         json={
             "name": "Cloned",
             "project_id": proj["id"],
@@ -75,7 +81,8 @@ def test_environment_cloning(client):
 
     # Verify variables cloned
     vars_resp = client.get(
-        f"/variables?project_id={proj['id']}&environment_id={cloned_env['id']}"
+        f"/variables?project_id={proj['id']}&environment_id={cloned_env['id']}",
+        headers=headers
     )
     vars_list = vars_resp.json()
     assert len(vars_list) == 1

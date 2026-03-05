@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 class FrontRecordingBase(BaseModel):
     name: str
@@ -16,8 +16,7 @@ class FrontRecordingResponse(FrontRecordingBase):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class FrontRecordingInbound(BaseModel):
     # This matches the structure sent by the standalone recorder

@@ -8,7 +8,13 @@ from app.schemas.variable_schemas import VariableCreate
 def test_variable_extraction_and_usage_cycle(db_session: Session):
     # 1. Setup Project
     from app.models.feature_models import FeatureModel
-    proj = FeatureModel(name="Test Variable Flow", product_id=1, company_id=1)
+    from app.models.product_models import ProductModel
+    
+    product = ProductModel(name="Test Variable Product", company_id=1)
+    db_session.add(product)
+    db_session.flush()
+    
+    proj = FeatureModel(name="Test Variable Flow", product_id=product.id)
     db_session.add(proj)
     db_session.commit()
     db_session.refresh(proj)

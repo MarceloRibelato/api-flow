@@ -1,0 +1,52 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.14.0, pytest-9.0.2, pluggy-1.6.0 -- C:\Python314\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Projetos\Flow\api-flow
+configfile: pytest.ini
+plugins: anyio-4.12.0, asyncio-1.3.0, cov-7.0.0, env-1.2.0, mock-3.15.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 3 items
+
+tests/test_flow.py::test_save_load_flow PASSED                           [ 33%]
+tests/test_flow.py::test_flow_stats PASSED                               [ 66%]
+tests/test_flow.py::test_delete_flow PASSED                              [100%]
+
+============================== warnings summary ===============================
+app\routes\api_test_history_routes.py:54
+  C:\Projetos\Flow\api-flow\app\routes\api_test_history_routes.py:54: DeprecationWarning: `regex` has been deprecated, please use `pattern` instead
+    sort_by: Optional[str] = Query('created_at', regex="^(created_at|id|response_time)$"),
+
+app\routes\api_test_history_routes.py:55
+  C:\Projetos\Flow\api-flow\app\routes\api_test_history_routes.py:55: DeprecationWarning: `regex` has been deprecated, please use `pattern` instead
+    order: Optional[str] = Query('desc', regex="^(asc|desc)$"),
+
+app\schemas\flow_schemas.py:113
+  C:\Projetos\Flow\api-flow\app\schemas\flow_schemas.py:113: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class FlowResponse(BaseModel):
+
+app\schemas\product_schemas.py:15
+  C:\Projetos\Flow\api-flow\app\schemas\product_schemas.py:15: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class ProductResponse(ProductBase):
+
+app\routes\schedule_routes.py:26
+  C:\Projetos\Flow\api-flow\app\routes\schedule_routes.py:26: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class ScheduleOut(BaseModel):
+
+tests/test_flow.py::test_save_load_flow
+tests/test_flow.py::test_flow_stats
+tests/test_flow.py::test_delete_flow
+  C:\Projetos\Flow\api-flow\app\services\auth_service.py:94: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    terms_accepted_at = datetime.utcnow()
+
+tests/test_flow.py: 12 warnings
+  C:\Users\gamer\AppData\Roaming\Python\Python314\site-packages\sqlalchemy\sql\schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+tests/test_flow.py::test_save_load_flow
+tests/test_flow.py::test_flow_stats
+tests/test_flow.py::test_delete_flow
+  C:\Projetos\Flow\api-flow\app\services\flow_service.py:188: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    flow.updated_at = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 3 passed, 23 warnings in 1.00s ========================

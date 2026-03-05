@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -14,8 +14,8 @@ class FlowDB(Base):
     # New Columns for Multi-Flow Support
     name = Column(String(255), default="Fluxo Principal") # Default for migration
     flow_type = Column(String(50), default="api") # Distinguish between 'api' and 'frontend' flows
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # Deprecated JSON columns (kept for migration safety, ignore in new logic)
     nodes = Column(JSON, nullable=True)

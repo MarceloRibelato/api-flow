@@ -15,8 +15,9 @@ class FrontRecordingDB(Base):
     requests = Column(JSON, default=list)
     interactions = Column(JSON, default=list)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    from sqlalchemy.sql import func
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # Relationship
     feature = relationship("FeatureModel")

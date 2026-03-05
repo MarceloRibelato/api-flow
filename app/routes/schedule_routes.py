@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 
 from app.database import get_db
@@ -40,8 +40,7 @@ class ScheduleOut(BaseModel):
     next_run: Optional[datetime]
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # --- Routes ---
 
@@ -92,6 +91,17 @@ def list_schedules(type: Optional[str] = None, target_id: Optional[int] = None, 
             schedule.environment_name = schedule.environment.name
             
     return results
+
+@router.get("/{schedule_id}", response_model=ScheduleOut)
+def get_schedule(schedule_id: int, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+    schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id, ScheduleModel.company_id == current_user.company_id).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    
+    # Manually map environment_name
+    if schedule.environment:
+        schedule.environment_name = schedule.environment.name
+    return schedule
 
 @router.delete("/{schedule_id}")
 def delete_schedule(schedule_id: int, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):

@@ -15,7 +15,7 @@ class UserDB(Base):
     cpf = Column(String, unique=True, index=True, nullable=True)
     
     # Legacy fields (optional to keep)
-    old_company_name = Column(String, nullable=True, name="company") # Rename logic or just keep old column
+    company = Column(String, nullable=True) # Legacy field
     cnpj = Column(String, index=True, nullable=True)
     phone = Column(String, nullable=True)
 

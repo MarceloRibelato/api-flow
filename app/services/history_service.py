@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import Optional
 
 from sqlalchemy import distinct
@@ -56,6 +56,13 @@ class HistoryService:
             db.commit()
             db.refresh(db_history)
         return db_history
+
+    @staticmethod
+    def update_video_url_by_batch(db: Session, batch_id: str, video_url: str):
+        if not batch_id or not video_url:
+            return
+        db.query(ApiExecutionHistory).filter(ApiExecutionHistory.batch_id == batch_id, ApiExecutionHistory.video_url == None).update({"video_url": video_url})
+        db.commit()
 
     @staticmethod
     def save_batch(db: Session, histories: list[ExecutionHistoryCreate], user_id: int):
@@ -124,7 +131,7 @@ class HistoryService:
     @staticmethod
     def get_all(
         db: Session,
-        company_id: int,  # Altered: user_id -> company_id
+        company_id: int,  
         page: int = 1,
         limit: int = 20,
         api_id: Optional[int] = None,
@@ -140,23 +147,39 @@ class HistoryService:
         sort_by: str = 'created_at',
         order: str = 'desc'
     ):
-        # Join with UserDB to filter by company. Use outerjoin to avoid losing records if user_id is missing
-        # though user_id should be mandatory for permission tracking
-        query = db.query(ApiExecutionHistory).outerjoin(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
-            UserDB.company_id == company_id
-        )
+        # SECURITY: Ensure the user only sees data from their company.
+        # We can check company_id via Schedule, Product, or User.
+        from app.models.schedule_models import ScheduleModel
+        from app.models.product_models import ProductModel
+        from app.models.user_models import UserDB
+        from app.models.api_test_history_models import ApiExecutionHistory
+
+        query = db.query(ApiExecutionHistory)
+
+        # 1. If filtering by Schedule, join Schedule and check company there (Robust for background tasks)
+        if schedule_id is not None:
+             query = query.join(ScheduleModel, ApiExecutionHistory.schedule_id == ScheduleModel.id).filter(
+                  ScheduleModel.id == schedule_id,
+                  ScheduleModel.company_id == company_id
+             )
+        # 2. If filtering by Project (ProductId), join Product and check company
+        elif project_id is not None:
+             query = query.join(ProductModel, ApiExecutionHistory.project_id == ProductModel.id).filter(
+                  ProductModel.id == project_id,
+                  ProductModel.company_id == company_id
+             )
+        # 3. Fallback: Join with User (Legacy / Single Run / Global Search)
+        else:
+             query = query.join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
+                  UserDB.company_id == company_id
+             )
 
         if api_id is not None:
             query = query.filter(ApiExecutionHistory.api_id == api_id)
-        if project_id is not None:
-            query = query.filter(ApiExecutionHistory.project_id == project_id)
         if flow_id is not None:
             query = query.filter(ApiExecutionHistory.flow_id == flow_id)
         if environment_id is not None:
             query = query.filter(ApiExecutionHistory.environment_id == environment_id)
-        if schedule_id is not None:
-            # logger.info(f"🔍 Filtering History by Schedule ID: {schedule_id}")
-            query = query.filter(ApiExecutionHistory.schedule_id == schedule_id)
         if node_id:
             query = query.filter(ApiExecutionHistory.node_id == node_id)
 
@@ -210,7 +233,8 @@ class HistoryService:
                 ApiExecutionHistory.assertions,
                 ApiExecutionHistory.node_id,
                 ApiExecutionHistory.batch_id,
-                ApiExecutionHistory.video_url, # Added
+                ApiExecutionHistory.video_url,
+                ApiExecutionHistory.response_body,  # Required for E2E live screenshot extraction
             )
         )
 

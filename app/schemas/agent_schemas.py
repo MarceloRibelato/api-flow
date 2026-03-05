@@ -8,9 +8,12 @@ class AgentSettingsBase(BaseModel):
     ai_api_key: Optional[str] = None
     ai_base_url: Optional[str] = None
 
-class AgentSettingsUpdate(AgentSettingsBase):
-    pass
-
+class AgentSettingsUpdate(BaseModel):
+    ai_enabled: Optional[bool] = None
+    ai_provider: Optional[str] = None
+    ai_model: Optional[str] = None
+    ai_api_key: Optional[str] = None
+    ai_base_url: Optional[str] = None
 class AgentSettingsResponse(AgentSettingsBase):
     id: int
     user_id: int

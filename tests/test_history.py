@@ -1,7 +1,11 @@
 def get_headers(client, username="histuser"):
-    client.post("/auth/create", json={"username": username, "password": "password"})
+    client.post("/auth/create", json={
+        "username": username,
+        "password": "Password123!",
+        "accepted_terms": True
+    })
     token = client.post(
-        "/auth/login", data={"username": username, "password": "password"}
+        "/auth/login", json={"username": username, "password": "Password123!"}
     ).json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
 

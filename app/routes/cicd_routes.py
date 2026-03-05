@@ -141,6 +141,7 @@ def execute_cicd(
         target_type = 'feature'
 
     # 4. Criar Agendamento (Execução Pontual)
+    from datetime import timezone
     exec_name = req.execution_name or f"CI/CD: {req.product_name} - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     
     new_schedule = ScheduleModel(
@@ -149,7 +150,7 @@ def execute_cicd(
         target_id=target_id,
         environment_id=env.id,
         cron_expression=None,
-        run_at=datetime.utcnow(),
+        run_at=datetime.now(timezone.utc),
         status='active',
         company_id=current_user.company_id,
         user_id=current_user.id

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Union
 
 from app.database import get_db
@@ -71,10 +71,16 @@ def trigger_execution(
     db.commit()
     db.refresh(new_schedule)
 
-    # 3. Trigger Async Execution (Bypass APScheduler for immediate run)
-    # background_tasks.add_task(execute_job, new_schedule.id)
-    # DEBUG: Run synchronously to catch errors
-    execute_job(new_schedule.id)
+    from app.services.scheduler_service import scheduler_service
+
+    # 3. Trigger Async Execution (Detached from request lifecycle)
+    # Using APScheduler directly for "run now" to avoid BackgroundTasks blocking the response in some environments
+    scheduler_service.scheduler.add_job(
+        execute_job,
+        args=[new_schedule.id],
+        id=f"immediate_{new_schedule.id}",
+        misfire_grace_time=3600
+    )
 
     return {
         "message": "Execution started",
@@ -100,4 +106,24 @@ def get_execution_pdf(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=report_{schedule_id}.pdf"}
+    )
+
+@router.get("/{schedule_id}/e2e-pdf")
+def get_e2e_execution_pdf(
+    schedule_id: int, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Generates and returns an E2E-specific PDF report for the given execution (schedule).
+    """
+    pdf_bytes = PDFService.generate_e2e_report(db, schedule_id)
+    
+    if not pdf_bytes:
+        raise HTTPException(status_code=404, detail="E2E Execution not found or no data")
+        
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=e2e_report_{schedule_id}.pdf"}
     )

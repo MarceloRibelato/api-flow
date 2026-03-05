@@ -50,13 +50,40 @@ class FeatureService:
 
     @staticmethod
     def delete(db: Session, feature_id: int, company_id: int):
-        db_feature = db.query(FeatureModel).join(ProductModel).filter(FeatureModel.id == feature_id, ProductModel.company_id == company_id).first()
-        if not db_feature:
-            return False
+        try:
+            # First, check if feature exists at all ignoring company
+            feature = db.query(FeatureModel).filter(FeatureModel.id == feature_id).first()
+            if not feature:
+                print(f"DEBUG DELETE: Feature {feature_id} not found at all")
+                return False
+            
+            # Check ownership
+            db_feature = db.query(FeatureModel).join(ProductModel).filter(
+                FeatureModel.id == feature_id, 
+                ProductModel.company_id == company_id
+            ).first()
+            
+            if not db_feature:
+                # Find which company it belongs to for debug
+                product = db.query(ProductModel).filter(ProductModel.id == feature.product_id).first()
+                p_cid = product.company_id if product else "None"
+                print(f"DEBUG DELETE: Feature {feature_id} exists but ownership check failed. User CID: {company_id}, Product CID: {p_cid}")
+                return False
 
-        db.delete(db_feature)
-        db.commit()
-        return True
+            # 1. Clean up associated front recordings (Avoid FK violation)
+            from app.models.front_recording_models import FrontRecordingDB
+            db.query(FrontRecordingDB).filter(FrontRecordingDB.feature_id == feature_id).delete()
+            
+            # 2. Finally delete the feature
+            db.delete(db_feature)
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"ERROR DELETING FEATURE {feature_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     @staticmethod
     def reorder(db: Session, data: ReorderSchema, company_id: int):

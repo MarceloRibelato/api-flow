@@ -1,12 +1,14 @@
 from app.schemas.history_schemas import ExecutionHistoryCreate, AssertionResult
 from app.services.history_service import HistoryService
-# Assuming db_session fixture or similar is available if running as pytest
-# For standalone script we might need manual setup, but let's try to stick to existing pytest infrastructure first.
-# If this fails I will create a standalone script.
 
-def test_save_execution_with_assertions(client, db):
-    # Setup
-    user_id = 999 
+def test_save_execution_with_assertions(client, db_session):
+    # Register a user to get a valid ID
+    resp = client.post("/auth/create", json={
+        "username": "assertuser",
+        "password": "Password123!",
+        "accepted_terms": True
+    })
+    user_id = resp.json()["id"]
     
     # Assertions
     assertions = [
@@ -44,7 +46,7 @@ def test_save_execution_with_assertions(client, db):
 
     # Act
     try:
-        saved = HistoryService.save(db, history_data, user_id)
+        saved = HistoryService.save(db_session, history_data, user_id)
         print("Save successful")
     except Exception as e:
         print(f"ERROR SAVING HISTORY: {e}")

@@ -3,9 +3,13 @@ import datetime
 from app.models.api_test_history_models import ApiExecutionHistory
 
 def get_headers(client, username="advhistuser"):
-    client.post("/auth/create", json={"username": username, "password": "password"})
+    client.post("/auth/create", json={
+        "username": username,
+        "password": "Password123!",
+        "accepted_terms": True
+    })
     token = client.post(
-        "/auth/login", data={"username": username, "password": "password"}
+        "/auth/login", json={"username": username, "password": "Password123!"}
     ).json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
 
@@ -43,7 +47,7 @@ def test_complex_filtering(client):
     headers = get_headers(client, "filteruser")
 
     # Setup Context
-    proj = client.post("/projects/", headers=headers, json={"name": "Filter Project"}).json()
+    proj = client.post("/products/", headers=headers, json={"name": "Filter Project"}).json()
     env = client.post("/environments/", headers=headers, json={"name": "Prod", "project_id": proj["id"]}).json()
 
     # Create History Items with different timestamps and contexts

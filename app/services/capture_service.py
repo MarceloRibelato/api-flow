@@ -1,19 +1,20 @@
 import json
 from datetime import datetime
+from sqlalchemy.orm import Session # Added import for Session
 from app.models.flow_models import FlowDB, FlowNodeDB, FlowCardDataDB, FlowEdgeDB
 from app.database import SessionLocal
 
 class CaptureService:
     @staticmethod
-    def ingest_captured_requests(requests_data, project_id=None):
+    def ingest_captured_requests(db: Session, requests: list, project_id: int = None): # Modified signature
         """
         Receives a list of raw requests from the Chrome Extension 
         and converts them into a new Flow, grouping API calls by Page URL (Node).
         """
-        if not requests_data:
+        if not requests: # Changed requests_data to requests
             return {"error": "No data received"}
 
-        db = SessionLocal()
+        # db = SessionLocal() # Removed
         try:
             # Auto-assign to first project if none provided (Visibility Fallback)
             if not project_id:
@@ -58,7 +59,7 @@ class CaptureService:
 
             last_request_signature = None # To track sequential duplicates
 
-            for req in requests_data:
+            for req in requests: # Changed requests_data to requests
                 # FILTER: Skip ignored requests
                 if should_ignore(req):
                     print(f"Skipping ignored request: {req.get('url')}")
@@ -197,17 +198,18 @@ class CaptureService:
             traceback.print_exc()
             return {"error": str(e)}
         finally:
-            db.close()
+            pass # Removed db.close()
 
     @staticmethod
-    def get_hierarchy():
+    def get_hierarchy(db: Session): # Modified signature
         """
         Returns a list of Products with their Features
         Structure: [{id, name, features: [{id, name}]}]
         """
-        from app.models.product_models import ProductModel
-        db = SessionLocal()
+        # db = SessionLocal() # Removed
         try:
+            from app.models.product_models import ProductModel
+            from app.models.feature_models import FeatureModel # Added import
             products = db.query(ProductModel).all()
             result = []
             for prod in products:
@@ -225,4 +227,4 @@ class CaptureService:
             print(f"Error fetching hierarchy: {e}")
             return []
         finally:
-            db.close()
+            pass # Session managed by caller

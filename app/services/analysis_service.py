@@ -201,8 +201,6 @@ class AnalysisService:
                  builder.add_object(api_data.get('body'))
                  schema = builder.to_schema()
                  
-                 schema = builder.to_schema()
-                 
                  # Enhance Schema with Format Detection (Email, UUID, URI) & Constraints (Min/Max)
                  def enrich_schema(schema_node, data_node):
                     if schema_node.get('type') == 'object' and isinstance(data_node, dict):

@@ -105,6 +105,16 @@ app.add_middleware(
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+@app.middleware("http")
+async def log_exceptions_middleware(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        import traceback
+        logger.error(f"❌ Unhandled Exception: {str(e)}\n{traceback.format_exc()}")
+        # We don't want to swallow the error, but we want to log it before it reaches FastAPI's default handler
+        raise e
+
 # Incluir rotas
 app.include_router(admin_router)
 app.include_router(auth_router)
@@ -130,11 +140,23 @@ app.include_router(dashboard_router)
 from app.routes.proxy_routes import router as proxy_router
 app.include_router(proxy_router)
 
+# Front Recording Router
+from app.routes.front_recording_routes import router as front_recording_router
+app.include_router(front_recording_router)
+
 # Mount Videos Static Directory
 from fastapi.staticfiles import StaticFiles
 import os
-os.makedirs("/app/data/videos", exist_ok=True)
-app.mount("/videos", StaticFiles(directory="/app/data/videos"), name="videos")
+# Video storage path (Cross-platform)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VIDEO_DIR = os.path.join(BASE_DIR, "..", "data", "videos")
+os.makedirs(VIDEO_DIR, exist_ok=True)
+app.mount("/videos", StaticFiles(directory=VIDEO_DIR), name="videos")
+
+# Mount Screenshots directory
+SCREENSHOT_DIR = os.path.join(os.path.dirname(VIDEO_DIR), "screenshots")
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+app.mount("/screenshots", StaticFiles(directory=SCREENSHOT_DIR), name="screenshots")
 
 # Middleware para log de requests
 @app.middleware("http")
@@ -158,8 +180,7 @@ async def log_requests(request, call_next):
         # Log response body for 422
         if response.status_code == 422:
             try:
-                # We can't read the response body here easily without consuming it, 
-                # but we can log the request url which is already done.
+                # We can try to peek at the response if it was a 422
                 pass
             except:
                 pass

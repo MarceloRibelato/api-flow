@@ -3,8 +3,9 @@ def test_register_user(client):
         "/auth/create",
         json={
             "username": "testuser",
-            "password": "testpassword",
+            "password": "Password123!",
             "email": "test@example.com",
+            "accepted_terms": True
         },
     )
     assert response.status_code == 200
@@ -16,12 +17,16 @@ def test_register_user(client):
 def test_login_user(client):
     # Create user first
     client.post(
-        "/auth/create", json={"username": "loginuser", "password": "loginpassword"}
+        "/auth/create", json={
+            "username": "loginuser", 
+            "password": "Password123!",
+            "accepted_terms": True
+        }
     )
 
     # Try login
     response = client.post(
-        "/auth/login", data={"username": "loginuser", "password": "loginpassword"}
+        "/auth/login", json={"username": "loginuser", "password": "Password123!"}
     )
     assert response.status_code == 200
     data = response.json()
@@ -31,11 +36,15 @@ def test_login_user(client):
 
 def test_login_invalid_password(client):
     client.post(
-        "/auth/create", json={"username": "wrongpass", "password": "correctpassword"}
+        "/auth/create", json={
+            "username": "wrongpass", 
+            "password": "Password123!",
+            "accepted_terms": True
+        }
     )
 
     response = client.post(
-        "/auth/login", data={"username": "wrongpass", "password": "wrongpassword"}
+        "/auth/login", json={"username": "wrongpass", "password": "WrongPassword123!"}
     )
     assert response.status_code == 401
 
@@ -43,8 +52,9 @@ def test_login_invalid_password(client):
 def test_register_duplicate_username(client):
     user_data = {
         "username": "duplicate",
-        "password": "password",
+        "password": "Password123!",
         "email": "dup@example.com",
+        "accepted_terms": True
     }
     client.post("/auth/create", json=user_data)
 
@@ -56,12 +66,12 @@ def test_register_duplicate_username(client):
 def test_register_duplicate_email(client):
     client.post(
         "/auth/create",
-        json={"username": "u1", "password": "p1", "email": "shared@example.com"},
+        json={"username": "u1", "password": "Password123!", "email": "shared@example.com", "accepted_terms": True},
     )
 
     response = client.post(
         "/auth/create",
-        json={"username": "u2", "password": "p2", "email": "shared@example.com"},
+        json={"username": "u2", "password": "Password123!", "email": "shared@example.com", "accepted_terms": True},
     )
     assert response.status_code == 400
     assert "Email já existe" in response.json()["detail"]
@@ -73,12 +83,13 @@ def test_get_user_profile(client):
         "/auth/create",
         json={
             "username": "profileuser",
-            "password": "password",
+            "password": "Password123!",
             "full_name": "Profile User",
+            "accepted_terms": True
         },
     )
     token = client.post(
-        "/auth/login", data={"username": "profileuser", "password": "password"}
+        "/auth/login", json={"username": "profileuser", "password": "Password123!"}
     ).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -91,9 +102,9 @@ def test_get_user_profile(client):
 
 def test_update_user_profile(client):
     # Register and Login
-    client.post("/auth/create", json={"username": "updateuser", "password": "password"})
+    client.post("/auth/create", json={"username": "updateuser", "password": "Password123!", "accepted_terms": True})
     token = client.post(
-        "/auth/login", data={"username": "updateuser", "password": "password"}
+        "/auth/login", json={"username": "updateuser", "password": "Password123!"}
     ).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 

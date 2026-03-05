@@ -1,5 +1,6 @@
 import logging
 import traceback
+import uuid
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
@@ -12,8 +13,7 @@ logger = logging.getLogger(__name__)
 
 class FrontRecordingService:
     @staticmethod
-    def save_recording(feature_id: int, name: str, requests: List[Dict[str, Any]], interactions: List[Dict[str, Any]]):
-        db = SessionLocal()
+    def save_recording(db: Session, feature_id: int, name: str, requests: List[Dict[str, Any]], interactions: List[Dict[str, Any]]):
         try:
             # Verify feature exists
             feature = db.query(FeatureModel).filter(FeatureModel.id == feature_id).first()
@@ -47,20 +47,18 @@ class FrontRecordingService:
             logger.error(f"Failed to save front recording: {e}")
             return {"error": str(e)}
         finally:
-            db.close()
+            pass
 
     @staticmethod
-    def list_recordings(feature_id: int):
-        db = SessionLocal()
+    def list_recordings(db: Session, feature_id: int):
         try:
             recordings = db.query(FrontRecordingDB).filter(FrontRecordingDB.feature_id == feature_id).all()
             return recordings
         finally:
-            db.close()
+            pass
 
     @staticmethod
-    def generate_playwright_script(recording_id: int):
-        db = SessionLocal()
+    def generate_playwright_script(db: Session, recording_id: int):
         try:
             recording = db.query(FrontRecordingDB).filter(FrontRecordingDB.id == recording_id).first()
             if not recording:
@@ -112,7 +110,7 @@ class FrontRecordingService:
 
             return "\n".join(script_lines)
         finally:
-            db.close()
+            pass
     @staticmethod
     def generate_flow_from_recording(db: Session, recording: FrontRecordingDB):
         interactions = recording.interactions or []
@@ -154,106 +152,172 @@ class FrontRecordingService:
             "id": master_id,
             "type": "custom",
             "position": {"x": 0, "y": 100},
-            "data": {"name": feature_name, "color": "#10b981", "description": "Raiz do Fluxo E2E"}
+            "data": {"name": feature_name, "color": "#10b981", "description": "Raiz do Fluxo Gerado"}
         })
         card_data[master_id] = {
             "name": feature_name,
             "color": "#10b981",
-            "description": "Raiz do Fluxo E2E",
+            "description": "Raiz do Fluxo Gerado",
             "apiCalls": []
         }
 
         for idx, step in enumerate(steps):
-            node_id = f"node-e2e-{idx}"
+            node_id = f"node-recorded-{idx}"
             
-            # Node
+            # Node - Data must match NodeDataBasic (no description here)
             nodes.append({
                 "id": node_id,
                 "type": "custom",
                 "position": {"x": (idx + 1) * spacing_x, "y": 100},
-                "data": {"name": step["name"], "color": "#3b82f6"}
+                "data": {
+                    "name": step["name"], 
+                    "color": "#3b82f6",
+                    "childCount": 0,
+                    "isCollapsed": False
+                }
             })
             
             # Edge from previous or Master
-            source_id = f"node-e2e-{idx-1}" if idx > 0 else master_id
+            source_id = f"node-recorded-{idx-1}" if idx > 0 else master_id
             edges.append({
-                "id": f"edge-e2e-{source_id}-{node_id}",
+                "id": f"edge-recorded-{source_id}-{node_id}",
                 "source": source_id,
                 "target": node_id,
                 "type": "buttonedge",
                 "animated": True
             })
             
-            # Code for this specific node
-            node_script = [
-                "# Script gerado para esta etapa",
-                ""
-            ]
+            # 1. Combine All Steps (Interactions + Requests) for Interleaving
+            combined_steps = []
+            
+            # Add navigation if it's the first step and we have a URL
+            base_url = step["inters"][0].get('pageUrl') if step["inters"] else ""
+            if idx == 0 and base_url:
+                 combined_steps.append({
+                    "raw": {
+                        "action": "browser",
+                        "value": base_url
+                    },
+                    "type": "e2e",
+                    "ts": (step["inters"][0].get('timestamp', 0) if step["inters"] else 0) - 1
+                })
+
             for inter in step["inters"]:
-                action = inter.get('action')
-                selector = inter.get('selector')
-                if action == 'click':
-                    node_script.append(f"page.click('{selector}')")
-                elif action == 'fill':
-                    value = inter.get('value', '')
-                    value_esc = str(value).replace("'", "\\'")
-                    node_script.append(f"page.fill('{selector}', '{value_esc}')")
-                node_script.append("page.wait_for_timeout(300)")
-
-            # Process API Calls for this step
-            api_calls_payload = []
-
-            # 1. Add Playwright Script as a special "API"
-            api_calls_payload.append({
-                "id": f"script-{idx}",
-                "name": "Script Playwright",
-                "method": "PYTHON",
-                "url": "playwright",
-                "description": "\n".join(node_script),
-                "headers": [],
-                "params": [],
-                "assertions": [],
-                "extracts": []
-            })
-
-            # 2. Add Real API Requests captured during this step
-            # We filter requests that match the current step name
+                combined_steps.append({"raw": inter, "type": "e2e", "ts": inter.get('timestamp', 0)})
+            
+            # Filter requests matching this step
+            # Note: We match by customNodeName OR if they are near the interactions in time?
+            # For now, stick to simple match
             step_requests = [
                 r for r in (recording.requests or []) 
                 if r.get('customNodeName') == step["name"]
             ]
-
             for req in step_requests:
-                api_calls_payload.append({
-                    "id": str(uuid.uuid4()),
-                    "name": f"{req.get('method')} {req.get('url')[:30]}...",
-                    "method": req.get('method'),
-                    "url": req.get('url'),
-                    "description": "Captured via Front Recorder",
-                    "headers": [{"key": k, "value": str(v)} for k, v in req.get('headers', {}).items()] if isinstance(req.get('headers'), dict) else req.get('headers', []),
-                    "body": str(req.get('body')) if req.get('body') is not None else None,
-                    "params": [],
-                    "timeout": 30000,
-                    "assertions": [],
-                    "extracts": []
-                })
+                combined_steps.append({"raw": req, "type": "api", "ts": req.get('timestamp', 0)})
+
+            # Sort by timestamp to preserve real user flow
+            combined_steps.sort(key=lambda x: x['ts'])
+
+            # 2. Process Combined Steps and Assign Order
+            api_calls_payload = []
+            e2e_steps_payload = []
+            
+            for global_order, entry in enumerate(combined_steps):
+                data = entry['raw']
+                if entry['type'] == 'e2e':
+                    action = data.get('action')
+                    selector = data.get('selector', 'body')
+                    value = data.get('value', '')
+                    text = data.get('text', '')
+                    
+                    if action == 'browser':
+                        e2e_steps_payload.append({
+                            "id": str(uuid.uuid4()),
+                            "order": global_order,
+                            "type": "browser",
+                            "name": "Navegar para Página",
+                            "properties": {"value": value, "timeout": 30000}
+                        })
+                    elif action == 'click':
+                         e2e_steps_payload.append({
+                            "id": str(uuid.uuid4()),
+                            "order": global_order,
+                            "type": "click",
+                            "name": f"Clicar: {text}" if text else f"Clicar em {selector.split(' > ')[-1]}",
+                            "properties": {"selector": selector, "timeout": 30000, "isIframe": data.get('isIframe', False), "frameUrl": data.get('frameUrl', '')}
+                        })
+                    elif action == 'fill':
+                        label = data.get('label', 'Campo')
+                        e2e_steps_payload.append({
+                            "id": str(uuid.uuid4()),
+                            "order": global_order,
+                            "type": "type",
+                            "name": f"Digitar em {label}" if label != 'Campo' else f"Digitar em {selector.split(' > ')[-1]}",
+                            "properties": {"selector": selector, "value": value, "timeout": 30000, "isIframe": data.get('isIframe', False), "frameUrl": data.get('frameUrl', '')}
+                        })
+                    
+                else: # API Request
+                     api_calls_payload.append({
+                        "id": str(uuid.uuid4()),
+                        "order": global_order,
+                        "name": f"{data.get('method')} {data.get('url', '')[:30]}...",
+                        "method": data.get('method', 'GET'),
+                        "url": data.get('url', ''),
+                        "description": "Captured via Front Recorder",
+                        "headers": [{"key": k, "value": str(v)} for k, v in data.get('headers', {}).items()] if isinstance(data.get('headers'), dict) else [],
+                        "body": str(data.get('body')) if data.get('body') else None,
+                        "params": [],
+                        "timeout": 30000,
+                        "assertions": [],
+                        "extracts": []
+                    })
 
             # Card Data
             card_data[node_id] = {
                 "name": step["name"],
                 "color": "#3b82f6",
                 "description": f"Etapa automática gerada da gravação: {recording.name}",
-                "apiCalls": api_calls_payload
+                "apiCalls": api_calls_payload,
+                "e2eSteps": e2e_steps_payload,
+                "bddScenarios": [],
+                "envData": {}
             }
 
-        # 3. Save via FlowService
-        flow_schema = FlowSaveSchema(
+        # 3. SAVE DOUBLE FLOWS (E2E and API)
+        import copy
+        company_id = None
+        if feature and feature.product:
+            company_id = feature.product.company_id
+        
+        if not company_id:
+            logger.warning(f"Could not save flows for recording {recording.id}: Company ID not found")
+            return
+
+        # A. Save E2E Flow
+        flow_schema_e2e = FlowSaveSchema(
             projectId=recording.feature_id,
-            flowType="frontend",
+            flow_type="e2e",
             name=f"Fluxo Front: {recording.name}",
             nodes=nodes,
             edges=edges,
             cardData=card_data
         )
-        
-        FlowService.save(db, flow_schema)
+        FlowService.save(db, flow_schema_e2e, company_id)
+        logger.info(f"✅ Auto-Generated E2E Flow for recording {recording.name}")
+
+        # B. Save API Flow (Parallel)
+        # We clone the card data and remove E2E steps for a clean API view
+        card_data_api = copy.deepcopy(card_data)
+        for nid in card_data_api:
+            card_data_api[nid]["e2eSteps"] = []
+            
+        flow_schema_api = FlowSaveSchema(
+            projectId=recording.feature_id,
+            flow_type="api",
+            name=f"Fluxo API: {recording.name}",
+            nodes=nodes,
+            edges=edges,
+            cardData=card_data_api
+        )
+        FlowService.save(db, flow_schema_api, company_id)
+        logger.info(f"✅ Auto-Generated API Flow for recording {recording.name}")
