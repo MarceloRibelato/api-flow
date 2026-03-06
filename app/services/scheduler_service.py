@@ -76,7 +76,11 @@ def execute_job(schedule_id: int):
             env_id = schedule.environment_id
             logger.info(f"🚀 Running Scheduled Feature {feature_id} in Env {env_id}")
             
-            s, f = FlowExecutorService.execute_feature_group(db, feature_id, env_id, schedule.company_id, schedule_id=schedule.id, user_id=schedule.user_id or 1)
+            s, f = FlowExecutorService.execute_feature_group(
+                db, feature_id, env_id, schedule.company_id, 
+                schedule_id=schedule.id, user_id=schedule.user_id or 1,
+                flow_type=getattr(schedule, 'flow_type', 'api')
+            )
             success_count = s
             fail_count = f
 
@@ -90,7 +94,11 @@ def execute_job(schedule_id: int):
             env_id = schedule.environment_id
             logger.info(f"🚀 Running Scheduled Flow {flow_id} in Env {env_id}")
             
-            s, f = FlowExecutorService.execute_flow_by_id(db, flow_id, env_id, schedule.company_id, schedule_id=schedule.id, user_id=schedule.user_id or 1)
+            s, f = FlowExecutorService.execute_flow_by_id(
+                db, flow_id, env_id, schedule.company_id, 
+                schedule_id=schedule.id, user_id=schedule.user_id or 1,
+                flow_type=getattr(schedule, 'flow_type', 'api')
+            )
             success_count = s
             fail_count = f
 
@@ -109,7 +117,8 @@ def execute_job(schedule_id: int):
             s, f = FlowExecutorService.execute_suite(
                 db, product_id, env_id, schedule.company_id, 
                 schedule_id=schedule.id, user_id=schedule.user_id or 1,
-                max_concurrency=concurrency
+                max_concurrency=concurrency,
+                flow_type=getattr(schedule, 'flow_type', 'api')
             )
             success_count = s
             fail_count = f

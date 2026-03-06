@@ -269,7 +269,7 @@ class FlowExecutorService:
 
                                         # Execute real Playwright step
                                         start_time = time.time()
-                                        resp = e2e_executor.execute_step(step_data)
+                                        resp = e2e_executor.execute_step(step_data, db=db, user_id=user_id)
                                         duration = int((time.time() - start_time) * 1000)
                                         
                                         resp_status = resp['status']
@@ -293,7 +293,7 @@ class FlowExecutorService:
                                                 from app.services.playwright_executor_service import PlaywrightExecutorService
                                                 e2e_executor = PlaywrightExecutorService()
                                                 e2e_executor.start()
-                                            resp = e2e_executor.execute_step(step_data)
+                                            resp = e2e_executor.execute_step(step_data, db=db, user_id=user_id)
                                             resp_status = resp['status']
                                             resp_reason = resp['reason']
                                             resp_text = resp['text']
@@ -706,7 +706,7 @@ class FlowExecutorService:
         return variables
 
     @staticmethod
-    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1):
+    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api'):
         """
         Executes all flows within a specific feature.
         """
@@ -733,9 +733,17 @@ class FlowExecutorService:
         # FIX: Only execute the latest flow to match UI behavior (1 Feature = 1 Active Flow)
         # list_by_project returns flows ordered by updated_at desc
         if flows:
-            latest_flow = flows[0]
+            # Filter flows by type
+            typed_flows = [f for f in flows if f.get('flow_type') == flow_type]
+            
+            if not typed_flows:
+                logger.warning(f"No flows of type '{flow_type}' found for feature {feature.id}. Falling back to latest regardless of type.")
+                latest_flow = flows[0]
+            else:
+                latest_flow = typed_flows[0]
+
             if len(flows) > 1:
-                logger.info(f"ℹ️  Selecting latest flow '{latest_flow.get('name')}' (ID: {latest_flow.get('id')}) from {len(flows)} detected flows.")
+                logger.info(f"ℹ️  Selecting flow '{latest_flow.get('name')}' (ID: {latest_flow.get('id')}, Type: {latest_flow.get('flow_type')}) for execution.")
             
             s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id)
             success_count += s
@@ -746,7 +754,7 @@ class FlowExecutorService:
         return success_count, fail_count
 
     @staticmethod
-    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1):
+    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api'):
         """
         Executes a single specific flow.
         """
@@ -793,7 +801,7 @@ class FlowExecutorService:
         return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id)
 
     @staticmethod
-    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None):
+    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api'):
         """
         Executes all features within a product.
         """
@@ -845,10 +853,12 @@ class FlowExecutorService:
                     flows = FlowService.list_by_project(thread_db, feature['id'], company_id)
                     
                     if flows:
-                        # FIX: Only execute latest flow per feature
-                        latest_flow = flows[0]
-                         # Re-fetch merge variables inside thread or pass them? 
-                         # Variables are dict, safe to read.
+                        # Filter by type (api or e2e)
+                        typed_flows = [f for f in flows if f.get('flow_type') == flow_type]
+                        if not typed_flows:
+                            logger.warning(f"No flows of type '{flow_type}' found for feature {feature['id']}. Skipping.")
+                            return f_success, f_fail
+                        latest_flow = typed_flows[0]
                         s, f = FlowExecutorService.execute_flow_logic(
                             thread_db, latest_flow, product_id, env_id, company_id, 
                             variables.copy(), # Copy vars to avoid contamination

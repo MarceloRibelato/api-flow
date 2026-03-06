@@ -6,35 +6,78 @@ from app.models.agent_models import AgentSettingsDB
 from datetime import datetime, timedelta
 import json
 import requests
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AnalysisService:
 
     @staticmethod
-    def analyze_with_ai(db: Session, flow_id: int, user_id: int):
+    def _call_llm(db: Session, user_id: int, prompt: str, temperature: float = 0.2) -> str:
+        """Helper to call the configured LLM for a user."""
         settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
-        
-        # Debug: Return info if no settings
-        if not settings:
-             return [{ "type": "info", "severity": "low", "message": "AI Not Configured", "details": "No settings found for user. Please configure in Settings." }]
-        
-        if not settings.ai_api_key:
-             return [{ "type": "warning", "severity": "medium", "message": "Missing API Key", "details": "AI API Key is missing. Please add it in Settings." }]
+        if not settings or (not settings.ai_api_key and settings.ai_provider != "ollama"):
+            return None
 
-        # Fetch Flow Data
+        try:
+            if settings.ai_provider == "openai":
+                headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
+                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature}
+                base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
+                if not base_url.endswith("/"): base_url += "/"
+                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                resp = requests.post(url, headers=headers, json=data, timeout=60)
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"]
+
+            elif settings.ai_provider == "anthropic":
+                headers = {"x-api-key": settings.ai_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4096}
+                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=60)
+                if resp.status_code == 200:
+                    return resp.json()["content"][0]["text"]
+
+            elif settings.ai_provider == "gemini":
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
+                data = {"contents": [{"parts": [{"text": prompt}]}]}
+                resp = requests.post(url, json=data, timeout=60)
+                if resp.status_code == 200:
+                    return resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+
+            elif settings.ai_provider == "deepseek":
+                headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
+                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": 4096}
+                resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=60)
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"]
+
+            elif settings.ai_provider == "ollama":
+                default_url = "http://host.docker.internal:11434/v1"
+                base_url = settings.ai_base_url if settings.ai_base_url else default_url
+                if not base_url.endswith("/"): base_url += "/"
+                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                headers = {"Content-Type": "application/json"}
+                if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
+                data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                resp = requests.post(url, headers=headers, json=data, timeout=60)
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"]
+
+        except Exception as e:
+            logger.error(f"Error calling LLM {settings.ai_provider}: {e}")
+            if resp is not None:
+                logger.error(f"LLM Response Error: {resp.status_code} - {resp.text}")
+        return None
+
+    @staticmethod
+    def analyze_with_ai(db: Session, flow_id: int, user_id: int):
         flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
         cards = db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow_id).all()
-        
-        if not flow or not cards:
-            return []
+        if not flow or not cards: return []
 
-        # Construct Context
-        nodes_desc = []
-        for card in cards:
-            api_info = card.api_calls if card.api_calls else "No API"
-            nodes_desc.append(f"- Node {card.name}: {api_info}")
-        
+        nodes_desc = [f"- Node {c.name}: {c.api_calls if c.api_calls else 'No API'}" for c in cards]
         context_str = "\n".join(nodes_desc)
-        
+
         prompt = f"""
         Analyze the following API Flow for optimizations, security risks, and logic errors.
         Flow Name: {flow.name}
@@ -47,144 +90,227 @@ class AnalysisService:
         ]
         Do not include markdown formatting, just raw JSON.
         """
-
-        # Call Provider
-        suggestions = []
+        
+        content = AnalysisService._call_llm(db, user_id, prompt)
+        if not content: return []
+        
+        content = content.replace("```json", "").replace("```", "").strip()
         try:
-            if settings.ai_provider == "openai":
-                headers = {
-                    "Authorization": f"Bearer {settings.ai_api_key}",
-                    "Content-Type": "application/json"
-                }
-                data = {
-                    "model": settings.ai_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2
-                }
-                base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
-                # Ensure no trailing slash for cleaner concatenation if needed, though usually full path is preferred or just base
-                # For OpenAI compatible, usually base_url/chat/completions
-                if not base_url.endswith("/"):
-                     base_url += "/"
-                
-                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+            return json.loads(content)
+        except:
+            return [{ "type": "logic", "severity": "low", "message": "Raw AI Response", "details": content }]
 
-                resp = requests.post(url, headers=headers, json=data, timeout=30)
+    @staticmethod
+    def suggest_test_scenarios(db: Session, flow_id: int, user_id: int):
+        """Specifically suggests NEW test scenarios/flows derived from the current one."""
+        flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
+        cards = [c for c in db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow_id).all()]
+        if not flow or not cards: return []
+
+        # Simplify context for better prompt focus
+        flow_summary = []
+        for c in cards:
+             apis = [f"{a.get('method')} {a.get('url')}" for a in (c.api_calls or [])]
+             # Include E2E steps if available
+             e2e = [f"{s.type}: {s.properties.get('url') or s.properties.get('selector') or ''}" for s in (c.e2e_steps_rel or [])]
+             
+             summary_parts = []
+             if apis: summary_parts.append(f"APIs: {', '.join(apis)}")
+             if e2e: summary_parts.append(f"E2E: {', '.join(e2e)}")
+             
+             flow_summary.append(f"Node: {c.name} ({' | '.join(summary_parts)})")
+        
+        context_str = "\n".join(flow_summary)
+
+        prompt = f"""
+        Analyze this Flow:
+        {context_str}
+        
+        Suggest 3 new high-value test scenarios (unhappy paths, edge cases, or missing logic) based on this flow.
+        For each, explain why it's important.
+        
+        Return a JSON array:
+        [
+          {{
+            "title": "Scenario Name",
+            "description": "Why this is important.",
+            "concept": "Explanation of what to do (e.g. inject an invalid token in node X)"
+          }}
+        ]
+        Respond ONLY with raw JSON.
+        """
+        
+        content = AnalysisService._call_llm(db, user_id, prompt)
+        if not content: return []
+        
+        content = content.replace("```json", "").replace("```", "").strip()
+        try:
+            return json.loads(content)
+        except:
+             return []
+
+    @staticmethod
+    def suggest_test_scenarios_by_project(db: Session, project_id: int, user_id: int):
+        """Finds the latest flow for a project and suggests tests for it."""
+        flow = db.query(FlowDB).filter(FlowDB.project_id == project_id).order_by(FlowDB.updated_at.desc()).first()
+        if not flow: return []
+        return AnalysisService.suggest_test_scenarios(db, flow.id, user_id)
+
+    @staticmethod
+    def implement_test_scenario(db: Session, flow_id: int, user_id: int, scenario_title: str, company_id: int = 1):
+        """Creates a NEW flow based on a scenario suggestion."""
+        flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
+        cards = db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow_id).all()
+        if not flow: return None
+
+        # Build prompt to generate ACTUAL node/edge modifications
+        prompt = f"""
+        You are a QA automation engineer. Modify the following Flow to implement the test scenario: "{scenario_title}".
+        Original Flow Nodes/Cards:
+        {[c.name for c in cards]}
+        
+        Task: 
+        1. Keep the core logic but inject a fault or change parameters to match the scenario.
+        2. Return a JSON structure that looks like a simplified cardData dictionary.
+        
+        Format:
+        {{
+           "nodes": [ {{ "id": "n1", "name": "...", "type": "apiCard" }} ],
+           "cardData": {{
+              "n1": {{ "name": "...", "apiCalls": [ {{ "method": "...", "url": "...", "body": "..." }} ] }}
+           }}
+        }}
+        Provide a complete path from login to the fault point.
+        Respond ONLY with raw JSON.
+        """
+        
+        content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.0)
+        if not content: return None
+        
+        content = content.replace("```json", "").replace("```", "").strip()
+        try:
+            suggested_data = json.loads(content)
+            
+            from app.services.flow_service import FlowService
+            
+            # Simple wrapper to create a new flow
+            new_name = f"{flow.name} - AI: {scenario_title}"
+            new_flow = FlowService.create(db, flow.project_id, new_name, company_id)
+            
+            # Note: For now we just create the empty flow with the name. 
+            # In a next step we would save the suggested_data into it.
+            # But creating the flow already gives the user a starting point.
+            
+            return {
+                "id": new_flow.id if new_flow else None,
+                "name": new_name,
+                "data": suggested_data
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to parse implementation: {e}")
+            return None
+
+    @staticmethod
+    def heal_selector(db: Session, user_id: int, broken_selector: str, action_value: str, step_type: str, html_snippet: str) -> str:
+        """
+        Uses AI to attempt to find a broken or missing CSS/XPath selector by analyzing a snippet of the current DOM.
+        """
+        settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
+        if not settings:
+            logger.warning(f"⚠️ [Auto-Heal] Aborted: No AgentSettings found for user_id={user_id}")
+            return None
+        
+        logger.info(f"🤖 [Auto-Heal] Provider Found: '{settings.ai_provider}'")
+        
+        trimmed_key = (settings.ai_api_key[:5] + "...") if settings.ai_api_key else "EMPTY"
+        logger.info(f"🤖 [Auto-Heal] API Key Check: {trimmed_key}")
+        
+        if not settings.ai_api_key and settings.ai_provider != "ollama":
+            logger.warning(f"⚠️ [Auto-Heal] Aborted: AI API Key is missing for provider {settings.ai_provider}")
+            return None
+            
+        # Truncate HTML to prevent token overflow
+        if len(html_snippet) > 8000:
+            html_snippet = html_snippet[:8000] + "\n...[truncated]"
+
+        prompt = f"""
+        You are an expert QA Automation Engineer. A Playwright E2E test just failed because the element could not be found with this selector:
+        Broken Selector: `{broken_selector}`
+        
+        The intended action was `{step_type}`. The value/text involved is: `{action_value}`.
+        
+        Here is a stripped down snippet of the current DOM structure where the element should be:
+        ```html
+        {html_snippet}
+        ```
+        
+        Analyze the HTML. The class, ID, or structure might have changed slightly from the broken selector.
+        Identify the correct new CSS Selector (or XPath if CSS is impossible) for the intended element.
+        Return ONLY the raw selector string. No markdown formatting, no explanations, no JSON. Just the string the automation engine can use directly (e.g. `button#new-login` or `[name="email_addr"]`).
+        """
+        
+        try:
+            print(f"🤖 [Auto-Heal] Firing request to provider: {settings.ai_provider}")
+            if settings.ai_provider == "openai":
+                headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
+                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
+                base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
+                if not base_url.endswith("/"): base_url += "/"
+                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                resp = requests.post(url, headers=headers, json=data, timeout=20)
                 if resp.status_code == 200:
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    content = content.replace("```json", "").replace("```", "").strip()
-                    try:
-                        suggestions = json.loads(content)
-                    except:
-                        # Fallback if JSON is malformed
-                        suggestions = [{ "type": "logic", "severity": "low", "message": "Raw AI Response", "details": content }]
-                else:
-                    return [{ "type": "error", "severity": "high", "message": f"OpenAI Error {resp.status_code}", "details": resp.text }]
+                    return resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
 
             elif settings.ai_provider == "anthropic":
-                headers = {
-                    "x-api-key": settings.ai_api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json"
-                }
-                data = {
-                    "model": settings.ai_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 2048
-                }
-                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=30)
+                headers = {"x-api-key": settings.ai_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 100}
+                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=20)
                 if resp.status_code == 200:
-                    content = resp.json()["content"][0]["text"]
-                    content = content.replace("```json", "").replace("```", "").strip()
-                    try:
-                        suggestions = json.loads(content)
-                    except:
-                        suggestions = [{ "type": "logic", "severity": "low", "message": "Raw AI Response", "details": content }]
-                else:
-                    return [{ "type": "error", "severity": "high", "message": f"Anthropic Error {resp.status_code}", "details": resp.text }]
-            
+                    return resp.json()["content"][0]["text"].replace("```", "").strip()
+
             elif settings.ai_provider == "gemini":
-                # Basic Google Gemini via REST API (Simplified)
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
-                data = { "contents": [{ "parts": [{ "text": prompt }] }] }
-                resp = requests.post(url, json=data, timeout=30)
+                data = {"contents": [{"parts": [{"text": prompt}]}]}
+                resp = requests.post(url, json=data, timeout=20)
                 if resp.status_code == 200:
                     text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                    text = text.replace("```json", "").replace("```", "").strip()
-                    try:
-                        suggestions = json.loads(text)
-                    except:
-                         suggestions = [{ "type": "logic", "severity": "low", "message": "Raw AI Response", "details": text }]
-                elif resp.status_code == 404:
-                     return [{ "type": "error", "severity": "high", "message": "Gemini Model Not Found", "details": "The selected model is not available for your API Key. Ensure 'Generative Language API' is enabled in Google Cloud Console." }]
-                else:
-                     return [{ "type": "error", "severity": "high", "message": f"Gemini Error {resp.status_code}", "details": resp.text }]
-
+                    return text.replace("```", "").strip()
+            
             elif settings.ai_provider == "deepseek":
-                headers = {
-                    "Authorization": f"Bearer {settings.ai_api_key}",
-                    "Content-Type": "application/json"
-                }
-                data = {
-                    "model": settings.ai_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.0, # DeepSeek recommends low temp for code/logic
-                    "max_tokens": 4096
-                }
-                resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=60)
-                if resp.status_code == 200:
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    content = content.replace("```json", "").replace("```", "").strip()
-                    try:
-                        suggestions = json.loads(content)
-                    except:
-                         suggestions = [{ "type": "logic", "severity": "low", "message": "Raw AI Response", "details": content }]
-                else:
-                     return [{ "type": "error", "severity": "high", "message": f"DeepSeek Error {resp.status_code}", "details": resp.text }]
-
+                 headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
+                 data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.0, "max_tokens": 100}
+                 resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=20)
+                 if resp.status_code == 200:
+                     return resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
+            
             elif settings.ai_provider == "ollama":
-                # Ollama is OpenAI compatible usually, or has its own /api/generate
-                # Standard OpenAI compatible endpoint for Ollama: http://localhost:11434/v1/chat/completions
-                
-                base_url = settings.ai_base_url if settings.ai_base_url else "http://localhost:11434/v1"
-                if not base_url.endswith("/"):
-                     base_url += "/"
-                
+                # Inside Docker, 'localhost' points to the container. Ollama is usually on the host.
+                default_url = "http://host.docker.internal:11434/v1"
+                base_url = settings.ai_base_url if settings.ai_base_url else default_url
+                if not base_url.endswith("/"): base_url += "/"
                 url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-
-                headers = {
-                    "Content-Type": "application/json"
-                }
-                # Ollama often doesn't need API key, but we pass dummy if empty
-                if settings.ai_api_key:
-                    headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-
-                data = {
-                    "model": settings.ai_model or "llama3",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False
-                }
+                headers = {"Content-Type": "application/json"}
+                if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
+                data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
                 
-                try:
-                    resp = requests.post(url, headers=headers, json=data, timeout=60)
-                except Exception as conn_err:
-                     return [{ "type": "error", "severity": "high", "message": "Ollama Connection Error", "details": f"Could not connect to {url}. Ensure Ollama is running." }]
-
+                logger.info(f"📡 [Auto-Heal] Ollama Req: {url}")
+                resp = requests.post(url, headers=headers, json=data, timeout=30)
                 if resp.status_code == 200:
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    content = content.replace("```json", "").replace("```", "").strip()
-                    try:
-                        suggestions = json.loads(content)
-                    except:
-                        suggestions = [{ "type": "logic", "severity": "low", "message": "Raw AI Response", "details": content }]
+                    selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
+                    logger.info(f"✨ [Auto-Heal] Ollama Returned: {selector}")
+                    return selector
                 else:
-                     return [{ "type": "error", "severity": "high", "message": f"Ollama Error {resp.status_code}", "details": resp.text }]
+                    logger.error(f"❌ [Auto-Heal] Ollama Error: {resp.status_code} - {resp.text}")
+            else:
+                logger.warning(f"❌ [Auto-Heal] Unrecognized Provider: {settings.ai_provider}")
 
         except Exception as e:
-            print(f"LLM Call Error: {e}")
-            return [{ "type": "error", "severity": "high", "message": "AI Client Exception", "details": str(e) }]
-
-        return suggestions or []
+            logger.error(f"💥 [Auto-Heal] LLM Fatal Error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        
+        return None
 
     @staticmethod
     def generate_assertions(db: Session, user_id: int, api_data: dict):

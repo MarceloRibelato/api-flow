@@ -51,6 +51,9 @@ def test_execute_job_feature(mock_execute_feature, mock_session_local, db_sessio
     # Refresh schedule
     db_session.refresh(schedule)
     assert schedule.last_run_status == "success"
+    # Verify flow_type was passed correctly
+    call_kwargs = mock_execute_feature.call_args
+    assert call_kwargs.kwargs.get('flow_type', 'api') == 'api'
     mock_execute_feature.assert_called_once()
 
 
@@ -71,6 +74,27 @@ def test_execute_job_flow(mock_execute_flow, mock_session_local, db_session):
     db_session.refresh(schedule)
     assert schedule.last_run_status == "failure"
     mock_execute_flow.assert_called_once()
+
+
+@patch("app.services.scheduler_service.SessionLocal")
+@patch("app.services.flow_executor_service.FlowExecutorService.execute_feature_group")
+def test_execute_job_feature_e2e(mock_execute_feature, mock_session_local, db_session):
+    """Verifica que flow_type='e2e' é passado corretamente ao executor."""
+    fake_db = MagicMock(wraps=db_session)
+    fake_db.close = MagicMock()
+    mock_session_local.return_value = fake_db
+    mock_execute_feature.return_value = (3, 0)
+
+    schedule = ScheduleModel(name="E2E Feat", type="feature", target_id=1, environment_id=1, status="active", flow_type="e2e")
+    db_session.add(schedule)
+    db_session.commit()
+
+    execute_job(schedule.id)
+
+    db_session.refresh(schedule)
+    assert schedule.last_run_status == "success"
+    call_kwargs = mock_execute_feature.call_args
+    assert call_kwargs.kwargs.get('flow_type', 'api') == 'e2e'
 
 @patch("app.services.scheduler_service.SessionLocal")
 @patch("app.services.flow_executor_service.FlowExecutorService.execute_suite")

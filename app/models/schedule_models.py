@@ -24,6 +24,7 @@ class ScheduleModel(Base):
     last_run_status = Column(String(20), nullable=True)  # 'success', 'failure'
     next_run = Column(DateTime, nullable=True)
     max_concurrency = Column(Integer, nullable=True) # Override global concurrency limit
+    flow_type = Column(String(20), default="api", nullable=True) # 'api' or 'e2e'
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Multi-tenancy

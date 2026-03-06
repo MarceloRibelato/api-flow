@@ -155,7 +155,7 @@ class PlaywrightExecutorService:
             self._playwright = None
             logger.info("Playwright Browser stopped")
 
-    def execute_step(self, step, capture_screenshot: bool = False):
+    def execute_step(self, step, capture_screenshot: bool = False, db=None, user_id=None):
         """
         Executes a single E2E step using the persistent page.
         Returns a result dict.
@@ -450,6 +450,40 @@ class PlaywrightExecutorService:
                 # Only retry on certain types of errors (Timeout, etc)
                 if attempt < MAX_RETRIES - 1:
                     logger.warning(f"⚠️ Step '{name}' failed (Attempt {attempt+1}/{MAX_RETRIES}). Retrying... Error: {str(e)}")
+                    
+                    # 🤖 AI Auto-Healing Check
+                    logger.info(f"DEBUG Auto-Heal check: type={step_type}, timeout_match={'Timeout' in str(e) or 'Locator' in str(e)}, db={bool(db)}, user_id={user_id}, broken_selector={properties.get('selector')}")
+                    if ("Timeout" in str(e) or "Locator" in str(e) or "Waiting for" in str(e)) and step_type in ['click', 'type', 'hover', 'scroll', 'assert', 'getText', 'getAttribute']:
+                        broken_selector = properties.get('selector', '')
+                        if db and user_id and broken_selector:
+                            logger.info(f"🤖 [Auto-Heal] Triggering AI to fix broken selector: {broken_selector}")
+                            try:
+                                import traceback
+                                logger.info(f"🤖 [Auto-Heal] Step 1: Importing AnalysisService")
+                                from app.services.analysis_service import AnalysisService
+                                logger.info(f"🤖 [Auto-Heal] Step 2: Extracting clean HTML")
+                                # Extract stripped DOM for AI context
+                                clean_html = self._page.evaluate('''() => {
+                                    const clone = document.body.cloneNode(true);
+                                    clone.querySelectorAll("script, style, svg, path, link, meta").forEach(e => e.remove());
+                                    return clone.innerHTML;
+                                }''')
+                                
+                                logger.info(f"🤖 [Auto-Heal] Step 3: Triggering AI model")
+                                action_val = properties.get('value', '')
+                                new_selector = AnalysisService.heal_selector(db, user_id, broken_selector, action_val, step_type, clean_html)
+                                logger.info(f"🤖 [Auto-Heal] Step 4: AI Returned -> {new_selector}")
+                                
+                                if new_selector and new_selector != broken_selector and "```" not in new_selector:
+                                    logger.info(f"✨ [Auto-Heal] Success! Replacing '{broken_selector}' with '{new_selector}'")
+                                    properties['selector'] = new_selector
+                                    step['properties'] = properties
+                                    step_result["text"] = f"[AI-HEALED -> {new_selector}] "
+                            except Exception as heal_err:
+                                import traceback
+                                logger.error(f"🤖 [Auto-Heal] Fatal Exception: {heal_err}")
+                                logger.error(traceback.format_exc())
+
                     # Wait a bit before retry
                     self._page.wait_for_timeout(1000)
                     continue

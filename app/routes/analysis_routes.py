@@ -35,6 +35,40 @@ def analyze_history(project_id: Optional[int] = None, db: Session = Depends(get_
     """
     return AnalysisService.analyze_performance_trends(db, project_id)
 
+@router.get("/flow/{flow_id}/suggest-tests")
+def suggest_tests(
+    flow_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Suggests new test scenarios based on the flow.
+    """
+    return AnalysisService.suggest_test_scenarios(db, flow_id, current_user.id)
+
+@router.get("/project/{project_id}/suggest-tests")
+def suggest_tests_by_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Finds the latest flow and suggests tests.
+    """
+    return AnalysisService.suggest_test_scenarios_by_project(db, project_id, current_user.id)
+
+@router.post("/flow/{flow_id}/implement")
+def implement_test(
+    flow_id: int,
+    scenario_title: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Generates and returns the implementation for a suggested test scenario.
+    """
+    return AnalysisService.implement_test_scenario(db, flow_id, current_user.id, scenario_title, current_user.company_id)
+
 @router.post("/assertions")
 def generate_assertions(
     req: AssertionRequest,

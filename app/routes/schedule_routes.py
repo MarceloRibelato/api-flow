@@ -16,6 +16,7 @@ router = APIRouter(tags=["Schedules"])
 class ScheduleCreate(BaseModel):
     name: Optional[str] = None
     type: str # 'suite' or 'feature'
+    flow_type: Optional[str] = 'api' # 'api' or 'e2e'
     target_id: int
     environment_id: Optional[int] = None
     cron_expression: Optional[str] = None
@@ -27,6 +28,7 @@ class ScheduleOut(BaseModel):
     id: int
     name: Optional[str]
     type: str
+    flow_type: Optional[str] = 'api'
     target_id: int
     environment_id: Optional[int]
     environment_name: Optional[str] = None
@@ -53,6 +55,7 @@ def create_schedule(schedule_in: ScheduleCreate, db: Session = Depends(get_db), 
     db_schedule = ScheduleModel(
         name=schedule_in.name,
         type=schedule_in.type,
+        flow_type=schedule_in.flow_type or 'api',
         target_id=schedule_in.target_id,
         environment_id=schedule_in.environment_id,
         cron_expression=schedule_in.cron_expression,

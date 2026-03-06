@@ -46,6 +46,12 @@ def test_execute_cicd(client, db_session):
         assert response.json()["status"] == "triggered"
         mock_exec.assert_called_once()
 
+        # Verify default flow_type is 'api'
+        from app.models.schedule_models import ScheduleModel
+        job_id = response.json()["job_id"]
+        sched = db_session.query(ScheduleModel).filter(ScheduleModel.id == job_id).first()
+        assert sched.flow_type == "api"
+
 def test_job_status(client, db_session):
     token = get_auth_token_and_admin(client, db_session, "cicd_status_user")
     headers = {"Authorization": f"Bearer {token}"}
@@ -81,3 +87,30 @@ def test_job_status(client, db_session):
     response = client.get(f"/cicd/status/{job_id}", headers=headers)
     assert response.json()["status"] == "completed"
     assert response.json()["result"] == "success"
+
+
+def test_execute_cicd_e2e(client, db_session):
+    """Verifica que o CICD persiste flow_type='e2e' corretamente."""
+    token = get_auth_token_and_admin(client, db_session, "cicd_e2e_user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    p_resp = client.post("/products/", headers=headers, json={"name": "E2EProd"})
+    prod_id = p_resp.json()["id"]
+    client.post("/environments/", headers=headers, json={"name": "E2EEnv", "base_url": "http://test", "project_id": prod_id})
+
+    payload = {
+        "product_name": "E2EProd",
+        "environment_name": "E2EEnv",
+        "flow_type": "e2e",
+        "execution_name": "CI E2E Run"
+    }
+
+    with patch("app.routes.cicd_routes.execute_job"):
+        response = client.post("/cicd/execute", headers=headers, json=payload)
+        assert response.status_code == 200
+        assert response.json()["status"] == "triggered"
+
+        from app.models.schedule_models import ScheduleModel
+        job_id = response.json()["job_id"]
+        sched = db_session.query(ScheduleModel).filter(ScheduleModel.id == job_id).first()
+        assert sched.flow_type == "e2e"

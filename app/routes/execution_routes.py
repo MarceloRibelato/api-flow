@@ -20,6 +20,7 @@ class ExecutionRequest(BaseModel):
     environment_id: int
     name: str
     flow_id: Optional[int] = None
+    flow_type: Optional[str] = 'api' # 'api' or 'e2e'
     max_concurrency: Optional[int] = None # Added max_concurrency
 
 from app.auth import get_current_user
@@ -62,6 +63,7 @@ def trigger_execution(
         run_at=datetime.utcnow(), # One-off
         status='active',
         max_concurrency=req.max_concurrency, # Save max_concurrency
+        flow_type=req.flow_type or 'api', # Track if this is an E2E or API run
 
         company_id=current_user.company_id, # Use Auth
         user_id=current_user.id # Use Auth

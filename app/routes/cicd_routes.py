@@ -37,6 +37,7 @@ class ExecutionRequestCICD(BaseModel):
     feature_name: Optional[str] = 'all'
     environment_name: str
     execution_name: Optional[str] = None
+    flow_type: Optional[str] = 'api' # 'api' or 'e2e'
 
 # --- Token Management ---
 @router.get("/tokens", response_model=List[TokenRead])
@@ -153,7 +154,8 @@ def execute_cicd(
         run_at=datetime.now(timezone.utc),
         status='active',
         company_id=current_user.company_id,
-        user_id=current_user.id
+        user_id=current_user.id,
+        flow_type=req.flow_type or 'api'
     )
     db.add(new_schedule)
     db.commit()

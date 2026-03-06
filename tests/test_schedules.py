@@ -132,3 +132,48 @@ def test_schedule_multi_tenant_isolation(client, db_session):
     # Filter to look for User A's name just in case there are other global/test data
     names_b = [s["name"] for s in resp_b.json()]
     assert "Secret A" not in names_b
+
+
+def test_create_schedule_e2e_flow_type(client, db_session):
+    """Verifica que um schedule criado com flow_type='e2e' persiste e retorna o tipo corretamente."""
+    token = get_auth_token_and_admin(client, db_session, "sched_e2e_user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    prod_resp = client.post("/products/", headers=headers, json={"name": "E2E Sched Product"})
+    prod_id = prod_resp.json()["id"]
+
+    feat_resp = client.post("/features/", headers=headers, json={"name": "E2E Sched Feat", "product_id": prod_id})
+
+    payload = {
+        "name": "E2E Nightly Run",
+        "type": "suite",
+        "flow_type": "e2e",
+        "target_id": prod_id,
+        "cron_expression": "0 2 * * *",
+        "notifications_enabled": False
+    }
+
+    response = client.post("/schedules/", headers=headers, json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "E2E Nightly Run"
+    assert data["flow_type"] == "e2e"
+    assert data["status"] == "active"
+
+
+def test_create_schedule_api_flow_type_default(client, db_session):
+    """Verifica que o flow_type padrão é 'api' quando não especificado."""
+    token = get_auth_token_and_admin(client, db_session, "sched_api_default_user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    payload = {
+        "name": "API Default Schedule",
+        "type": "feature",
+        "target_id": 1,
+        "cron_expression": "0 6 * * *",
+    }
+
+    response = client.post("/schedules/", headers=headers, json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("flow_type", "api") == "api"
