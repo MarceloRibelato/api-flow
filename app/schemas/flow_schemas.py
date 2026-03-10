@@ -3,33 +3,30 @@ from typing import Any, Dict, List, Optional, Union
 import json
 
 class AssertionRule(BaseModel):
-    source: str  # status_code, body, header, response_time
-    property: Optional[str] = None  # path for body/header (e.g. "data.id")
-    operator: str  # eq, neq, gt, lt, contains, etc.
-    target: Any
-    
-    # Allow target to be anything but coerce it if needed? (optional for now)
+    source: str = Field(..., description="Fonte da validação (status_code, body, header, response_time)", json_schema_extra={"example": "status_code"})
+    property: Optional[str] = Field(None, description="Caminho do campo no corpo ou cabeçalho", json_schema_extra={"example": "data.id"})
+    operator: str = Field(..., description="Operador de comparação (equals, contains, etc)", json_schema_extra={"example": "equals"})
+    target: Any = Field(..., description="Valor esperado para a validação", json_schema_extra={"example": 200})
 
 class ExtractionRule(BaseModel):
-    source: str  # body, header
-    property: Optional[str] = None  # path (e.g. "data.token") or header key
-    variable: str  # Variable name to save (e.g. "AUTH_TOKEN")
-
+    source: str = Field(..., description="Origem do dado a extrair (body, header, status)", json_schema_extra={"example": "body"})
+    property: Optional[str] = Field(None, description="Caminho do campo para extração", json_schema_extra={"example": "data.token"})
+    variable: str = Field(..., description="Nome da variável onde o valor será salvo", json_schema_extra={"example": "AUTH_TOKEN"})
 
 class ApiCallSchema(BaseModel):
-    id: str
-    name: Optional[str] = "Nova Requisição"
-    method: str
-    url: str
-    headers: List[Dict[str, str]] = []
-    body: Optional[Union[str, Dict[str, Any], List[Any]]] = None
-    params: List[Dict[str, str]] = []
-    description: str = ""
-    timeout: int = 30000
-    delay: int = 0
-    parallel: bool = False
-    assertions: List[AssertionRule] = []
-    extracts: List[ExtractionRule] = []
+    id: str = Field(..., description="ID único da requisição no card", json_schema_extra={"example": "step-1"})
+    name: Optional[str] = Field("Nova Requisição", description="Nome amigável da requisição")
+    method: str = Field(..., description="Método HTTP", json_schema_extra={"example": "POST"})
+    url: str = Field(..., description="URL completa (suporta {{VAR}})", json_schema_extra={"example": "https://api.example.com/login"})
+    headers: List[Dict[str, str]] = Field([], description="Cabeçalhos da requisição")
+    body: Optional[Union[str, Dict[str, Any], List[Any]]] = Field(None, description="Corpo da requisição")
+    params: List[Dict[str, str]] = Field([], description="Parâmetros de query string")
+    description: str = Field("", description="Descrição opcional do passo")
+    timeout: int = Field(30000, description="Timeout em milissegundos")
+    delay: int = Field(0, description="Atraso antes da execução em ms")
+    parallel: bool = Field(False, description="Executar em paralelo com outras requisições do mesmo nível")
+    assertions: List[AssertionRule] = Field([], description="Lista de validações esperadas")
+    extracts: List[ExtractionRule] = Field([], description="Lista de extrações de variáveis")
 
     @field_validator('body')
     @classmethod
@@ -40,44 +37,37 @@ class ApiCallSchema(BaseModel):
             return json.dumps(v)
         return str(v)
 
-
-
 class NodeDataBasic(BaseModel):
-    name: str
-    color: str = "#10b981"
-    childCount: int = 0
-    isCollapsed: bool = False
-
+    name: str = Field(..., description="Nome exibido no nó")
+    color: str = Field("#10b981", description="Cor de destaque do nó")
+    childCount: int = Field(0, description="Número de filhos diretos")
+    isCollapsed: bool = Field(False, description="Estado de colapso visual")
 
 class NodeDataFull(BaseModel):
-    name: str
-    color: str = "#10b981"
-    description: str = ""
-    childCount: int = 0
-    isCollapsed: bool = False
-    bddScenarios: List[Dict[str, Any]] = []
-    apiCalls: List[ApiCallSchema] = []
-
-
+    name: str = Field(..., description="Nome do nó")
+    color: str = Field("#10b981", description="Cor do nó")
+    description: str = Field("", description="Descrição do objetivo do nó")
+    childCount: int = Field(0, description="Número de filhos")
+    isCollapsed: bool = Field(False, description="Estado de colapso")
+    bddScenarios: List[Dict[str, Any]] = Field([], description="Cenários BDD associados")
+    apiCalls: List[ApiCallSchema] = Field([], description="Passos de API do card")
 
 class NodeSchema(BaseModel):
-    id: str
-    type: str
-    position: Dict[str, float]
+    id: str = Field(..., description="ID único do nó (React Flow)")
+    type: str = Field("custom", description="Tipo do componente do nó")
+    position: Dict[str, float] = Field(..., description="Coordenadas X e Y")
     width: Optional[float] = None
     height: Optional[float] = None
-    hidden: bool = False
+    hidden: bool = Field(False, description="Indica se o nó está oculto")
     parentNode: Optional[str] = None
     data: NodeDataBasic
 
-
 class EdgeSchema(BaseModel):
-    id: str
-    source: str
-    target: str
-    type: str = "buttonedge"
-    animated: bool = True
-
+    id: str = Field(..., description="ID da aresta")
+    source: str = Field(..., description="ID do nó de origem")
+    target: str = Field(..., description="ID do nó de destino")
+    type: str = Field("buttonedge", description="Tipo visual da aresta")
+    animated: bool = Field(True, description="Animação de fluxo")
 
 class EnvSpecificData(BaseModel):
     description: str = ""
@@ -85,32 +75,26 @@ class EnvSpecificData(BaseModel):
     apiCalls: List[ApiCallSchema] = []
     e2eSteps: List[Dict[str, Any]] = []
 
-
 class CardDataSchema(BaseModel):
-    name: str
-    color: str = "#10b981"
-    description: str = ""
+    name: str = Field(..., description="Nome do card")
+    color: str = Field("#10b981", description="Cor do card")
+    description: str = Field("", description="Descrição detalhada")
     bddScenarios: List[Dict[str, Any]] = []
     apiCalls: List[ApiCallSchema] = []
     e2eSteps: List[Dict[str, Any]] = []
     envData: Dict[str, EnvSpecificData] = {}
 
-
-
 class FlowSaveSchema(BaseModel):
-    projectId: int
-    flowId: Optional[int] = None  # New: ID of the flow being saved
-    flow_type: str = "api"        # Distinguish between 'api' and 'e2e'
-    name: Optional[str] = None    # New: Name update
+    projectId: int = Field(..., description="ID do projeto (Feature)")
+    flowId: Optional[int] = Field(None, description="ID do fluxo no banco de dados")
+    flow_type: str = Field("api", description="Tipo de fluxo: api ou e2e")
     nodes: List[NodeSchema]
     edges: List[EdgeSchema]
     cardData: Dict[str, CardDataSchema] = {}
 
-
 class FlowCreateSchema(BaseModel):
-    projectId: int
-    name: str
-
+    projectId: int = Field(..., description="ID do projeto")
+    name: str = Field(..., description="Nome do fluxo")
 
 class FlowResponse(BaseModel):
     id: int
@@ -122,4 +106,3 @@ class FlowResponse(BaseModel):
     edges_count: int
 
     model_config = ConfigDict(from_attributes=True)
-

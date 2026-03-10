@@ -82,13 +82,15 @@ def save_flow(
                 status_code=400, detail="projectId deve ser um número positivo"
             )
 
-        return FlowService.save(db, data, company_id=current_user.company_id)
+        return FlowService.save(db, data, company_id=current_user.company_id, user_id=current_user.id)
 
     except HTTPException:
         raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Dados inválidos: {str(e)}")
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500, detail=f"Erro interno ao salvar fluxo: {str(e)}"
         )
@@ -132,3 +134,15 @@ def get_flow_stats(
         return FlowService.get_stats(db, project_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao obter estatísticas: {str(e)}")
+
+
+@router.get("/cards/inventory")
+def get_cards_inventory(
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """Retorna o inventário de cards da empresa"""
+    try:
+        return FlowService.get_cards_inventory(db, company_id=current_user.company_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao obter inventário de cards: {str(e)}")

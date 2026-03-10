@@ -2,9 +2,15 @@ import re
 
 from sqlalchemy.orm import Session
 
-from app.auth import create_access_token, get_password_hash, verify_password
+from app.auth import (
+    create_access_token, 
+    get_password_hash, 
+    verify_password, 
+    create_password_reset_token, 
+    verify_password_reset_token
+)
 from app.models.user_models import UserDB
-from app.schemas.auth_schemas import UserCreate, UserUpdate
+from app.schemas.auth_schemas import UserCreate, UserUpdate, ResetPasswordRequest
 
 
 class AuthService:
@@ -140,6 +146,45 @@ class AuthService:
         db.commit()
         db.refresh(current_user)
         return current_user
+
+    @staticmethod
+    def request_password_reset(db: Session, email: str, background_tasks):
+        user = db.query(UserDB).filter(UserDB.email == email).first()
+        if not user:
+            # For security reasons, don't reveal if user exists
+            return True
+        
+        token = create_password_reset_token(email)
+        
+        from app.config import settings
+        reset_link = f"{settings.FRONTEND_BASE_URL}/reset-password?token={token}"
+        
+        # Log for development fallback
+        print("\n" + "="*50)
+        print(f"PASSWORD RESET REQUEST FOR: {email}")
+        print(f"LINK: {reset_link}")
+        print("="*50 + "\n")
+        
+        # Send Real Email in background
+        from app.services.email_service import EmailService
+        import asyncio
+        background_tasks.add_task(EmailService.send_reset_password_email, email, reset_link)
+        
+        return True
+
+    @staticmethod
+    def reset_password_with_token(db: Session, reset_data: ResetPasswordRequest):
+        email = verify_password_reset_token(reset_data.token)
+        if not email:
+            raise ValueError("Token inválido ou expirado.")
+            
+        user = db.query(UserDB).filter(UserDB.email == email).first()
+        if not user:
+            raise ValueError("Usuário não encontrado.")
+            
+        user.hashed_password = get_password_hash(reset_data.new_password)
+        db.commit()
+        return True
 
     @staticmethod
     def create_token_response(user: UserDB):

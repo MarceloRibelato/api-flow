@@ -63,8 +63,19 @@ class PlaywrightExecutorService:
             self._playwright = sync_playwright().start()
         
         if not self._browser:
-            self._browser = self._playwright.chromium.launch(headless=True)
-            logger.info("Playwright Browser launched (Sync/Headless)")
+            self._browser = self._playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage", 
+                    "--no-sandbox", 
+                    "--disable-gpu", 
+                    "--disable-infobars",
+                    "--disable-setuid-sandbox",
+                    "--disable-web-security",
+                    "--allow-running-insecure-content"
+                ]
+            )
+            logger.info("Playwright Browser launched (Sync/Headless/Optimized)")
         
         if not self._context:
             context_args = {}
@@ -163,12 +174,17 @@ class PlaywrightExecutorService:
         step_type = step.get('type')
         name = step.get('name', 'Untitled Step')
         properties = step.get('properties', {})
-        raw_timeout = properties.get('timeout', 30000)
-        try:
-            timeout = int(raw_timeout)
-        except:
-            timeout = 30000
-            
+        # Get timeout from properties or default to 45s
+        timeout = properties.get('timeout')
+        if timeout is None:
+            timeout = 45000
+        else:
+            try:
+                timeout = int(timeout)
+            except:
+                timeout = 45000
+        
+        # Ensure a minimum timeout for Docker environments
         if timeout < 30000:
             timeout = 30000
         
@@ -202,7 +218,19 @@ class PlaywrightExecutorService:
                     if url:
                         if not url.startswith(('http://', 'https://')):
                             url = f"http://{url}"
-                        self._page.goto(url, timeout=timeout, wait_until='networkidle')
+                        
+                        # ✅ Sanitize URL for Docker (e.g. localhost -> flow-frontend)
+                        try:
+                            from app.services.flow_executor_service import FlowExecutorService
+                            sanitized_url = FlowExecutorService.sanitize_url_for_docker(url)
+                            if sanitized_url != url:
+                                logger.info(f"      🔧 Playwright Rewrote URL: {url} -> {sanitized_url}")
+                                url = sanitized_url
+                        except Exception as e:
+                            logger.warning(f"      ⚠️ Could not sanitize URL for Docker: {e}")
+
+                        # Use 'load' for better reliability in Docker when assets might be slow
+                        self._page.goto(url, timeout=timeout, wait_until='load')
                         step_result["text"] = f"Navigated to {url}"
                     else:
                         raise ValueError("URL is missing for browser step")
@@ -210,15 +238,10 @@ class PlaywrightExecutorService:
                 elif step_type == 'click':
                     selector = properties.get('selector', '')
                     if selector:
-                        # Smart wait before click - Increase to 30s for stability
                         el = target.locator(selector).first
-                        el.wait_for(state="visible", timeout=timeout)
                         el.click(timeout=timeout)
                         # Mandatory wait for React/Dynamic UI to react
-                        self._page.wait_for_timeout(1500)
-                        try:
-                            self._page.wait_for_load_state('networkidle', timeout=5000)
-                        except: pass
+                        self._page.wait_for_timeout(100)
                         step_result["text"] = f"Clicked element: {selector}"
                     else:
                         raise ValueError("Selector is missing for click step")
@@ -228,10 +251,9 @@ class PlaywrightExecutorService:
                     value = properties.get('value', '')
                     if selector:
                         el = target.locator(selector).first
-                        el.wait_for(state="visible", timeout=timeout)
                         el.fill(value, timeout=timeout)
                         # Mandatory wait for state update
-                        self._page.wait_for_timeout(500)
+                        self._page.wait_for_timeout(100)
                         # Mask sensitive fields
                         _sensitive = ('password', 'passwd', 'secret', 'token', 'pin', 'cvv')
                         display_value = '••••••' if any(s in selector.lower() for s in _sensitive) else (value[:60] + ('…' if len(value) > 60 else ''))
@@ -256,7 +278,6 @@ class PlaywrightExecutorService:
                     selector = properties.get('selector', '')
                     if selector:
                         el = target.locator(selector).first
-                        el.wait_for(state="visible", timeout=timeout)
                         el.hover(timeout=timeout)
                         step_result["text"] = f"Hovered over {selector}"
                     else:

@@ -20,14 +20,21 @@ async def proxy_request(req: ProxyRequest, request: Request):
         # 3. Dynamic URL Replacement
         target_url = req.url
         
-        # Shortcut: Bypass Nginx if targeting our own API
+        # Shortcut: Bypass Nginx if targeting our own API (backend)
         if "/api/" in target_url and any(h in target_url for h in ["localhost", "127.0.0.1", "flow-frontend"]):
-            target_url = re.sub(r'https?://[^/]+/api/', 'http://backend:8000/', target_url)
+            # Preserve the rest of the path after /api/
+            api_match = re.search(r'/api/(.*)', target_url)
+            if api_match:
+                target_url = f"http://backend:8000/{api_match.group(1)}"
         elif "localhost" in target_url or "127.0.0.1" in target_url:
-            from app.config import settings
-            gateway = settings.INTERNAL_GATEWAY_URL.rstrip('/')
-            target_url = target_url.replace("http://localhost/", f"{gateway}/")
-            target_url = target_url.replace("http://127.0.0.1/", f"{gateway}/")
+            # Better localhost handling for Docker on Windows:
+            # 1. Use host.docker.internal to reach services on the Windows host
+            # 2. Preserve ports (e.g., localhost:5000 -> host.docker.internal:5000)
+            target_url = re.sub(r'https?://(localhost|127\.0\.0\.1)(:\d+)?', 
+                               lambda m: f"http://host.docker.internal{m.group(2) if m.group(2) else ''}", 
+                               target_url)
+        elif "flow-frontend" in target_url:
+             target_url = target_url.replace("flow-frontend", "backend:8000")
 
         # Use Global HTTP Client from app state
         client = request.app.state.http_client

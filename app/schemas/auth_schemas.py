@@ -49,3 +49,10 @@ class Token(BaseModel):
 class UserApprove(BaseModel):
     role: str
     status: str = "active"
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str

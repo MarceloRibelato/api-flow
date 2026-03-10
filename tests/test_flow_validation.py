@@ -21,8 +21,9 @@ def test_save_empty_flow(client):
         "nodes": [],
         "edges": []
     }
-    
     resp = client.post("/flow/save", headers=headers, json=flow_data)
+    if resp.status_code != 200:
+        print(f"\nDEBUG: Save failed! Status: {resp.status_code}, Detail: {resp.text}\n")
     assert resp.status_code == 200
     
     # Verify load

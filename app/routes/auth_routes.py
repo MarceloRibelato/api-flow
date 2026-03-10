@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
 from app.models.user_models import UserDB
-from app.schemas.auth_schemas import Token, UserCreate, UserUpdate, LoginRequest
+from app.schemas.auth_schemas import Token, UserCreate, UserUpdate, LoginRequest, ForgotPasswordRequest, ResetPasswordRequest
 from app.services.auth_service import AuthService
 
 # Logger acquisition (inherited config)
@@ -173,3 +173,26 @@ def update_user_profile(
         error_msg = f"Erro ao atualizar perfil: {str(e)}"
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+from fastapi import BackgroundTasks
+
+@router.post("/forgot-password")
+def forgot_password(request: ForgotPasswordRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Solicita o link de reset de senha.
+    """
+    AuthService.request_password_reset(db, request.email, background_tasks)
+    return {"msg": "Se o e-mail existir, um link de reset foi enviado."}
+
+
+@router.post("/reset-password")
+def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """
+    Redefine a senha utilizando o token recebido por e-mail.
+    """
+    try:
+        AuthService.reset_password_with_token(db, request)
+        return {"msg": "Senha redefinida com sucesso."}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

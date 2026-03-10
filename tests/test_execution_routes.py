@@ -17,10 +17,10 @@ def test_trigger_execution_suite(client, db_session):
         "max_concurrency": 5
     }
 
-    # Patch execute_job and add_job so the schedule fires no real jobs
+    # Patch execute_job and the scheduler attribute of the scheduler_service instance
     with patch('app.services.scheduler_service.execute_job'), \
-         patch('app.services.scheduler_service.SchedulerService.scheduler') as mock_sched_attr:
-        mock_sched_attr.add_job = MagicMock()
+         patch('app.services.scheduler_service.scheduler_service.scheduler') as mock_sched:
+        mock_sched.add_job = MagicMock()
 
         response = client.post("/execute/create", headers=headers, json=payload)
         assert response.status_code == 200

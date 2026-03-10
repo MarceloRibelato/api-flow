@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class FrontRecordingService:
     @staticmethod
-    def save_recording(db: Session, feature_id: int, name: str, requests: List[Dict[str, Any]], interactions: List[Dict[str, Any]]):
+    def save_recording(db: Session, feature_id: int, name: str, requests: List[Dict[str, Any]], interactions: List[Dict[str, Any]], user_id: int):
         try:
             # Verify feature exists
             feature = db.query(FeatureModel).filter(FeatureModel.id == feature_id).first()
@@ -32,7 +32,7 @@ class FrontRecordingService:
             
             # AUTOMATIC FLOW GENERATION
             try:
-                FrontRecordingService.generate_flow_from_recording(db, new_recording)
+                FrontRecordingService.generate_flow_from_recording(db, new_recording, user_id)
             except Exception as fe:
                 logger.error(f"Failed to auto-generate flow: {fe}")
                 logger.error(traceback.format_exc())
@@ -112,7 +112,7 @@ class FrontRecordingService:
         finally:
             pass
     @staticmethod
-    def generate_flow_from_recording(db: Session, recording: FrontRecordingDB):
+    def generate_flow_from_recording(db: Session, recording: FrontRecordingDB, user_id: int):
         interactions = recording.interactions or []
         if not interactions:
             return
@@ -206,17 +206,42 @@ class FrontRecordingService:
                 combined_steps.append({"raw": inter, "type": "e2e", "ts": inter.get('timestamp', 0)})
             
             # Filter requests matching this step
-            # Note: We match by customNodeName OR if they are near the interactions in time?
-            # For now, stick to simple match
-            step_requests = [
-                r for r in (recording.requests or []) 
-                if r.get('customNodeName') == step["name"]
-            ]
+            # Association Strategy: match by customNodeName OR pageUrl fallback
+            step_requests = []
+            for r in (recording.requests or []):
+                # 1. Direct match by custom name (best)
+                if r.get('customNodeName') and r.get('customNodeName') == step["name"]:
+                    step_requests.append(r)
+                # 2. Fallback: Match by pageUrl if both have it (and customNodeName is absent in request)
+                elif not r.get('customNodeName'):
+                    if req_page_url and step_page_url and req_page_url == step_page_url:
+                        step_requests.append(r)
+                # 3. New Fallback: Match by timestamp (requests occurring shortly after the step interactions)
+                elif not r.get('customNodeName'):
+                    req_ts = r.get('timestamp', 0)
+                    if step["inters"]:
+                        step_start = step["inters"][0].get('timestamp', 0)
+                        step_end = step["inters"][-1].get('timestamp', 0)
+                        # If request happened during or up to 2s after the step
+                        if step_start <= req_ts <= (step_end + 2000):
+                            step_requests.append(r)
+            
             for req in step_requests:
                 combined_steps.append({"raw": req, "type": "api", "ts": req.get('timestamp', 0)})
 
             # Sort by timestamp to preserve real user flow
             combined_steps.sort(key=lambda x: x['ts'])
+
+            # Handle Orphaned Requests (not matched to any step)
+            # Find all requests that were not added to any node
+            all_req_ids_in_steps = set()
+            for s in steps:
+                for r in (s.get('matched_requests') or []): # We need to track this
+                    all_req_ids_in_steps.add(id(r))
+            
+            # This logic needs a structural rethink for simplicity:
+            # Let's just gather all requests into a "Global Requests" node if they didn't match.
+            # But the current generator is one-pass. 
 
             # 2. Process Combined Steps and Assign Order
             api_calls_payload = []
@@ -302,7 +327,7 @@ class FrontRecordingService:
             edges=edges,
             cardData=card_data
         )
-        FlowService.save(db, flow_schema_e2e, company_id)
+        FlowService.save(db, flow_schema_e2e, company_id, user_id)
         logger.info(f"✅ Auto-Generated E2E Flow for recording {recording.name}")
 
         # B. Save API Flow (Parallel)
@@ -319,5 +344,5 @@ class FrontRecordingService:
             edges=edges,
             cardData=card_data_api
         )
-        FlowService.save(db, flow_schema_api, company_id)
+        FlowService.save(db, flow_schema_api, company_id, user_id)
         logger.info(f"✅ Auto-Generated API Flow for recording {recording.name}")

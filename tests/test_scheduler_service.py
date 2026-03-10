@@ -7,6 +7,21 @@ from app.models.feature_models import FeatureModel
 from app.models.flow_models import FlowDB
 from datetime import datetime, timezone
 
+@pytest.fixture(autouse=True)
+def cleanup_scheduler():
+    """Ensure scheduler is clean before and after each test."""
+    from app.services.scheduler_service import scheduler
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+    # Clear all jobs
+    for job in scheduler.get_jobs():
+        job.remove()
+    yield
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+    for job in scheduler.get_jobs():
+        job.remove()
+
 def test_scheduler_add_remove_sync_jobs(db_session):
     service = SchedulerService()
     

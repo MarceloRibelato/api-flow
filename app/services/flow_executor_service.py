@@ -58,20 +58,21 @@ class FlowExecutorService:
              new_url = re.sub(r'(https?://)(localhost|127\.0\.0\.1)', rf'\1{settings.TARGET_URL_REPLACEMENT}', url)
              logger.info(f"      🔧 Rewrote URL (Global Override): {url} -> {new_url}")
              return new_url
-        
-        # Rule B: Standard Internal rewrite for port 80/443 (Gateway/Nginx)
-        # Normalize: ensure we catch localhost with or without trailing slash
-        if any(url.lower().startswith(p) for p in ["http://localhost", "http://127.0.0.1"]):
+        # Rule B: Standard Internal rewrite for Gateway/Nginx
+        # Catch localhost or 127.0.0.1 with any port and redirect to internal gateway
+        if "localhost" in url or "127.0.0.1" in url:
+            # If it's the backend itself (8000), keep it hitting the backend
+            if ":8000" in url:
+                new_url = url.replace("localhost", "127.0.0.1") # Keep it internal
+                return new_url
+            
+            # Otherwise, assume it's the frontend (even if port is 5173 or 3000 from recording)
             gateway = settings.INTERNAL_GATEWAY_URL.rstrip('/')
-            new_url = url.replace("http://localhost", gateway).replace("http://127.0.0.1", gateway)
-            logger.info(f"      🔧 Rewrote Internal Gateway URL: {url} -> {new_url}")
-            return new_url
-
-             
-        # Rule C: Fallback for localhost:8000 to hit backend directly
-        if ":8000" in url and ("localhost" in url or "127.0.0.1" in url):
-             new_url = url.replace("localhost", "127.0.0.1") # Keep it internal
-             return new_url
+            # Use regex to replace http(s)://localhost[:port] with the gateway
+            new_url = re.sub(r'https?://(localhost|127\.0\.0\.1)(:\d+)?', gateway, url)
+            if new_url != url:
+                logger.info(f"      🔧 Rewrote URL for Docker: {url} -> {new_url}")
+                return new_url
              
         return url
 
@@ -99,15 +100,24 @@ class FlowExecutorService:
         e2e_executor = None
 
         try:
-            # Load full flow data with cards
-            flow_data = FlowService.load(db, flow_meta['project_id'], company_id, flow_meta['id'])
+            # 1. Load full flow data with cards (Robust field access)
+            p_id = flow_meta.get('project_id') or flow_meta.get('projectId')
+            f_id = flow_meta.get('id')
+            
+            # If flow_meta already contains the nodes/edges, we can skip redundant loading
+            # but usually flow_meta only contains summary info from list_by_project.
+            if 'nodes' in flow_meta and flow_meta['nodes']:
+                flow_data = flow_meta
+            else:
+                flow_data = FlowService.load(db, p_id, company_id, f_id)
+            
             cards = flow_data.get('cardData', {})
             nodes = flow_data.get('nodes', [])
             edges = flow_data.get('edges', [])
             
-            logger.info(f"📊 [execute_flow_logic] Loaded Flow ID: {flow_meta.get('id')} - {len(nodes)} nodes, {len(edges)} edges")
+            logger.info(f"📊 [execute_flow_logic] Loaded Flow ID: {f_id} - {len(nodes)} nodes, {len(edges)} edges")
             if not nodes:
-                logger.warning("⚠️ No nodes found in flow data!")
+                logger.warning(f"⚠️ No nodes found in flow data (Flow ID: {f_id})!")
             
             # Build Graph (Adjacency List)
             adj = {n['id']: [] for n in nodes}
@@ -157,6 +167,8 @@ class FlowExecutorService:
             import copy
             base_variables_dict = copy.deepcopy(variables_dict)
 
+            final_variables = copy.deepcopy(base_variables_dict)
+
             for path_index, path_nodes in enumerate(all_paths):
                 logger.info(f"🛣️ === Executing Scenario Path {path_index + 1}/{len(all_paths)} === 🛣️")
                 
@@ -166,7 +178,7 @@ class FlowExecutorService:
                 os.makedirs(video_dir, exist_ok=True)
                 
                 # Reset states fully for each scenario path
-                variables_dict = copy.deepcopy(base_variables_dict)
+                current_path_vars = copy.deepcopy(base_variables_dict)
                 flow_session = requests.Session()
                 flow_session.trust_env = False
                 
@@ -257,7 +269,7 @@ class FlowExecutorService:
                                             e2e_executor.start(video_dir=video_dir)
                                         # Resolve variables in E2E step data
                                         step_data_str = json.dumps(step_data)
-                                        step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, variables_dict))
+                                        step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, current_path_vars))
 
                                         # Sanitize E2E URL for Docker (e.g. localhost -> flow-frontend)
                                         if step_data.get('type') == 'browser' and step_data.get('properties', {}).get('value'):
@@ -285,7 +297,7 @@ class FlowExecutorService:
                                         resp_text = str(e)
                                 else:
                                     method = step_data.get('method', 'GET')
-                                    url = FlowExecutorService.replace_vars(step_data.get('url', ''), variables_dict)
+                                    url = FlowExecutorService.replace_vars(step_data.get('url', ''), current_path_vars)
                                     
                                     if method == 'PYTHON':
                                         try:
@@ -329,7 +341,7 @@ class FlowExecutorService:
                                             headers_raw = mapping
                                         
                                         headers_json_str = json.dumps(headers_raw)
-                                        headers = json.loads(FlowExecutorService.replace_vars(headers_json_str, variables_dict))
+                                        headers = json.loads(FlowExecutorService.replace_vars(headers_json_str, current_path_vars))
                                         if not isinstance(headers, dict): headers = {}
                                         headers = {str(k): str(v) for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
 
@@ -346,7 +358,7 @@ class FlowExecutorService:
                                             params_raw = mapping
                                         
                                         params_json_str = json.dumps(params_raw)
-                                        params = json.loads(FlowExecutorService.replace_vars(params_json_str, variables_dict))
+                                        params = json.loads(FlowExecutorService.replace_vars(params_json_str, current_path_vars))
                                         if not isinstance(params, dict): params = {}
                                         params = {str(k): str(v) for k, v in params.items() if v is not None}
 
@@ -354,9 +366,9 @@ class FlowExecutorService:
                                         body_raw = step_data.get('body', '')
                                         if isinstance(body_raw, (dict, list)):
                                             body_json_str = json.dumps(body_raw)
-                                            body = FlowExecutorService.replace_vars(body_json_str, variables_dict)
+                                            body = FlowExecutorService.replace_vars(body_json_str, current_path_vars)
                                         else:
-                                            body = FlowExecutorService.replace_vars(str(body_raw), variables_dict)
+                                            body = FlowExecutorService.replace_vars(str(body_raw), current_path_vars)
                                         
                                         if body is None: body = ""
 
@@ -369,6 +381,24 @@ class FlowExecutorService:
                                         if 'auth/login' in url and body_is_urlencoded:
                                             if not ct_key: headers['Content-Type'] = 'application/x-www-form-urlencoded'
                                             elif 'json' in headers[ct_key]: headers[ct_key] = 'application/x-www-form-urlencoded'
+
+                                        # --- 3. Delay Handling ---
+                                        delay_val = step_data.get('delay')
+                                        if delay_val:
+                                            try:
+                                                # Handle millisecond strings or ints
+                                                if isinstance(delay_val, str):
+                                                    # Remove 'ms' if exists, then cast
+                                                    clean_delay = re.sub(r'[^0-9.]', '', str(delay_val))
+                                                    delay_ms = float(clean_delay) if clean_delay else 0
+                                                else:
+                                                    delay_ms = float(delay_val)
+                                                
+                                                if delay_ms > 0:
+                                                    logger.info(f"      ⏳ Sleeping for {delay_ms}ms")
+                                                    time.sleep(delay_ms / 1000.0)
+                                            except Exception as de:
+                                                logger.warning(f"      ⚠️ Invalid delay value '{delay_val}': {de}")
 
                                         start_time = time.time()
                                         resp = flow_session.request(method, url, headers=headers, data=body, params=params, timeout=30)
@@ -506,11 +536,13 @@ class FlowExecutorService:
                                                     if val is not None and r_var:
                                                         val_str = str(val)
                                                         with execution_lock:
-                                                            variables_dict[r_var] = val_str
+                                                            current_path_vars[r_var] = val_str
                                                             # Persist to DB for visibility in the environment panel
                                                             new_var = VariableCreate(name=r_var, value=val_str, project_id=product_id, environment_id=env_id, type="extracted")
                                                             VariableService.create(db, new_var)
                                                             logger.info(f"      ✅ Extracted [{r_var}] = '{val_str}'")
+                                                            # Update final variables for caller tracking
+                                                            final_variables[r_var] = val_str
                                                 except Exception as ee:
                                                     logger.error(f"        ❌ Extraction Error: {ee}")
                             except Exception as req_ex:
@@ -528,18 +560,10 @@ class FlowExecutorService:
 
                             with execution_lock:
                                 if final_error_message: 
-                                    # ONLY abort path if:
-                                    # 1. It's an API flow
-                                    # 2. Or an assertion explicitly failed
-                                    # 3. Or it's an E2E driver error
-                                    is_e2e_flow = flow_data.get('flow_type') == 'e2e' or flow_meta.get('flow_type') == 'e2e'
-                                    if not is_e2e_flow or "Assertions" in final_error_message or step_type == 'e2e' or "Driver" in final_error_message:
-                                        path_success = False
-                                        flow_fail_count += 1
-                                    else:
-                                        logger.warning(f"        ⚠️ Warning: API Step failed in E2E flow, but continuing path. Error: {final_error_message}")
-                                        # Count as success visually for the suite metrics since it's just a background trace
-                                        flow_success_count += 1
+                                    # Fail-Fast: Interrupt path on ANY primary step failure
+                                    path_success = False
+                                    flow_fail_count += 1
+                                    logger.error(f"        ❌ Step failed: {final_error_message}. Interrupting execution.")
                                 else: 
                                     flow_success_count += 1
 
@@ -646,8 +670,8 @@ class FlowExecutorService:
                 # Finalize Video Recording PER PATH
                 if e2e_executor:
                     try:
-                        logger.info(f"⏳ Waiting 5s for video to capture final state (Scenario {path_index+1})...")
-                        time.sleep(5)
+                        logger.info(f"⏳ Waiting 1s for video to capture final state (Scenario {path_index+1})...")
+                        time.sleep(1)
                         e2e_executor.stop()
                         
                         if os.path.exists(video_dir):
@@ -661,6 +685,9 @@ class FlowExecutorService:
                                 HistoryService.update_video_url_by_batch(db, batch_id, video_url)
                     except Exception as ve:
                         logger.warning(f"Video finalize failed for path: {ve}")
+
+            # Update the original variables_dict with the extracted results
+            variables_dict.update(final_variables)
 
             # Any remaining history (usually none as it is saved in loop)
             if history_buffer:

@@ -50,6 +50,38 @@ async def lifespan(app: FastAPI):
             logger.info(f"Tentativa de conexão com DB ({i+1}/{max_retries})...")
             Base.metadata.create_all(bind=engine)
             logger.info("Tabelas verificadas/criadas com sucesso")
+            
+            # Migração Manual (Garante colunas novas no PostgreSQL)
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                logger.info("Verificando colunas extras em flow_data...")
+                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS name VARCHAR(255) DEFAULT 'Fluxo Principal'"))
+                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS flow_type VARCHAR(50) DEFAULT 'api'"))
+                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS company_id INTEGER"))
+                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP"))
+                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP"))
+                
+                # Backfill automático de company_id para fluxos existentes
+                logger.info("Executando backfill de company_id...")
+                conn.execute(text("""
+                    UPDATE flow_data 
+                    SET company_id = (
+                        SELECT p.company_id 
+                        FROM products p 
+                        JOIN features f ON f.product_id = p.id 
+                        WHERE f.id = flow_data.project_id
+                    )
+                    WHERE company_id IS NULL 
+                    AND EXISTS (
+                        SELECT 1 FROM features f 
+                        JOIN products p ON f.product_id = p.id 
+                        WHERE f.id = flow_data.project_id
+                    )
+                """))
+                
+                conn.commit()
+                logger.info("Migração manual e backfill concluídos")
+            
             break
         except Exception as e:
             if i < max_retries - 1:

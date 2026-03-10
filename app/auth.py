@@ -25,11 +25,15 @@ ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 
 
 def verify_password(plain, hashed):
-    return pwd_context.verify(plain, hashed)
+    # Truncate to 72 bytes to avoid bcrypt error with long passwords
+    truncated = plain.encode('utf-8')[:72]
+    return pwd_context.verify(truncated, hashed)
 
 
 def get_password_hash(password):
-    return pwd_context.hash(password)
+    # Truncate to 72 bytes to avoid bcrypt error with long passwords
+    truncated = password.encode('utf-8')[:72]
+    return pwd_context.hash(truncated)
 
 
 import uuid
@@ -41,6 +45,22 @@ def create_access_token(data: dict):
     # Generate unique JTI
     to_encode.update({"exp": expire, "jti": str(uuid.uuid4())})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_password_reset_token(email: str):
+    expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    to_encode = {"exp": expire, "sub": email, "type": "password_reset"}
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def verify_password_reset_token(token: str) -> Optional[str]:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "password_reset":
+            return None
+        return payload.get("sub")
+    except JWTError:
+        return None
 
 
 def hash_token(token: str) -> str:
@@ -95,3 +115,13 @@ def get_current_user(
 
     # No authentication provided
     raise HTTPException(status_code=401, detail="Autenticação requerida (JWT ou API Key)")
+
+def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    api_key: Optional[str] = Depends(api_key_header),
+    db: Session = Depends(get_db)
+) -> Optional[UserDB]:
+    try:
+        return get_current_user(credentials, api_key, db)
+    except HTTPException:
+        return None
