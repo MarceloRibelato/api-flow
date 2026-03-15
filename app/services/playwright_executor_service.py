@@ -72,7 +72,12 @@ class PlaywrightExecutorService:
                     "--disable-infobars",
                     "--disable-setuid-sandbox",
                     "--disable-web-security",
-                    "--allow-running-insecure-content"
+                    "--allow-running-insecure-content",
+                    "--disable-features=site-per-process,IsolateOrigins",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    "--disable-ipc-flooding-protection"
                 ]
             )
             logger.info("Playwright Browser launched (Sync/Headless/Optimized)")
@@ -80,9 +85,10 @@ class PlaywrightExecutorService:
         if not self._context:
             context_args = {}
             if video_dir:
+                # Re-enabled video recording but at a lower resolution to explicitly prevent CPU bottleneck
                 context_args["record_video_dir"] = video_dir
-                context_args["record_video_size"] = {"width": 1280, "height": 720}
-                logger.info(f"📹 Video Recording enabled in: {video_dir}")
+                context_args["record_video_size"] = {"width": 800, "height": 600}
+                logger.info(f"📹 Video Recording enabled in: {video_dir} (Optimized 800x600 resolution)")
                 
             self._context = self._browser.new_context(**context_args)
             self._context.set_default_timeout(30000)
@@ -90,6 +96,10 @@ class PlaywrightExecutorService:
         
         if not self._page:
             self._page = self._context.new_page()
+            
+            # Auto-handle dialogs to prevent deadlocks
+            self._page.on("dialog", lambda dialog: dialog.accept())
+            
             self._install_network_listeners()
 
     def _should_capture(self, url: str) -> bool:
@@ -115,7 +125,7 @@ class PlaywrightExecutorService:
         def on_request(request):
             if not self._should_capture(request.url):
                 return
-            self._pending_requests[request.url] = {
+            self._pending_requests[request] = {
                 'method': request.method,
                 'start_ms': _time.time() * 1000
             }
@@ -123,7 +133,7 @@ class PlaywrightExecutorService:
         def on_response(response):
             if not self._should_capture(response.url):
                 return
-            pending = self._pending_requests.pop(response.url, None)
+            pending = self._pending_requests.pop(response.request, None)
             elapsed = 0
             method = response.request.method if response.request else 'GET'
             if pending:
@@ -185,8 +195,8 @@ class PlaywrightExecutorService:
                 timeout = 45000
         
         # Ensure a minimum timeout for Docker environments
-        if timeout < 30000:
-            timeout = 30000
+        if timeout < 15000:
+            timeout = 15000
         
         logger.info(f"Executing E2E step: {name} ({step_type}) [Timeout: {timeout}ms]")
         
@@ -229,8 +239,8 @@ class PlaywrightExecutorService:
                         except Exception as e:
                             logger.warning(f"      ⚠️ Could not sanitize URL for Docker: {e}")
 
-                        # Use 'load' for better reliability in Docker when assets might be slow
-                        self._page.goto(url, timeout=timeout, wait_until='load')
+                        # Use 'domcontentloaded' for better reliability and speed in Docker instead of waiting for all assets
+                        self._page.goto(url, timeout=timeout, wait_until='domcontentloaded')
                         step_result["text"] = f"Navigated to {url}"
                     else:
                         raise ValueError("URL is missing for browser step")
@@ -239,9 +249,19 @@ class PlaywrightExecutorService:
                     selector = properties.get('selector', '')
                     if selector:
                         el = target.locator(selector).first
-                        el.click(timeout=timeout)
-                        # Mandatory wait for React/Dynamic UI to react
-                        self._page.wait_for_timeout(100)
+                        try:
+                            import time
+                            t1 = time.time()
+                            # Perform forced click to bypass actionability wait times, return immediately
+                            el.click(timeout=timeout, force=True, no_wait_after=True)
+                            t2 = time.time()
+                            logger.info(f"⏱️ Click timing: click_exec={round((t2-t1)*1000)}ms")
+                        except Exception as click_err:
+                            logger.warning(f"Forced click failed, error: {click_err}")
+                            raise click_err
+                            
+                        # Brief wait for UI to handle event
+                        self._page.wait_for_timeout(50)
                         step_result["text"] = f"Clicked element: {selector}"
                     else:
                         raise ValueError("Selector is missing for click step")
@@ -251,9 +271,17 @@ class PlaywrightExecutorService:
                     value = properties.get('value', '')
                     if selector:
                         el = target.locator(selector).first
-                        el.fill(value, timeout=timeout)
-                        # Mandatory wait for state update
-                        self._page.wait_for_timeout(100)
+                        try:
+                            import time
+                            t1 = time.time()
+                            el.fill(value, timeout=timeout, force=True, no_wait_after=True)
+                            t2 = time.time()
+                            logger.info(f"⏱️ Type timing: fill_exec={round((t2-t1)*1000)}ms")
+                        except Exception as type_err:
+                            logger.warning(f"Forced fill failed, error: {type_err}")
+                            raise type_err
+                        # Minimal wait for state
+                        self._page.wait_for_timeout(50)
                         # Mask sensitive fields
                         _sensitive = ('password', 'passwd', 'secret', 'token', 'pin', 'cvv')
                         display_value = '••••••' if any(s in selector.lower() for s in _sensitive) else (value[:60] + ('…' if len(value) > 60 else ''))

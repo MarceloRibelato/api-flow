@@ -22,6 +22,8 @@ class ExecutionRequest(BaseModel):
     flow_id: Optional[int] = None
     flow_type: Optional[str] = 'api' # 'api' or 'e2e'
     max_concurrency: Optional[int] = None # Added max_concurrency
+    capture_video: Optional[bool] = False # Optional flag to record video
+    capture_screenshot: Optional[bool] = False # Optional flag to capture per-step screenshots
 
 from app.auth import get_current_user
 from app.models.user_models import UserDB
@@ -64,6 +66,8 @@ def trigger_execution(
         status='active',
         max_concurrency=req.max_concurrency, # Save max_concurrency
         flow_type=req.flow_type or 'api', # Track if this is an E2E or API run
+        capture_video=req.capture_video,
+        capture_screenshot=req.capture_screenshot,
 
         company_id=current_user.company_id, # Use Auth
         user_id=current_user.id # Use Auth
@@ -105,7 +109,7 @@ def get_execution_pdf(
         raise HTTPException(status_code=404, detail="Execution not found or no data")
         
     return Response(
-        content=pdf_bytes,
+        content=bytes(pdf_bytes),
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=report_{schedule_id}.pdf"}
     )
@@ -125,7 +129,7 @@ def get_e2e_execution_pdf(
         raise HTTPException(status_code=404, detail="E2E Execution not found or no data")
         
     return Response(
-        content=pdf_bytes,
+        content=bytes(pdf_bytes),
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=e2e_report_{schedule_id}.pdf"}
     )

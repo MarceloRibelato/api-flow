@@ -1,97 +1,55 @@
-import logging
-import time
-import uuid
+import copy
+import concurrent.futures
 import json
+import logging
+import os
 import re
-from datetime import datetime
-import requests
+import time
 import threading
-from jsonschema import validate, ValidationError
+import uuid
+from datetime import datetime
+
+import requests
 from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.database import SessionLocal
+from app.models.feature_models import FeatureModel
+from app.models.flow_models import FlowDB
+from app.schemas.history_schemas import ExecutionHistoryCreate
+from app.schemas.variable_schemas import VariableCreate
 from app.services.flow_service import FlowService
 from app.services.history_service import HistoryService
-from app.schemas.history_schemas import ExecutionHistoryCreate
 from app.services.variable_service import VariableService
-from app.schemas.variable_schemas import VariableCreate
+from app.services.variable_resolver import replace_vars as _replace_vars
+from app.services.assertion_engine import evaluate_all_assertions
+from app.services.extraction_engine import process_extractions
+from app.services.url_utils import (
+    sanitize_url_for_docker as _sanitize_url,
+    is_blocked_domain as _is_blocked_domain,
+    ensure_absolute_url,
+    ensure_protocol,
+)
 
 logger = logging.getLogger(__name__)
 
 class FlowExecutorService:
+    # ── Delegating wrappers for backward compatibility ──
     @staticmethod
     def replace_vars(text, variables):
-        if not text or not isinstance(text, str): return text
-        def replacer(match):
-            var_name = match.group(1).strip().upper() # Normalize to UPPER
-            
-            # 1. Direct Lookup (Fastest)
-            if var_name in variables:
-                val = variables[var_name]
-                # If it's a DB Object (has .value)
-                if hasattr(val, 'value'):
-                    return str(val.value)
-                # If it's a direct value (extracted string)
-                return str(val)
-            
-            # 2. Fallback Search (Slower - for case mismatch handling or object scanning)
-            # Only iterate objects that have 'name' attribute
-            for v in variables.values():
-                if hasattr(v, 'name') and v.name.upper() == var_name:
-                    logger.debug(f"    🔍 Replaced '{{match.group(1)}}' with '{v.value}' (Fallback Match)")
-                    return str(v.value)
-            
-            # 3. Not Found - Return original placeholder
-            logger.warning(f"    ⚠️ Variable '{var_name}' NOT FOUND. Available: {list(variables.keys())}")
-            return match.group(0)
-
-        return re.sub(r'\{\{([\w\.\-_]+)\}\}', replacer, text)
+        return _replace_vars(text, variables)
 
     @staticmethod
     def sanitize_url_for_docker(url: str) -> str:
-        """
-        Rewrites localhost URLs to use internal gateway or specific overrides when running inside Docker.
-        """
-        if not url: return url
-        from app.config import settings
-        
-        # Rule A: User-specified global replacement for localhost
-        if settings.TARGET_URL_REPLACEMENT and ("localhost" in url or "127.0.0.1" in url):
-             new_url = re.sub(r'(https?://)(localhost|127\.0\.0\.1)', rf'\1{settings.TARGET_URL_REPLACEMENT}', url)
-             logger.info(f"      🔧 Rewrote URL (Global Override): {url} -> {new_url}")
-             return new_url
-        # Rule B: Standard Internal rewrite for Gateway/Nginx
-        # Catch localhost or 127.0.0.1 with any port and redirect to internal gateway
-        if "localhost" in url or "127.0.0.1" in url:
-            # If it's the backend itself (8000), keep it hitting the backend
-            if ":8000" in url:
-                new_url = url.replace("localhost", "127.0.0.1") # Keep it internal
-                return new_url
-            
-            # Otherwise, assume it's the frontend (even if port is 5173 or 3000 from recording)
-            gateway = settings.INTERNAL_GATEWAY_URL.rstrip('/')
-            # Use regex to replace http(s)://localhost[:port] with the gateway
-            new_url = re.sub(r'https?://(localhost|127\.0\.0\.1)(:\d+)?', gateway, url)
-            if new_url != url:
-                logger.info(f"      🔧 Rewrote URL for Docker: {url} -> {new_url}")
-                return new_url
-             
-        return url
+        return _sanitize_url(url)
 
     @staticmethod
     def is_blocked_domain(url: str) -> bool:
-        BLACKLIST = [
-            "smaato.net", "temu.com", "weborama.fr", "rfihub.com", 
-            "doubleclick.net", "google-analytics.com", "criteo.com",
-            "pubmatic.com", "adnxs.com", "rubiconproject.com", "openx.net"
-        ]
-        return any(domain in url for domain in BLACKLIST)
+        return _is_blocked_domain(url)
 
     @staticmethod
-    def execute_flow_logic(db: Session, flow_meta, product_id, env_id, company_id, variables_dict, feature_name: str = None, schedule_id: int = None, user_id: int = 1):
-        import uuid
-        import time
-        import os
-        from app.services.history_service import HistoryService
-        from app.schemas.history_schemas import ExecutionHistoryCreate
+    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False):
+        # (imports now at top of file)
 
         base_batch_id = f"sched_{uuid.uuid4().hex}"
         history_buffer = []
@@ -164,7 +122,6 @@ class FlowExecutorService:
             flow_success_count = 0
             flow_fail_count = 0 
 
-            import copy
             base_variables_dict = copy.deepcopy(variables_dict)
 
             final_variables = copy.deepcopy(base_variables_dict)
@@ -224,6 +181,10 @@ class FlowExecutorService:
                                 if isinstance(assertions_val, str):
                                     try: assertions_val = json.loads(assertions_val)
                                     except: assertions_val = []
+                                extracts_val = props.get('extracts', [])
+                                if isinstance(extracts_val, str):
+                                    try: extracts_val = json.loads(extracts_val)
+                                    except: extracts_val = []
                                 api_data = {
                                     'id': e.get('id'),
                                     'name': e.get('name', 'API Request (E2E)'),
@@ -233,7 +194,7 @@ class FlowExecutorService:
                                     'body': props.get('body', ''),
                                     'assertions': assertions_val,
                                     'parallel': False,
-                                    'extracts': []
+                                    'extracts': extracts_val
                                 }
                                 all_steps.append({'data': api_data, 'type': 'api'})
                             else:
@@ -266,7 +227,7 @@ class FlowExecutorService:
                                         if not e2e_executor:
                                             from app.services.playwright_executor_service import PlaywrightExecutorService
                                             e2e_executor = PlaywrightExecutorService()
-                                            e2e_executor.start(video_dir=video_dir)
+                                            e2e_executor.start(video_dir=video_dir if capture_video else None)
                                         # Resolve variables in E2E step data
                                         step_data_str = json.dumps(step_data)
                                         step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, current_path_vars))
@@ -281,7 +242,7 @@ class FlowExecutorService:
 
                                         # Execute real Playwright step
                                         start_time = time.time()
-                                        resp = e2e_executor.execute_step(step_data, db=db, user_id=user_id)
+                                        resp = e2e_executor.execute_step(step_data, capture_screenshot=capture_screenshot, db=db, user_id=user_id)
                                         duration = int((time.time() - start_time) * 1000)
                                         
                                         resp_status = resp['status']
@@ -305,7 +266,7 @@ class FlowExecutorService:
                                                 from app.services.playwright_executor_service import PlaywrightExecutorService
                                                 e2e_executor = PlaywrightExecutorService()
                                                 e2e_executor.start()
-                                            resp = e2e_executor.execute_step(step_data, db=db, user_id=user_id)
+                                            resp = e2e_executor.execute_step(step_data, capture_screenshot=capture_screenshot, db=db, user_id=user_id)
                                             resp_status = resp['status']
                                             resp_reason = resp['reason']
                                             resp_text = resp['text']
@@ -315,11 +276,7 @@ class FlowExecutorService:
                                             resp_reason = "E2E Driver Error"
                                             resp_text = str(e)
                                     else:
-                                        if url.startswith('/'):
-                                            from app.config import settings
-                                            base = settings.API_BASE_URL.rstrip('/')
-                                            path = url.lstrip('/')
-                                            url = f"{base}/{path}"
+                                        url = ensure_absolute_url(url)
                                         
                                         # ✅ RE-ENABLED: Normalize URL for Docker internal networking
                                         url = FlowExecutorService.sanitize_url_for_docker(url)
@@ -413,138 +370,23 @@ class FlowExecutorService:
                                         except ValueError:
                                             resp_json = None
 
-                                        # --- Assertions ---
+                                        # --- Assertions (delegated to assertion_engine) ---
                                         assertions_raw = step_data.get('assertions', [])
-                                        for assertion in assertions_raw:
-                                            try:
-                                                # Normalize Source
-                                                src_raw = assertion.get('source') or assertion.get('type') or 'statusCode'
-                                                src = 'statusCode' if src_raw in ['status', 'statusCode'] else src_raw
-                                                
-                                                raw_operator = assertion.get('operator', 'equals')
-                                                op = str(raw_operator).lower()
-                                                
-                                                target = assertion.get('value') if assertion.get('value') is not None else assertion.get('target')
-                                                prop = assertion.get('property') or assertion.get('path')
-                                                
-                                                actual_val = None
-                                                is_success = False
-                                                
-                                                if src == 'statusCode':
-                                                    actual_val = resp_status
-                                                    try:
-                                                        t_int = int(str(target).strip())
-                                                        if op in ['equals', 'eq', '==', 'is']: is_success = (actual_val == t_int)
-                                                        elif op in ['notequals', 'neq', '!=']: is_success = (actual_val != t_int)
-                                                        elif op in ['gt', 'greaterthan', '>']: is_success = (actual_val > t_int)
-                                                        elif op in ['lt', 'lessthan', '<']: is_success = (actual_val < t_int)
-                                                        elif op in ['gte', '>=']: is_success = (actual_val >= t_int)
-                                                        elif op in ['lte', '<=']: is_success = (actual_val <= t_int)
-                                                    except: is_success = False
-                                                elif src == 'header':
-                                                    # Case insensitive header lookup
-                                                    h_key = str(prop).lower() if prop else ""
-                                                    actual_val = next((v for k, v in resp_headers.items() if k.lower() == h_key), None)
-                                                    str_act = str(actual_val) if actual_val is not None else ""
-                                                    str_tar = str(target)
-                                                    if op in ['equals', 'eq', 'is']: is_success = (str_act == str_tar)
-                                                    elif op in ['contains', 'in']: is_success = (str_tar in str_act)
-                                                    elif op in ['exists', 'not_null']: is_success = (actual_val is not None)
-                                                elif src == 'responseTime':
-                                                    actual_val = duration
-                                                    try:
-                                                        t_int = int(str(target).strip())
-                                                        if op in ['lt', 'lessthan', '<']: is_success = (actual_val < t_int)
-                                                        elif op in ['lte', '<=']: is_success = (actual_val <= t_int)
-                                                        elif op in ['gt', 'greaterthan', '>']: is_success = (actual_val > t_int)
-                                                        elif op in ['equals', 'eq']: is_success = (actual_val == t_int)
-                                                    except: is_success = False
-                                                elif src == 'body':
-                                                    if op == 'exists':
-                                                        # Check if path exists
-                                                        if not prop: 
-                                                            is_success = (resp_json is not None)
-                                                            actual_val = "Body Received" if is_success else None
-                                                        else:
-                                                            parts = str(prop).split('.')
-                                                            curr = resp_json
-                                                            for p in parts:
-                                                                if isinstance(curr, dict) and p in curr: curr = curr[p]
-                                                                elif isinstance(curr, list):
-                                                                    try: curr = curr[int(p)]
-                                                                    except: curr = None; break
-                                                                else: curr = None; break
-                                                            is_success = (curr is not None)
-                                                            actual_val = str(curr) if is_success else None
-                                                    elif resp_json:
-                                                        # Path validation
-                                                        parts = str(prop).split('.') if prop else []
-                                                        curr = resp_json
-                                                        for p in parts:
-                                                            if isinstance(curr, dict) and p in curr: curr = curr[p]
-                                                            elif isinstance(curr, list):
-                                                                try: curr = curr[int(p)]
-                                                                except: curr = None; break
-                                                            else: curr = None; break
-                                                        actual_val = curr
-                                                        str_act = str(actual_val) if actual_val is not None else ""
-                                                        str_tar = str(target)
-                                                        if op in ['equals', 'eq', 'is']: is_success = (str_act == str_tar)
-                                                        elif op in ['contains', 'in']: is_success = (str_tar in str_act)
-                                                        elif op in ['exists', 'not_null']: is_success = (actual_val is not None)
-                                                elif src == 'contract':
-                                                    # Placeholder for schema validation if target is 'Valid Contract'
-                                                    is_success = True if resp_status < 400 else False
-                                                    actual_val = "Schema Match" if is_success else "Invalid"
-                                                
-                                                assertion_results.append({
-                                                    "source": src_raw, "operator": raw_operator, "target": str(target),
-                                                    "actual": str(actual_val), "success": is_success
-                                                })
-                                                if not is_success: assertions_passed = False
-                                            except Exception as ae:
-                                                logger.error(f"        ❌ Assertion Error: {ae}")
-                                                assertions_passed = False
+                                        if assertions_raw:
+                                            assertion_results, assertions_passed = evaluate_all_assertions(
+                                                assertions_raw, resp_status, resp_headers,
+                                                resp_json, resp_text, duration
+                                            )
 
-                                        # --- Extraction ---
-                                        # NOTE: In parallel mode, extractions are applied as they finish.
-                                        # Since they all use the shared `variables_dict`, subsequent steps in the FLOW
-                                        # will see them, but sibling steps in the SAME NODE might not (race condition).
+                                        # --- Extraction (delegated to extraction_engine) ---
                                         extracts = step_data.get('extracts', [])
                                         if extracts:
-                                            for rule in extracts:
-                                                try:
-                                                    r_source = rule.get('source', 'body')
-                                                    r_prop = rule.get('property', '')
-                                                    r_var = rule.get('variable', '').strip().upper()
-                                                    
-                                                    val = None
-                                                    if r_source == 'header':
-                                                        h_key = r_prop.lower()
-                                                        val = next((v for k, v in resp_headers.items() if k.lower() == h_key), None)
-                                                    elif r_source == 'body' and resp_json:
-                                                        parts = r_prop.split('.')
-                                                        curr = resp_json
-                                                        for p in parts:
-                                                            if isinstance(curr, dict) and p in curr: curr = curr[p]
-                                                            elif isinstance(curr, list):
-                                                                try: curr = curr[int(p)]
-                                                                except: curr = None; break
-                                                            else: curr = None; break
-                                                        val = curr
-                                                    
-                                                    if val is not None and r_var:
-                                                        val_str = str(val)
-                                                        with execution_lock:
-                                                            current_path_vars[r_var] = val_str
-                                                            # Persist to DB for visibility in the environment panel
-                                                            new_var = VariableCreate(name=r_var, value=val_str, project_id=product_id, environment_id=env_id, type="extracted")
-                                                            VariableService.create(db, new_var)
-                                                            logger.info(f"      ✅ Extracted [{r_var}] = '{val_str}'")
-                                                            # Update final variables for caller tracking
-                                                            final_variables[r_var] = val_str
-                                                except Exception as ee:
-                                                    logger.error(f"        ❌ Extraction Error: {ee}")
+                                            extracted = process_extractions(
+                                                extracts, resp_headers, resp_json,
+                                                current_path_vars, lock=execution_lock,
+                                                db=db, product_id=product_id, env_id=env_id
+                                            )
+                                            final_variables.update(extracted)
                             except Exception as req_ex:
                                 logger.error(f"Request failed: {req_ex}")
                                 resp_status = 500
@@ -584,7 +426,8 @@ class FlowExecutorService:
                                 response_time=duration,
                                 environment_id=env_id,
                                 error_message=final_error_message,
-                                assertions=assertion_results
+                                assertions=assertion_results,
+                                execution_type="web" if is_e2e_flow else "api"
                             )
                             
                             # The main action step (e.g., Click, Type) is appended FIRST
@@ -612,7 +455,8 @@ class FlowExecutorService:
                                         response_time=req['duration_ms'],
                                         environment_id=env_id,
                                         error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
-                                        assertions=None
+                                        assertions=None,
+                                        execution_type="web" if is_e2e_flow else "api"
                                     )
                                     history_buffer.append(bg_hist)
                                     
@@ -643,7 +487,6 @@ class FlowExecutorService:
                                         i += 1
                                     
                                     logger.info(f"      ⚡ PARALLEL BATCH: Running {len(parallel_batch)} steps for Node {current_id}")
-                                    import concurrent.futures
                                     with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_batch)) as node_executor:
                                         list(node_executor.map(execute_step_internal, parallel_batch))
                                     
@@ -672,6 +515,35 @@ class FlowExecutorService:
                     try:
                         logger.info(f"⏳ Waiting 1s for video to capture final state (Scenario {path_index+1})...")
                         time.sleep(1)
+                        
+                        # Catch lingering API calls right before we tear down the browser
+                        final_intercepted = e2e_executor.pop_captured_requests()
+                        if final_intercepted:
+                            final_buffer = []
+                            for req in final_intercepted:
+                                bg_hist = ExecutionHistoryCreate(
+                                    batch_id=batch_id,
+                                    api_id=None,
+                                    api_name=f"{req['method']} {(req['url'][:40] + '...') if len(req['url']) > 40 else req['url']}",
+                                    project_id=product_id,
+                                    flow_id=flow_meta['id'],
+                                    node_id=None,
+                                    schedule_id=schedule_id,
+                                    feature_name=feature_name,
+                                    node_name="Finalização (Background)",
+                                    method=req['method'],
+                                    url=req['url'],
+                                    status_code=req['status'],
+                                    response_body="", 
+                                    response_time=req['duration_ms'],
+                                    environment_id=env_id,
+                                    error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
+                                    assertions=None,
+                                    execution_type="web" if is_e2e_flow else "api"
+                                )
+                                final_buffer.append(bg_hist)
+                            HistoryService.save_batch(db, final_buffer, user_id)
+                            
                         e2e_executor.stop()
                         
                         if os.path.exists(video_dir):
@@ -703,7 +575,6 @@ class FlowExecutorService:
 
     @staticmethod
     def get_merged_variables(db: Session, product_id: int, env_id: int):
-        from app.services.variable_service import VariableService
         from app.services.environment_service import EnvironmentService
         
         logger.info(f"🔍 [get_merged_variables] Fetching vars for Product: {product_id}, Env: {env_id}")
@@ -733,12 +604,11 @@ class FlowExecutorService:
         return variables
 
     @staticmethod
-    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api'):
+    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False):
         """
         Executes all flows within a specific feature.
         """
         from app.services.feature_service import FeatureService
-        from app.services.flow_service import FlowService
         
         feature = FeatureService.get_by_id(db, feature_id, company_id)
         if not feature:
@@ -772,7 +642,7 @@ class FlowExecutorService:
             if len(flows) > 1:
                 logger.info(f"ℹ️  Selecting flow '{latest_flow.get('name')}' (ID: {latest_flow.get('id')}, Type: {latest_flow.get('flow_type')}) for execution.")
             
-            s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id)
+            s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot)
             success_count += s
             fail_count += f
         else:
@@ -781,19 +651,11 @@ class FlowExecutorService:
         return success_count, fail_count
 
     @staticmethod
-    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api'):
+    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False):
         """
         Executes a single specific flow.
         """
-        from app.services.flow_service import FlowService
-        from app.models.feature_models import FeatureModel
-        
         # 1. Load Flow Metadata
-        # We need project_id first to call load, but FlowService.load tries to look it up if flow_id is passed?
-        # Actually FlowService.load signature is (db, project_id, company_id, flow_id). 
-        # It requires project_id to verify ownership.
-        # So we need to fetch the flow DB object first to get the project_id.
-        from app.models.flow_models import FlowDB
         flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
         if not flow:
             logger.error(f"Flow {flow_id} not found")
@@ -825,16 +687,13 @@ class FlowExecutorService:
         variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
 
         # 5. Execute
-        return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id)
+        return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot)
 
     @staticmethod
-    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api'):
+    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False):
         """
         Executes all features within a product.
         """
-        from app.models.feature_models import FeatureModel
-        from app.services.flow_service import FlowService
-
         feature_objs = db.query(FeatureModel).filter(FeatureModel.product_id == product_id).all()
         features = [{'id': f.id, 'name': f.name, 'product_id': f.product_id} for f in feature_objs]
         
@@ -842,9 +701,7 @@ class FlowExecutorService:
             logger.warning(f"No features found for product {product_id}")
             return 0, 0
 
-        if not features:
-            logger.warning(f"No features found for product {product_id}")
-            return 0, 0
+
 
         # RAW VARIABLES (Objects)
         raw_variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
@@ -863,7 +720,7 @@ class FlowExecutorService:
 
         logger.info(f"🚀 Executing Suite for Product {product_id} - {len(features)} Features")
 
-        import concurrent.futures
+
 
         # Worker Function for Parallel Execution
         def process_feature(feature):
@@ -872,7 +729,6 @@ class FlowExecutorService:
             try:
                 # Create a NEW DB Session for this thread/feature to avoid sharing session across threads
                 # Session is not thread-safe!
-                from app.database import SessionLocal
                 thread_db = SessionLocal()
                 
                 try:
@@ -889,7 +745,7 @@ class FlowExecutorService:
                         s, f = FlowExecutorService.execute_flow_logic(
                             thread_db, latest_flow, product_id, env_id, company_id, 
                             variables.copy(), # Copy vars to avoid contamination
-                            feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id
+                            feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot
                         )
                         f_success = s
                         f_fail = f
@@ -902,7 +758,6 @@ class FlowExecutorService:
 
         # Run Features in Parallel
         # Adjust max_workers as needed via env var MAX_CONCURRENT_FEATURES (default 5) or override
-        from app.config import settings
         max_workers = max_concurrency if max_concurrency else settings.MAX_CONCURRENT_FEATURES
         
         logger.info(f"🚀 Starting parallel execution with {max_workers} workers")

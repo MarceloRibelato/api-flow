@@ -57,6 +57,7 @@ class ApiExecutionHistory(Base):
     processed_url = Column(Text, nullable=True)
     assertions = Column(JSON, nullable=True)
     video_url = Column(String(500), nullable=True) # Added for E2E recordings
+    execution_type = Column(String(50), index=True, default="api")  # 'api' or 'web'
 
 
     # Timestamps
@@ -119,6 +120,7 @@ class ApiExecutionHistoryArchive(Base):
     processed_url = Column(Text, nullable=True)
     assertions = Column(JSON, nullable=True)
     video_url = Column(String(500), nullable=True) # Added for E2E recordings
+    execution_type = Column(String(50), index=True, default="api")  # 'api' or 'web'
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

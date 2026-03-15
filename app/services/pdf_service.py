@@ -27,7 +27,7 @@ class PDFService:
         if not schedule:
             return None
             
-        history = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.schedule_id == schedule_id).order_by(ApiExecutionHistory.created_at).all()
+        history = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.schedule_id == schedule_id).order_by(ApiExecutionHistory.id.asc()).all()
         
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
@@ -342,7 +342,7 @@ class PDFService:
 
         history_all = db.query(ApiExecutionHistory).filter(
             ApiExecutionHistory.schedule_id == schedule_id
-        ).order_by(ApiExecutionHistory.created_at).all()
+        ).order_by(ApiExecutionHistory.id.asc()).all()
 
         # Fallback: if no direct schedule match, try to find via the most recent batch_id
         # that belongs to this schedule (useful when schedule was re-used or ID mismatch)
@@ -356,7 +356,7 @@ class PDFService:
             if recent and recent.batch_id:
                 history_all = db.query(ApiExecutionHistory).filter(
                     ApiExecutionHistory.batch_id == recent.batch_id
-                ).order_by(ApiExecutionHistory.created_at).all()
+                ).order_by(ApiExecutionHistory.id.asc()).all()
 
         if not history_all: return None
 

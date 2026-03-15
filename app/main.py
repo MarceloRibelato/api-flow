@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
+from app.config import settings
 from app.database import Base, engine, SessionLocal
 from app.utils.logger import setup_logging
 from app.services.scheduler_service import scheduler_service
@@ -51,36 +52,18 @@ async def lifespan(app: FastAPI):
             Base.metadata.create_all(bind=engine)
             logger.info("Tabelas verificadas/criadas com sucesso")
             
-            # Migração Manual (Garante colunas novas no PostgreSQL)
-            from sqlalchemy import text
-            with engine.connect() as conn:
-                logger.info("Verificando colunas extras em flow_data...")
-                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS name VARCHAR(255) DEFAULT 'Fluxo Principal'"))
-                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS flow_type VARCHAR(50) DEFAULT 'api'"))
-                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS company_id INTEGER"))
-                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP"))
-                conn.execute(text("ALTER TABLE flow_data ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP"))
-                
-                # Backfill automático de company_id para fluxos existentes
-                logger.info("Executando backfill de company_id...")
-                conn.execute(text("""
-                    UPDATE flow_data 
-                    SET company_id = (
-                        SELECT p.company_id 
-                        FROM products p 
-                        JOIN features f ON f.product_id = p.id 
-                        WHERE f.id = flow_data.project_id
-                    )
-                    WHERE company_id IS NULL 
-                    AND EXISTS (
-                        SELECT 1 FROM features f 
-                        JOIN products p ON f.product_id = p.id 
-                        WHERE f.id = flow_data.project_id
-                    )
-                """))
-                
-                conn.commit()
-                logger.info("Migração manual e backfill concluídos")
+            # Run Alembic migrations (replaces the old manual ALTER TABLE statements)
+            try:
+                from alembic.config import Config as AlembicConfig
+                from alembic import command as alembic_command
+                import os
+
+                alembic_cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), '..', 'alembic.ini'))
+                alembic_cfg.set_main_option("sqlalchemy.url", str(engine.url))
+                alembic_command.upgrade(alembic_cfg, "head")
+                logger.info("Alembic migrations executadas com sucesso")
+            except Exception as alembic_err:
+                logger.warning(f"Alembic migration skipped (may need manual run): {alembic_err}")
             
             break
         except Exception as e:
@@ -104,7 +87,7 @@ async def lifespan(app: FastAPI):
 
     # Init Global HTTP Client (Persistent Connection Pool)
     # verify=False is often useful for local dev with self-signed certs, fitting the 'proxy' nature here
-    app.state.http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True, verify=False)
+    app.state.http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True, verify=settings.VERIFY_SSL)
     logger.info("Global HTTP Client initialized")
 
     yield
@@ -128,9 +111,10 @@ app = FastAPI(
 )
 
 # Configuração Middlewares
+allowed_origins = settings.ALLOWED_ORIGINS.split(",") if settings.ALLOWED_ORIGINS else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -191,31 +175,22 @@ os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 app.mount("/screenshots", StaticFiles(directory=SCREENSHOT_DIR), name="screenshots")
 
 # Middleware para log de requests
+SKIP_LOG_PATHS = {"/", "/status", "/favicon.ico"}
+
 @app.middleware("http")
 async def log_requests(request, call_next):
-    # Skip log for health check to reduce noise
-    if request.url.path == "/":
+    # Skip log for health check and static paths to reduce noise
+    if request.url.path in SKIP_LOG_PATHS or request.url.path.startswith(("/videos/", "/screenshots/")):
         return await call_next(request)
 
-    logger.info(f"REQUEST: {request.method} {request.url}")
-    # try:
-    #     body = await request.body()
-    #     if body:
-    #         logger.info(f"REQUEST BODY: {body.decode('utf-8', errors='ignore')[:1000]}")
-    # except:
-    #     pass
+    logger.debug(f"REQUEST: {request.method} {request.url}")
 
     try:
         response = await call_next(request)
-        logger.info(f"RESPONSE: {request.method} {request.url} - Status: {response.status_code}")
-        
-        # Log response body for 422
-        if response.status_code == 422:
-            try:
-                # We can try to peek at the response if it was a 422
-                pass
-            except:
-                pass
+        if response.status_code >= 400:
+            logger.warning(f"RESPONSE: {request.method} {request.url} - Status: {response.status_code}")
+        else:
+            logger.debug(f"RESPONSE: {request.method} {request.url} - Status: {response.status_code}")
         return response
     except Exception as e:
         logger.error(f"ERROR in {request.method} {request.url}: {str(e)}")

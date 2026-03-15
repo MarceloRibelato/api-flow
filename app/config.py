@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     MAIL_FROM: str = "noreply@flow.com"
 
+    # Security
+    ALLOWED_ORIGINS: str = ""  # Comma-separated list, e.g. "http://localhost:5173,http://flow.qa"
+    VERIFY_SSL: bool = False   # Set to True in production
+
     model_config = SettingsConfigDict(
         env_file=ENV_PATH, env_file_encoding="utf-8", extra="ignore"
     )

@@ -44,6 +44,7 @@ class ExecutionHistoryBase(BaseModel):
     environment_name: Optional[str] = None
     assertions: Optional[List[AssertionResult]] = None
     video_url: Optional[str] = None  # Added for E2E recordings
+    execution_type: Optional[str] = "api"  # 'api' or 'web'
 
     @field_validator('request_headers', 'request_params', 'response_headers', 'variables_used', mode='before')
     @classmethod
@@ -107,6 +108,7 @@ class ExecutionHistorySummary(BaseModel):
     response_body: Optional[Any] = None # Added for visibility (used for screenshots)
     assertions: Optional[List[AssertionResult]] = None # Added assertions for report summary
     video_url: Optional[str] = None  # Added for E2E recordings
+    execution_type: Optional[str] = "api"  # 'api' or 'web'
     
     model_config = ConfigDict(from_attributes=True)
 

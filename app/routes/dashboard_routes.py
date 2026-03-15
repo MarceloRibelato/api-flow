@@ -16,10 +16,11 @@ def get_metrics(
     environment_id: int = None,
     start_date: str = None, 
     end_date: str = None, 
+    execution_type: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
-    return DashboardService.get_summary_stats(db, days, project_id, flow_id, environment_id, valid_start, valid_end)
+    return DashboardService.get_summary_stats(db, days, project_id, flow_id, environment_id, valid_start, valid_end, execution_type)
 
 @router.get("/failures")
 def get_failures(
@@ -29,10 +30,11 @@ def get_failures(
     environment_id: int = None,
     start_date: str = None,
     end_date: str = None,
+    execution_type: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
-    return DashboardService.get_recent_failures(db, limit, project_id, flow_id, environment_id, valid_start, valid_end)
+    return DashboardService.get_recent_failures(db, limit, project_id, flow_id, environment_id, valid_start, valid_end, execution_type)
 
 @router.get("/slowest")
 def get_slowest(
@@ -42,10 +44,11 @@ def get_slowest(
     environment_id: int = None,
     start_date: str = None,
     end_date: str = None,
+    execution_type: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
-    return DashboardService.get_slowest_executions(db, limit, project_id, flow_id, environment_id, valid_start, valid_end)
+    return DashboardService.get_slowest_executions(db, limit, project_id, flow_id, environment_id, valid_start, valid_end, execution_type)
 
 @router.get("/daily")
 def get_daily_stats(
@@ -55,10 +58,11 @@ def get_daily_stats(
     environment_id: int = None,
     start_date: str = None,
     end_date: str = None,
+    execution_type: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
-    return DashboardService.get_daily_stats(db, days, project_id, flow_id, environment_id, valid_start, valid_end)
+    return DashboardService.get_daily_stats(db, days, project_id, flow_id, environment_id, valid_start, valid_end, execution_type)
 
 @router.get("/top-failures")
 def get_top_failures(
@@ -68,10 +72,11 @@ def get_top_failures(
     environment_id: int = None,
     start_date: str = None,
     end_date: str = None,
+    execution_type: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
-    return DashboardService.get_top_failing_apis(db, limit, project_id, flow_id, environment_id, valid_start, valid_end)
+    return DashboardService.get_top_failing_apis(db, limit, project_id, flow_id, environment_id, valid_start, valid_end, execution_type)
 
 def _parse_dates(start: str, end: str):
     s, e = None, None

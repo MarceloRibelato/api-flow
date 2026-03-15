@@ -51,6 +51,7 @@ def get_execution_history(
     method: Optional[str] = None,
     status_code: Optional[int] = None,
     node_id: Optional[str] = None,
+    execution_type: Optional[str] = Query(None, regex="^(api|web)$"),
     sort_by: Optional[str] = Query('created_at', regex="^(created_at|id|response_time)$"),
     order: Optional[str] = Query('desc', regex="^(asc|desc)$"),
     db: Session = Depends(get_db),
@@ -73,6 +74,7 @@ def get_execution_history(
             method,
             status_code,
             node_id,
+            execution_type,
             sort_by,
             order
         )

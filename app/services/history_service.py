@@ -48,7 +48,8 @@ class HistoryService:
             assertions=[a.model_dump() for a in history.assertions]
             if history.assertions
             else None,
-            video_url=history.video_url, # Added
+            video_url=history.video_url,
+            execution_type=history.execution_type or "api",
         )
 
         db.add(db_history)
@@ -106,7 +107,8 @@ class HistoryService:
                 environment_id=history.environment_id,
                 environment_name=history.environment_name,
                 assertions=[a.model_dump() for a in history.assertions] if history.assertions else None,
-                video_url=history.video_url, # Added
+                video_url=history.video_url,
+                execution_type=history.execution_type or "api",
             )
             db_objects.append(db_history)
 
@@ -144,6 +146,7 @@ class HistoryService:
         method: Optional[str] = None,
         status_code: Optional[int] = None,
         node_id: Optional[str] = None,
+        execution_type: Optional[str] = None,
         sort_by: str = 'created_at',
         order: str = 'desc'
     ):
@@ -182,6 +185,8 @@ class HistoryService:
             query = query.filter(ApiExecutionHistory.environment_id == environment_id)
         if node_id:
             query = query.filter(ApiExecutionHistory.node_id == node_id)
+        if execution_type:
+            query = query.filter(ApiExecutionHistory.execution_type == execution_type)
 
         if method:
             query = query.filter(ApiExecutionHistory.method == method.upper())
@@ -234,6 +239,7 @@ class HistoryService:
                 ApiExecutionHistory.node_id,
                 ApiExecutionHistory.batch_id,
                 ApiExecutionHistory.video_url,
+                ApiExecutionHistory.execution_type,
                 ApiExecutionHistory.response_body,  # Required for E2E live screenshot extraction
             )
         )
@@ -366,7 +372,8 @@ class HistoryService:
                         variables_used=rec.variables_used,
                         processed_url=rec.processed_url,
                         assertions=rec.assertions,
-                        video_url=rec.video_url, # Added
+                        video_url=rec.video_url,
+                        execution_type=rec.execution_type,
                         created_at=rec.created_at
                     )
                     archive_objects.append(archive_rec)

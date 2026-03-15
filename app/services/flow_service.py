@@ -264,10 +264,18 @@ class FlowService:
         """Retorna uma lista de todos os cards configurados na empresa para reaproveitamento"""
         cards = db.query(FlowCardDataDB).join(FlowDB).filter(FlowDB.company_id == company_id).all()
         
-        # Agrupar por nome para evitar duplicatas exatas se for o caso, 
-        # mas aqui retornaremos todos para o usuário escolher o melhor
         inventory = []
+        seen = set()
+        
         for c in cards:
+            f_type = c.flow.flow_type if c.flow else "api"
+            
+            # Simple deduplication by Name, Type and Description
+            card_key = (c.name or "", f_type, c.description or "")
+            if card_key in seen:
+                continue
+            seen.add(card_key)
+
             inventory.append({
                 "id": c.db_id,
                 "name": c.name,
@@ -277,6 +285,7 @@ class FlowService:
                 "apiCalls": c.api_calls,
                 "e2eSteps": c.e2e_steps,
                 "envData": c.env_data,
+                "flowType": f_type,
                 "sourceFlow": c.flow.name if c.flow else "Desconhecido"
             })
         return inventory

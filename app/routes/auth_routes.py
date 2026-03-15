@@ -1,16 +1,20 @@
 import logging
+import re
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
+from app.exceptions import (
+    InvalidCredentialsError, AccountPendingError, DuplicateResourceError,
+    ValidationError as DomainValidationError, FlowException
+)
 from app.models.user_models import UserDB
 from app.schemas.auth_schemas import Token, UserCreate, UserUpdate, LoginRequest, ForgotPasswordRequest, ResetPasswordRequest
 from app.services.auth_service import AuthService
 
-# Logger acquisition (inherited config)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -29,19 +33,10 @@ def login(
     user = AuthService.authenticate_user(db, login_data.username, login_data.password)
 
     if not user:
-        # logger.warning(f"Login failed for user: {form_data.username}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Usuário ou senha incorretos",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise InvalidCredentialsError()
         
     if user.status != 'active':
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cadastro pendente de aprovação. Contate o administrador.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise AccountPendingError()
 
     logger.info(f"Login successful for user: {login_data.username}")
     logger.info(f"Access token generated for: {user.username}")
@@ -67,21 +62,18 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     # Verifica duplicidade
     existing_user = AuthService.get_user_by_username(db, user.username)
     if existing_user:
-        raise HTTPException(status_code=400, detail="Username já existe")
+        raise DuplicateResourceError("Username")
 
-    # Verifica email
     if user.email:
         existing_email = db.query(UserDB).filter(UserDB.email == user.email).first()
         if existing_email:
-            raise HTTPException(status_code=400, detail="Email já existe")
+            raise DuplicateResourceError("Email")
 
-    # Verifica CPF
     if user.cpf:
-        import re
         cpf_clean = re.sub(r"[.-]", "", user.cpf)
         existing_cpf = db.query(UserDB).filter(UserDB.cpf == cpf_clean).first()
         if existing_cpf:
-            raise HTTPException(status_code=400, detail="CPF já cadastrado")
+            raise DuplicateResourceError("CPF")
 
     try:
         new_user = AuthService.create_user(db, user)
@@ -104,19 +96,18 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     except ValueError as ve:
         db.rollback()
         logger.warning(f"Validation Error: {str(ve)}")
-        raise HTTPException(status_code=400, detail=str(ve))
+        raise DomainValidationError(detail=str(ve))
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
         error_msg = str(e)
         if "unique constraint" in error_msg.lower() or "integrityerror" in error_msg.lower():
-             # Basic handling for other constraints not caught above
              logger.warning(f"Integrity Error: {error_msg}")
-             raise HTTPException(status_code=400, detail="Dados duplicados (Usuário, Email ou CPF já existem).")
+             raise DuplicateResourceError(detail="Dados duplicados (Usuário, Email ou CPF já existem).")
         
         logger.error(f"Database error: {error_msg}")
-        raise HTTPException(status_code=500, detail="Erro interno do servidor")
+        raise FlowException(detail="Erro interno do servidor", status_code=500)
 
 
 @router.get("/profile")
@@ -175,7 +166,7 @@ def update_user_profile(
         raise HTTPException(status_code=500, detail=error_msg)
 
 
-from fastapi import BackgroundTasks
+
 
 @router.post("/forgot-password")
 def forgot_password(request: ForgotPasswordRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -195,4 +186,4 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
         AuthService.reset_password_with_token(db, request)
         return {"msg": "Senha redefinida com sucesso."}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise DomainValidationError(detail=str(e))

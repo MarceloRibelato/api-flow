@@ -25,6 +25,8 @@ class ScheduleModel(Base):
     next_run = Column(DateTime, nullable=True)
     max_concurrency = Column(Integer, nullable=True) # Override global concurrency limit
     flow_type = Column(String(20), default="api", nullable=True) # 'api' or 'e2e'
+    capture_video = Column(Boolean, default=False) # Whether to capture E2E execution video
+    capture_screenshot = Column(Boolean, default=False) # Whether to capture E2E per-step screenshots
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Multi-tenancy
