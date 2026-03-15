@@ -49,3 +49,12 @@ inspect_db.py
 update_db.py
 test_register.json
 backend_debug.log
+    
+# Media and Test Results
+**/screenshots/
+**/videos/
+**/test-results/
+**/playwright-report/
+*.mp4
+*.webm
+
