@@ -47,9 +47,11 @@ db_error.txt
 debug_*.py
 inspect_db.py
 update_db.py
-test_register.json
+# Logs
+app/api.log*
 backend_debug.log
-    
+*.log
+
 # Media and Test Results
 **/screenshots/
 **/videos/

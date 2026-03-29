@@ -51,9 +51,10 @@ def get_execution_history(
     method: Optional[str] = None,
     status_code: Optional[int] = None,
     node_id: Optional[str] = None,
-    execution_type: Optional[str] = Query(None, regex="^(api|web)$"),
-    sort_by: Optional[str] = Query('created_at', regex="^(created_at|id|response_time)$"),
-    order: Optional[str] = Query('desc', regex="^(asc|desc)$"),
+    execution_type: Optional[str] = Query(None, pattern="^(api|web)$"),
+    batch_id: Optional[str] = None,
+    sort_by: Optional[str] = Query('created_at', pattern="^(created_at|id|response_time)$"),
+    order: Optional[str] = Query('desc', pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
@@ -75,12 +76,30 @@ def get_execution_history(
             status_code,
             node_id,
             execution_type,
+            batch_id,
             sort_by,
             order
         )
     except Exception as e:
         logging.error(f"❌ Error getting history: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erro ao buscar: {str(e)}")
+
+
+@router.get("/averages")
+def get_history_averages(
+    schedule_id: Optional[int] = None,
+    flow_id: Optional[int] = None,
+    api_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
+):
+    """Retorna a média de execução e taxa de sucesso dos steps com base em filtros"""
+    try:
+        stats = HistoryService.get_history_averages(db, schedule_id=schedule_id, flow_id=flow_id, api_id=api_id)
+        return {"stats": stats}
+    except Exception as e:
+        logging.error(f"❌ Error getting averages: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar médias: {str(e)}")
 
 
 @router.get("/{execution_id}", response_model=ExecutionHistoryResponse)
@@ -101,23 +120,27 @@ def delete_execution_history(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    success = HistoryService.delete(db, execution_id, current_user.company_id) # Updated
+    """Remove um registro específico do histórico"""
+    success = HistoryService.delete(db, execution_id, current_user.company_id)
     if not success:
         raise HTTPException(status_code=404, detail="Não encontrado")
-    return {"message": "Removido"}
+    return {"status": "success", "message": "Registro removido"}
 
 
 @router.delete("/")
 def clear_execution_history(
-    db: Session = Depends(get_db),
     confirm: bool = Query(False),
+    db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
+    """Remove TODO o histórico do usuário (Requer confirmação)"""
     if not confirm:
-        raise HTTPException(status_code=400, detail="Confirmação necessária")
-
-    HistoryService.clear_all(db, current_user.company_id) # Updated
-    return {"message": "Histórico limpo"}
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmação necessária. Use ?confirm=true para apagar tudo."
+        )
+    HistoryService.clear_all(db, current_user.company_id)
+    return {"status": "success", "message": "Histórico limpo com sucesso"}
 
 
 @router.get("/unique/apis", response_model=List[UniqueApiSummary])
@@ -125,6 +148,5 @@ def get_unique_apis(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    """Retorna lista única de APIs (método/url) para filtros"""
-    return HistoryService.get_unique_apis(db, current_user.company_id) # Updated
-
+    """Retorna lista de APIs únicas (endpoint + método) que já foram executadas"""
+    return HistoryService.get_unique_apis(db, current_user.company_id)

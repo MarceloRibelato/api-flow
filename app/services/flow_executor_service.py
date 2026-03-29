@@ -48,7 +48,7 @@ class FlowExecutorService:
         return _is_blocked_domain(url)
 
     @staticmethod
-    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False):
+    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api'):
         # (imports now at top of file)
 
         base_batch_id = f"sched_{uuid.uuid4().hex}"
@@ -89,7 +89,8 @@ class FlowExecutorService:
 
             for edge in valid_edges:
                 src, tgt = edge['source'], edge['target']
-                adj[src].append(tgt)
+                if tgt not in adj[src]:
+                    adj[src].append(tgt)
                 in_degree[tgt] += 1
                 logger.debug(f"   Edge: {src} -> {tgt}")
 
@@ -126,6 +127,11 @@ class FlowExecutorService:
 
             final_variables = copy.deepcopy(base_variables_dict)
 
+            # Deduplicate paths (prevent redundant execution if graph has multiple identical paths)
+            all_paths = list(dict.fromkeys(tuple(p) for p in all_paths))
+            all_paths = [list(p) for p in all_paths]
+            
+            logger.info(f"   Found {len(all_paths)} unique paths to execute.")
             for path_index, path_nodes in enumerate(all_paths):
                 logger.info(f"🛣️ === Executing Scenario Path {path_index + 1}/{len(all_paths)} === 🛣️")
                 
@@ -159,7 +165,7 @@ class FlowExecutorService:
                         
                         # Combine steps into a unified execution list
                         all_steps = []
-                        is_e2e_flow = flow_data.get('flow_type') == 'e2e' or flow_meta.get('flow_type') == 'e2e'
+                        is_e2e_flow = flow_data.get('flow_type') in ['e2e', 'mobile'] or flow_meta.get('flow_type') in ['e2e', 'mobile']
                         
                         # Do NOT execute api_calls if this is an E2E node,
                         # because they are mapped APIs from the browser extension.
@@ -225,9 +231,18 @@ class FlowExecutorService:
                                 if step_type == 'e2e':
                                     try:
                                         if not e2e_executor:
-                                            from app.services.playwright_executor_service import PlaywrightExecutorService
-                                            e2e_executor = PlaywrightExecutorService()
-                                            e2e_executor.start(video_dir=video_dir if capture_video else None)
+                                            if flow_type == 'mobile':
+                                                from app.services.appium_executor_service import AppiumExecutorService
+                                                e2e_executor = AppiumExecutorService()
+                                                e2e_executor.start(
+                                                    video_dir=video_dir if capture_video else None,
+                                                    db=db,
+                                                    product_id=product_id
+                                                )
+                                            else:
+                                                from app.services.playwright_executor_service import PlaywrightExecutorService
+                                                e2e_executor = PlaywrightExecutorService()
+                                                e2e_executor.start(video_dir=video_dir if capture_video else None)
                                         # Resolve variables in E2E step data
                                         step_data_str = json.dumps(step_data)
                                         step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, current_path_vars))
@@ -427,7 +442,7 @@ class FlowExecutorService:
                                 environment_id=env_id,
                                 error_message=final_error_message,
                                 assertions=assertion_results,
-                                execution_type="web" if is_e2e_flow else "api"
+                                execution_type=flow_type if flow_type in ['e2e', 'mobile'] else "api"
                             )
                             
                             # The main action step (e.g., Click, Type) is appended FIRST
@@ -437,7 +452,13 @@ class FlowExecutorService:
                             # We append them AFTER the main step so the sequence makes sense (Action -> Resulting Requests)
                             if step_type == 'e2e' and e2e_executor:
                                 intercepted = e2e_executor.pop_captured_requests()
+                                seen_bg = set()
                                 for req in intercepted:
+                                    bg_key = (req['method'], req['url'])
+                                    if bg_key in seen_bg:
+                                        continue
+                                    seen_bg.add(bg_key)
+
                                     bg_hist = ExecutionHistoryCreate(
                                         batch_id=batch_id,
                                         api_id=None,
@@ -456,7 +477,7 @@ class FlowExecutorService:
                                         environment_id=env_id,
                                         error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
                                         assertions=None,
-                                        execution_type="web" if is_e2e_flow else "api"
+                                        execution_type=flow_type if flow_type in ['e2e', 'mobile'] else "api"
                                     )
                                     history_buffer.append(bg_hist)
                                     

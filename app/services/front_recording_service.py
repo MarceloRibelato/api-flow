@@ -143,24 +143,7 @@ class FrontRecordingService:
         
         spacing_x = 300
         
-        # Add Master Node (Consistent with API Flow)
-        feature = db.query(FeatureModel).filter(FeatureModel.id == recording.feature_id).first()
-        feature_name = feature.name if feature else "Funcionalidade"
-        master_id = f"master-{recording.feature_id}"
-        
-        nodes.append({
-            "id": master_id,
-            "type": "custom",
-            "position": {"x": 0, "y": 100},
-            "data": {"name": feature_name, "color": "#10b981", "description": "Raiz do Fluxo Gerado"}
-        })
-        card_data[master_id] = {
-            "name": feature_name,
-            "color": "#10b981",
-            "description": "Raiz do Fluxo Gerado",
-            "apiCalls": []
-        }
-
+        # No Master Node appended anymore. Starts with recorded steps.
         for idx, step in enumerate(steps):
             node_id = f"node-recorded-{idx}"
             
@@ -168,7 +151,7 @@ class FrontRecordingService:
             nodes.append({
                 "id": node_id,
                 "type": "custom",
-                "position": {"x": (idx + 1) * spacing_x, "y": 100},
+                "position": {"x": idx * spacing_x, "y": 100},
                 "data": {
                     "name": step["name"], 
                     "color": "#3b82f6",
@@ -177,15 +160,16 @@ class FrontRecordingService:
                 }
             })
             
-            # Edge from previous or Master
-            source_id = f"node-recorded-{idx-1}" if idx > 0 else master_id
-            edges.append({
-                "id": f"edge-recorded-{source_id}-{node_id}",
-                "source": source_id,
-                "target": node_id,
-                "type": "buttonedge",
-                "animated": True
-            })
+            # Edge from previous step
+            if idx > 0:
+                source_id = f"node-recorded-{idx-1}"
+                edges.append({
+                    "id": f"edge-recorded-{source_id}-{node_id}",
+                    "source": source_id,
+                    "target": node_id,
+                    "type": "buttonedge",
+                    "animated": True
+                })
             
             # 1. Combine All Steps (Interactions + Requests) for Interleaving
             combined_steps = []
@@ -208,7 +192,10 @@ class FrontRecordingService:
             # Filter requests matching this step
             # Association Strategy: match by customNodeName OR pageUrl fallback
             step_requests = []
+            step_page_url = step["inters"][0].get('pageUrl') if step["inters"] else None
+
             for r in (recording.requests or []):
+                req_page_url = r.get('pageUrl')
                 # 1. Direct match by custom name (best)
                 if r.get('customNodeName') and r.get('customNodeName') == step["name"]:
                     step_requests.append(r)
@@ -311,8 +298,8 @@ class FrontRecordingService:
         # 3. SAVE DOUBLE FLOWS (E2E and API)
         import copy
         company_id = None
-        if feature and feature.product:
-            company_id = feature.product.company_id
+        if recording.feature and recording.feature.product:
+            company_id = recording.feature.product.company_id
         
         if not company_id:
             logger.warning(f"Could not save flows for recording {recording.id}: Company ID not found")

@@ -25,10 +25,10 @@ class ApiExecutionHistory(Base):
     batch_id = Column(String(100), nullable=True, index=True)  # Groups all API calls from a single run
 
     # IDs relacionados
-    api_id = Column(BigInteger, nullable=True, index=True)
+    api_id = Column(String(100), nullable=True, index=True)
     api_name = Column(String(255), nullable=True)  # Added api_name
     project_id = Column(Integer, nullable=True, index=True)
-    flow_id = Column(BigInteger, nullable=True, index=True)
+    flow_id = Column(String(100), nullable=True, index=True)
     node_id = Column(String(100), nullable=True, index=True)  # Added stable node ID (e.g. '1-1')
     schedule_id = Column(Integer, nullable=True, index=True)  # Added schedule_id
     feature_name = Column(String(255), nullable=True) # Added feature_name
@@ -68,6 +68,9 @@ class ApiExecutionHistory(Base):
     __table_args__ = (
         Index('idx_history_lookup', "user_id", "project_id", "created_at"),
         Index('idx_history_env_lookup', "user_id", "environment_id", "created_at"),
+        Index('idx_history_schedule_time', "schedule_id", "created_at"),
+        Index('idx_history_project_time', "project_id", "created_at"),
+        Index('idx_history_batch_time', "batch_id", "created_at"),
     )
 
     @property
@@ -88,10 +91,10 @@ class ApiExecutionHistoryArchive(Base):
     batch_id = Column(String(100), nullable=True, index=True)  # Groups all API calls from a single run
 
     # IDs relacionados
-    api_id = Column(BigInteger, nullable=True, index=True)
+    api_id = Column(String(100), nullable=True, index=True)
     api_name = Column(String(255), nullable=True)
     project_id = Column(Integer, nullable=True, index=True)
-    flow_id = Column(BigInteger, nullable=True, index=True)
+    flow_id = Column(String(100), nullable=True, index=True)
     node_id = Column(String(100), nullable=True, index=True)
     schedule_id = Column(Integer, nullable=True, index=True)
     feature_name = Column(String(255), nullable=True)

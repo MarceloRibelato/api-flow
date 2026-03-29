@@ -158,57 +158,100 @@ class AnalysisService:
 
     @staticmethod
     def implement_test_scenario(db: Session, flow_id: int, user_id: int, scenario_title: str, company_id: int = 1):
-        """Creates a NEW flow based on a scenario suggestion."""
+        """Creates a NEW flow (and Feature) based on a scenario suggestion with fully populated nodes and edges."""
         flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
-        cards = db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow_id).all()
         if not flow: return None
 
-        # Build prompt to generate ACTUAL node/edge modifications
+        from app.services.flow_service import FlowService
+        from app.schemas.flow_schemas import FlowSaveSchema
+        from app.services.feature_service import FeatureService
+        from app.schemas.feature_schemas import FeatureCreate
+        from app.models.feature_models import FeatureModel
+
+        # Look up original feature
+        orig_feat = db.query(FeatureModel).filter(FeatureModel.id == flow.project_id).first()
+        if not orig_feat: return None
+
+        # Get full flow structure
+        try:
+            original_flow_data = FlowService.load(db, flow.project_id, company_id, flow.id, flow.flow_type)
+        except Exception as e:
+            logger.error(f"Failed to load original flow for AI: {e}")
+            return None
+
+        # Minimal serialization to avoid token explosion
+        min_nodes = [{"id": n.get("id"), "type": n.get("type"), "position": n.get("position")} for n in original_flow_data.get("nodes", [])]
+        min_edges = [{"id": e.get("id"), "source": e.get("source"), "target": e.get("target")} for e in original_flow_data.get("edges", [])]
+        min_card_data = {}
+        for k, v in original_flow_data.get("cardData", {}).items():
+            min_card_data[k] = {
+                "name": v.get("name"),
+                "apiCalls": [{"method": a.get("method"), "url": a.get("url"), "body": a.get("body")} for a in v.get("apiCalls", [])]
+            }
+
         prompt = f"""
-        You are a QA automation engineer. Modify the following Flow to implement the test scenario: "{scenario_title}".
-        Original Flow Nodes/Cards:
-        {[c.name for c in cards]}
+        You are an expert QA automation engineer. Modify the following Flow to implement the test scenario: "{scenario_title}".
+        
+        Original Flow Data (JSON):
+        nodes: {json.dumps(min_nodes)}
+        edges: {json.dumps(min_edges)}
+        cardData: {json.dumps(min_card_data)}
         
         Task: 
-        1. Keep the core logic but inject a fault or change parameters to match the scenario.
-        2. Return a JSON structure that looks like a simplified cardData dictionary.
+        1. Keep the core logic but inject a fault, change parameters, or add/remove nodes to match the scenario perfectly.
+        2. Ensure node IDs and edges remain consistent where possible.
+        3. Return a complete, valid JSON containing the new flow structure.
         
-        Format:
+        Format exactly like this JSON:
         {{
-           "nodes": [ {{ "id": "n1", "name": "...", "type": "apiCard" }} ],
-           "cardData": {{
-              "n1": {{ "name": "...", "apiCalls": [ {{ "method": "...", "url": "...", "body": "..." }} ] }}
-           }}
+           "name": "{orig_feat.name} - AI: {scenario_title}",
+           "flow_type": "{flow.flow_type}",
+           "nodes": [ ... ],
+           "edges": [ ... ],
+           "cardData": {{ "node_id": {{ ... }} }}
         }}
-        Provide a complete path from login to the fault point.
-        Respond ONLY with raw JSON.
+        
+        Respond ONLY with raw JSON. No markdown backticks.
         """
         
-        content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.0)
+        content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.1)
         if not content: return None
         
         content = content.replace("```json", "").replace("```", "").strip()
         try:
             suggested_data = json.loads(content)
             
-            from app.services.flow_service import FlowService
-            
-            # Simple wrapper to create a new flow
-            new_name = f"{flow.name} - AI: {scenario_title}"
-            new_flow = FlowService.create(db, flow.project_id, new_name, company_id)
-            
-            # Note: For now we just create the empty flow with the name. 
-            # In a next step we would save the suggested_data into it.
-            # But creating the flow already gives the user a starting point.
-            
+            # Create new Feature container
+            new_feature_schema = FeatureCreate(
+                name=f"[{scenario_title[:30]}] {orig_feat.name}",
+                description=f"AI Generated Test Case: {scenario_title}",
+                product_id=orig_feat.product_id
+            )
+            new_feat = FeatureService.create(db, new_feature_schema, company_id)
+            if not new_feat:
+                raise ValueError("Failed to create Feature container")
+
+            # Emulate incoming payload
+            suggested_data["projectId"] = new_feat.id
+            if "name" not in suggested_data:
+                suggested_data["name"] = new_feature_schema.name
+            if "flow_type" not in suggested_data:
+                suggested_data["flow_type"] = flow.flow_type
+
+            # Save full flow structurally
+            save_schema = FlowSaveSchema(**suggested_data)
+            result = FlowService.save(db, save_schema, company_id, user_id)
+
             return {
-                "id": new_flow.id if new_flow else None,
-                "name": new_name,
-                "data": suggested_data
+                "id": result.get("id"),
+                "project_id": new_feat.id,
+                "name": new_feature_schema.name,
+                "status": "generated",
+                "message": "Test scenario flow generated successfully"
             }
             
         except Exception as e:
-            logger.error(f"Failed to parse implementation: {e}")
+            logger.error(f"Failed to implement test scenario: {e}")
             return None
 
     @staticmethod
@@ -638,3 +681,72 @@ class AnalysisService:
                 })
 
         return alerts
+
+    @staticmethod
+    def generate_flow_from_text(db: Session, prompt: str, project_id: int, company_id: int, user_id: int):
+        """Creates a NEW flow from a natural language prompt."""
+        from app.services.flow_service import FlowService
+        from app.schemas.flow_schemas import FlowSaveSchema
+        
+        llm_prompt = f"""
+        You are an expert QA Automation Engineer. The user wants to create an automated API test flow.
+        User Request: "{prompt}"
+        
+        Generate a complete Flow configuration. The Flow is composed of "nodes" (steps/cards) and "edges" (connections).
+        Return a JSON structure with the following exact format:
+        {{
+           "name": "Suggested Name",
+           "flow_type": "api", 
+           "nodes": [
+               {{ "id": "1", "type": "apiCard", "position": {{"x": 100, "y": 100}} }},
+               {{ "id": "2", "type": "apiCard", "position": {{"x": 100, "y": 300}} }}
+           ],
+           "edges": [
+               {{ "id": "e1-2", "source": "1", "target": "2", "type": "smoothstep", "animated": true }}
+           ],
+           "cardData": {{
+              "1": {{
+                 "name": "Step 1",
+                 "description": "...",
+                 "apiCalls": [ {{ "method": "GET", "url": "https://api.example.com", "body": "", "headers": "" }} ],
+                 "bddScenarios": []
+              }},
+              "2": {{
+                 "name": "Step 2",
+                 "description": "...",
+                 "apiCalls": [ {{ "method": "POST", "url": "...", "body": "{{\\"key\\": \\"value\\"}}", "headers": "{{\\"Content-Type\\": \\"application/json\\"}}" }} ],
+                 "bddScenarios": []
+              }}
+           }}
+        }}
+        
+        Rules:
+        - If the user doesn't specify URLs, use generic placeholders.
+        - Space nodes out by increasing the 'y' coordinate by 200 for each subsequent node.
+        - Respond ONLY with raw JSON. No markdown backticks.
+        """
+        
+        content = AnalysisService._call_llm(db, user_id, llm_prompt, temperature=0.1)
+        if not content:
+            raise ValueError("Failed to generate flow from AI. Please check AI settings/API Key.")
+            
+        content = content.replace("```json", "").replace("```", "").strip()
+        try:
+            suggested_data = json.loads(content)
+        except Exception as e:
+            logger.error(f"Failed to parse generated flow: {e}\\nContent: {content}")
+            raise ValueError("AI returned invalid JSON format.")
+
+        try:
+            suggested_data["projectId"] = project_id
+            save_schema = FlowSaveSchema(**suggested_data)
+            result = FlowService.save(db, save_schema, company_id, user_id)
+            return {
+                "id": result.get("id"),
+                "project_id": project_id,
+                "status": "generated",
+                "message": "Flow generated successfully"
+            }
+        except Exception as e:
+            logger.error(f"Failed to save generated flow: {e}")
+            raise ValueError(f"Failed to save flow: {str(e)}")

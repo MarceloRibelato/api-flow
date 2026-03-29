@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.product_service import ProductService
-from app.schemas.product_schemas import ProductCreate, ProductResponse
+from app.schemas.product_schemas import ProductCreate, ProductResponse, ProductMobileSettingsCreate, ProductMobileSettingsResponse
 
 router = APIRouter(
     prefix="/products",
@@ -90,3 +90,37 @@ def delete_product(
     if not success:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     return 
+
+@router.get("/{product_id}/mobile-settings", response_model=ProductMobileSettingsResponse)
+def get_product_mobile_settings(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Obter as configurações de mobile do produto.
+    """
+    db_product = ProductService.get(db, product_id, company_id=current_user.company_id)
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Produto não encontrado")
+    
+    return ProductService.get_mobile_settings(db, product_id)
+
+@router.put("/{product_id}/mobile-settings", response_model=ProductMobileSettingsResponse)
+def update_product_mobile_settings(
+    product_id: int,
+    settings_data: ProductMobileSettingsCreate,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Atualizar as configurações de mobile do produto.
+    """
+    if current_user.role == 'viewer':
+         raise HTTPException(status_code=403, detail="Sem permissão para editar")
+
+    db_product = ProductService.get(db, product_id, company_id=current_user.company_id)
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Produto não encontrado")
+
+    return ProductService.update_mobile_settings(db, product_id, settings_data)

@@ -11,7 +11,14 @@ from app.database import SessionLocal
 # Import services to execute logic - avoiding circular imports might be tricky
 # ideally we move execution logic to a common place or import inside function
 
-scheduler = BackgroundScheduler()
+# Optimized Scheduler Configuration
+job_defaults = {
+    'misfire_grace_time': 60,  # Allow up to 60s delay (crucial for container/Windows stability)
+    'coalesce': True,          # Combine missed runs into one
+    'max_instances': 3         # Allow 3 instances of the same job simultaneously
+}
+
+scheduler = BackgroundScheduler(job_defaults=job_defaults)
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +335,8 @@ class SchedulerService:
                 trigger=trigger,
                 args=[schedule.id],
                 id=job_id,
-                replace_existing=True
+                replace_existing=True,
+                misfire_grace_time=60
             )
 
             # Update next_run immediately

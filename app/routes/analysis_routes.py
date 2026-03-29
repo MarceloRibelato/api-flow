@@ -79,3 +79,22 @@ def generate_assertions(
     Generates assertion suggestions based on the provided API response.
     """
     return AnalysisService.generate_assertions(db, current_user.id, req.dict())
+
+class GenerateFlowRequest(BaseModel):
+    prompt: str
+
+@router.post("/project/{project_id}/generate-flow")
+def generate_flow(
+    project_id: int,
+    req: GenerateFlowRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Generates a new flow from a natural language prompt.
+    """
+    try:
+        return AnalysisService.generate_flow_from_text(db, req.prompt, project_id, current_user.company_id, current_user.id)
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e))
