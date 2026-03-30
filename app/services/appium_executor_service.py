@@ -184,31 +184,43 @@ class AppiumExecutorService:
 
             if step_type == 'tap':
                 selector = props.get('selector') or props.get('value', '')
-                el = self._find_element(selector)
+                timeout = int(props.get('timeout', 5000))
+                el = self._find_element(selector, timeout_ms=timeout)
                 if el:
                     el.click()
+                else:
+                    raise Exception(f"Element '{selector}' not found for click after {timeout}ms")
 
             elif step_type == 'long_press':
                 from appium.webdriver.common.touch_action import TouchAction
                 selector = props.get('selector', '')
                 duration_ms = int(props.get('duration', 2000))
-                el = self._find_element(selector)
+                timeout = int(props.get('timeout', 5000))
+                el = self._find_element(selector, timeout_ms=timeout)
                 if el:
                     action = TouchAction(self._driver)
                     action.long_press(el, duration=duration_ms).release().perform()
+                else:
+                    raise Exception(f"Element '{selector}' not found for long_press after {timeout}ms")
 
             elif step_type == 'type':
                 selector = props.get('selector', '')
                 value = props.get('value', '')
-                el = self._find_element(selector)
+                timeout = int(props.get('timeout', 5000))
+                el = self._find_element(selector, timeout_ms=timeout)
                 if el:
                     el.send_keys(value)
+                else:
+                    raise Exception(f"Element '{selector}' not found for type after {timeout}ms")
 
             elif step_type == 'clear_field':
                 selector = props.get('selector', '')
-                el = self._find_element(selector)
+                timeout = int(props.get('timeout', 5000))
+                el = self._find_element(selector, timeout_ms=timeout)
                 if el:
                     el.clear()
+                else:
+                    raise Exception(f"Element '{selector}' not found for clear_field after {timeout}ms")
 
             elif step_type == 'hide_keyboard':
                 try:
@@ -252,11 +264,14 @@ class AppiumExecutorService:
                 src_sel = props.get('selector', '')
                 tgt_sel = props.get('target', '')
                 duration_ms = int(props.get('duration', 1000))
-                src = self._find_element(src_sel)
-                tgt = self._find_element(tgt_sel)
+                timeout = int(props.get('timeout', 5000))
+                src = self._find_element(src_sel, timeout_ms=timeout)
+                tgt = self._find_element(tgt_sel, timeout_ms=timeout)
                 if src and tgt:
                     action = TouchAction(self._driver)
                     action.long_press(src, duration=duration_ms).move_to(tgt).release().perform()
+                else:
+                    raise Exception(f"Drag item '{src_sel}' or drop target '{tgt_sel}' not found after {timeout}ms")
 
             elif step_type == 'pinch':
                 scale = float(props.get('scale', 0.5))
@@ -467,20 +482,26 @@ class AppiumExecutorService:
                 "screenshot_b64": failure_screenshot,
             }
 
-    def _find_element(self, selector: str):
-        """Localiza elemento por accessibility id, xpath ou text."""
+    def _find_element(self, selector: str, timeout_ms: int = 5000):
+        """Localiza elemento por accessibility id, xpath ou text usando timeout explícito."""
         if not self._driver or not selector:
             return None
         try:
             from appium.webdriver.common.appiumby import AppiumBy
-            if selector.startswith('/'):
-                return self._driver.find_element(AppiumBy.XPATH, selector)
-            elif selector.startswith('//'):
-                return self._driver.find_element(AppiumBy.XPATH, selector)
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            
+            timeout_s = max(0.5, timeout_ms / 1000.0)
+            wait = WebDriverWait(self._driver, timeout_s)
+            
+            if selector.startswith('/') or selector.startswith('//'):
+                locator = (AppiumBy.XPATH, selector)
             else:
-                return self._driver.find_element(AppiumBy.ACCESSIBILITY_ID, selector)
+                locator = (AppiumBy.ACCESSIBILITY_ID, selector)
+                
+            return wait.until(EC.presence_of_element_located(locator))
         except Exception as e:
-            logger.warning(f"📱 Element not found: {selector} — {e}")
+            logger.warning(f"📱 Element not found: {selector} after {timeout_ms}ms — {e}")
             return None
 
     # ------------------------------------------------------------------
