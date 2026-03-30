@@ -33,10 +33,13 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
 from app.database import Base
+# Import ALL models so Base.metadata is complete for autogenerate & create_all
 from app.models.agent_models import AgentSettingsDB
-# Import other models only if needed for autogenerate detection of their changes
-# from app.models.user_models import UserDB 
-
+from app.models.user_models import UserDB
+from app.models.company_models import CompanyDB
+from app.models.product_models import ProductModel, ProductMobileSettingsDB, ProductMobileDeviceDB
+from app.models.auth_models import BlacklistedToken
+from app.models.service_token_models import ServiceTokenDB
 
 target_metadata = Base.metadata
 
