@@ -268,8 +268,16 @@ class FlowService:
         seen = set()
         
         for c in cards:
-            f_type = c.flow.flow_type if c.flow else "api"
-            
+            raw_type = (c.flow.flow_type if c.flow else None) or "api"
+
+            # Normalize: keep 'mobile' as-is; map web/frontend/e2e → 'web'; rest → 'api'
+            if raw_type == "mobile":
+                f_type = "mobile"
+            elif raw_type in ("web", "frontend", "e2e"):
+                f_type = "web"
+            else:
+                f_type = "api"
+
             # Simple deduplication by Name, Type and Description
             card_key = (c.name or "", f_type, c.description or "")
             if card_key in seen:
@@ -283,9 +291,10 @@ class FlowService:
                 "color": c.color,
                 "bddScenarios": c.bdd_scenarios,
                 "apiCalls": c.api_calls,
-                "e2eSteps": c.e2e_steps,
+                "e2eSteps": c.e2e_steps,  # mobile flows also use e2e_steps field
                 "envData": c.env_data,
                 "flowType": f_type,
                 "sourceFlow": c.flow.name if c.flow else "Desconhecido"
             })
         return inventory
+

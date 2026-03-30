@@ -188,6 +188,15 @@ class AppiumExecutorService:
                 if el:
                     el.click()
 
+            elif step_type == 'long_press':
+                from appium.webdriver.common.touch_action import TouchAction
+                selector = props.get('selector', '')
+                duration_ms = int(props.get('duration', 2000))
+                el = self._find_element(selector)
+                if el:
+                    action = TouchAction(self._driver)
+                    action.long_press(el, duration=duration_ms).release().perform()
+
             elif step_type == 'type':
                 selector = props.get('selector', '')
                 value = props.get('value', '')
@@ -195,28 +204,130 @@ class AppiumExecutorService:
                 if el:
                     el.send_keys(value)
 
+            elif step_type == 'clear_field':
+                selector = props.get('selector', '')
+                el = self._find_element(selector)
+                if el:
+                    el.clear()
+
+            elif step_type == 'hide_keyboard':
+                try:
+                    self._driver.hide_keyboard()
+                except Exception:
+                    pass  # Already hidden
+
             elif step_type == 'swipe':
+                direction = props.get('direction', 'up')
+                distance_pct = int(props.get('distance', 50)) / 100.0
+                duration_ms = int(props.get('duration', 800))
+                size = self._driver.get_window_size()
+                w, h = size['width'], size['height']
+                cx = w // 2
+                swipe_map = {
+                    'up':    (cx, int(h * 0.7), cx, int(h * (0.7 - distance_pct))),
+                    'down':  (cx, int(h * 0.3), cx, int(h * (0.3 + distance_pct))),
+                    'left':  (int(w * 0.8), h // 2, int(w * (0.8 - distance_pct)), h // 2),
+                    'right': (int(w * 0.2), h // 2, int(w * (0.2 + distance_pct)), h // 2),
+                }
+                sx, sy, ex, ey = swipe_map.get(direction, swipe_map['up'])
+                self._driver.swipe(sx, sy, ex, ey, duration_ms)
+
+            elif step_type == 'scroll_to':
+                selector = props.get('selector', '')
+                from appium.webdriver.common.appiumby import AppiumBy
+                try:
+                    self._driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR,
+                        f'new UiScrollable(new UiSelector().scrollable(true))'
+                        f'.scrollIntoView(new UiSelector().descriptionContains("{selector}"))')
+                except Exception:
+                    # Fallback: scroll until element appears
+                    el = self._find_element(selector)
+                    if el:
+                        self._driver.execute_script("mobile: scrollGesture", {
+                            "elementId": el.id, "direction": "down", "percent": 0.75
+                        })
+
+            elif step_type == 'drag_drop':
                 from appium.webdriver.common.touch_action import TouchAction
-                sx = int(props.get('startX', 500))
-                sy = int(props.get('startY', 1200))
-                ex = int(props.get('endX', 500))
-                ey = int(props.get('endY', 300))
-                duration = int(props.get('duration', 800))
-                action = TouchAction(self._driver)
-                action.press(x=sx, y=sy).wait(duration).move_to(x=ex, y=ey).release().perform()
+                src_sel = props.get('selector', '')
+                tgt_sel = props.get('target', '')
+                duration_ms = int(props.get('duration', 1000))
+                src = self._find_element(src_sel)
+                tgt = self._find_element(tgt_sel)
+                if src and tgt:
+                    action = TouchAction(self._driver)
+                    action.long_press(src, duration=duration_ms).move_to(tgt).release().perform()
+
+            elif step_type == 'pinch':
+                scale = float(props.get('scale', 0.5))
+                self._driver.execute_script("mobile: pinchCloseGesture", {
+                    "elementId": None, "percent": min(scale, 1.0), "speed": 2500
+                })
+
+            elif step_type == 'zoom':
+                scale = float(props.get('scale', 1.5))
+                self._driver.execute_script("mobile: pinchOpenGesture", {
+                    "elementId": None, "percent": min(scale / 3.0, 1.0), "speed": 2500
+                })
+
+            elif step_type == 'rotate':
+                orientation_map = {
+                    'portrait': 'PORTRAIT',
+                    'landscape': 'LANDSCAPE',
+                    'portrait_reverse': 'PORTRAIT',
+                    'landscape_reverse': 'LANDSCAPE',
+                }
+                orientation = orientation_map.get(
+                    props.get('orientation', 'portrait').lower(), 'PORTRAIT')
+                self._driver.orientation = orientation
+                logger.info(f"📱 Rotated to {orientation}")
+
+            elif step_type == 'shake':
+                self._driver.shake()
+
+            elif step_type == 'back_button':
+                self._driver.press_keycode(4)  # Android KEYCODE_BACK
+
+            elif step_type == 'home_button':
+                self._driver.press_keycode(3)  # Android KEYCODE_HOME
+
+            elif step_type == 'set_location':
+                lat = float(props.get('latitude', -23.5505))
+                lon = float(props.get('longitude', -46.6333))
+                self._driver.set_location(lat, lon, 0)
+                logger.info(f"📍 Location set to ({lat}, {lon})")
 
             elif step_type == 'assert':
                 selector = props.get('selector', '')
+                operator = props.get('operator', 'visible')
+                expected = props.get('value', '')
                 el = self._find_element(selector)
-                expected_text = props.get('value', '')
-                if el and expected_text:
-                    actual = el.text
-                    if expected_text not in actual:
-                        raise AssertionError(
-                            f"Assertion failed. Expected '{expected_text}' in '{actual}'")
+
+                if operator == 'visible':
+                    if not el or not el.is_displayed():
+                        raise AssertionError(f"Element '{selector}' is not visible")
+                elif operator == 'not_visible':
+                    if el and el.is_displayed():
+                        raise AssertionError(f"Element '{selector}' should not be visible")
+                elif operator == 'contains':
+                    if el:
+                        actual = el.text
+                        if expected not in actual:
+                            raise AssertionError(f"Expected '{expected}' in '{actual}'")
+                elif operator == 'equals':
+                    if el:
+                        actual = el.text
+                        if actual != expected:
+                            raise AssertionError(f"Expected '{expected}', got '{actual}'")
+                elif operator == 'enabled':
+                    if not el or not el.is_enabled():
+                        raise AssertionError(f"Element '{selector}' is not enabled")
+                elif operator == 'disabled':
+                    if el and el.is_enabled():
+                        raise AssertionError(f"Element '{selector}' should be disabled")
 
             elif step_type == 'wait':
-                delay = int(props.get('timeout', 5000))
+                delay = int(props.get('timeout', 1000))
                 time.sleep(delay / 1000.0)
 
             elif step_type == 'screenshot':
@@ -228,6 +339,94 @@ class AppiumExecutorService:
                         "text": f"[Screenshot captured: {len(screenshot_b64)} bytes]"
                     }
 
+            elif step_type == 'install_app':
+                apk_path = props.get('apk_path', '')
+                if apk_path:
+                    self._driver.install_app(apk_path)
+                    logger.info(f"📦 [Appium] Installed app: {apk_path}")
+
+            elif step_type == 'reset_app':
+                package_name = props.get('package_name', '') or self._settings.get('app_identifier', '')
+                if package_name:
+                    try:
+                        self._driver.terminate_app(package_name)
+                        time.sleep(1)
+                        self._driver.activate_app(package_name)
+                    except Exception:
+                        self._driver.reset()
+                else:
+                    self._driver.reset()
+                logger.info(f"🔄 [Appium] App reset: {package_name}")
+
+            elif step_type == 'launch_app':
+                deep_link = props.get('deep_link', '')
+                if deep_link.startswith('http') or '://' in deep_link:
+                    # It's a deep link URI
+                    self._driver.execute_script('mobile: deepLink', {
+                        'url': deep_link,
+                        'package': self._settings.get('app_identifier', '')
+                    })
+                elif deep_link:
+                    # It's a package name
+                    self._driver.activate_app(deep_link)
+                logger.info(f"🚀 [Appium] Launched: {deep_link}")
+
+            elif step_type == 'grant_permission':
+                permission = props.get('permission', 'android.permission.CAMERA')
+                package = self._settings.get('app_identifier', '')
+                if package:
+                    self._driver.execute_script('mobile: changePermissions', {
+                        'permissions': [permission],
+                        'action': 'grant',
+                        'appPackage': package
+                    })
+                    logger.info(f"🛡️ [Appium] Granted: {permission} to {package}")
+
+            elif step_type == 'mock_network':
+                profile = props.get('network_profile', '4g')
+                network_map = {
+                    '4g':      {'upload': 10240, 'download': 10240, 'latency': 20,   'offline': False},
+                    '3g':      {'upload': 384,   'download': 384,   'latency': 100,  'offline': False},
+                    '2g':      {'upload': 64,    'download': 64,    'latency': 300,  'offline': False},
+                    'edge':    {'upload': 30,    'download': 80,    'latency': 400,  'offline': False},
+                    'offline': {'upload': 0,     'download': 0,     'latency': 0,    'offline': True},
+                    'reset':   {'upload': 10240, 'download': 10240, 'latency': 0,    'offline': False},
+                }
+                settings = network_map.get(profile, network_map['4g'])
+                try:
+                    self._driver.set_network_conditions(**settings)
+                    logger.info(f"🌐 [Appium] Network throttled to: {profile}")
+                except Exception:
+                    # BrowserStack uses different API
+                    self._driver.execute_script('browserstack_executor: {"action": "setNetworkConditions", "arguments": {"networkProfile": "' + profile + '"}')
+
+            # ─── BIOMETRICS ───
+
+            elif step_type == 'fingerprint_pass':
+                try:
+                    # Appium 2.x — UiAutomator2 biometric auth
+                    self._driver.execute_script('mobile: fingerprint', {'fingerprintId': 1})
+                    logger.info("🪶 [Appium] Biometric: fingerprint accepted.")
+                except Exception:
+                    # Fallback for emulator ADB
+                    self._driver.press_keycode(66)  # KEYCODE_ENTER to confirm biometric
+
+            elif step_type == 'fingerprint_fail':
+                try:
+                    self._driver.execute_script('mobile: fingerprint', {'fingerprintId': -1})
+                    logger.info("🪶 [Appium] Biometric: fingerprint rejected.")
+                except Exception:
+                    self._driver.press_keycode(4)  # KEYCODE_BACK to cancel biometric prompt
+
+            elif step_type == 'face_id_pass':
+                try:
+                    # iOS Simulator biometric match
+                    self._driver.execute_script('mobile: enrollBiometric', {'isEnabled': True})
+                    self._driver.execute_script('mobile: sendBiometricMatch', {'type': 'faceId', 'match': True})
+                    logger.info("👀 [Appium] Face ID: accepted.")
+                except Exception:
+                    logger.warning("Face ID simulation not supported on this driver.")
+
             else:
                 logger.warning(f"📱 Unsupported step type: {step_type}")
 
@@ -238,17 +437,34 @@ class AppiumExecutorService:
             }
 
         except AssertionError as ae:
+            # — Screenshot on Assertion Failure (Grupo 3)
+            failure_screenshot = None
+            if self._driver:
+                try:
+                    failure_screenshot = self._driver.get_screenshot_as_base64()
+                    logger.info("📸 [Appium] Screenshot on failure captured.")
+                except Exception:
+                    pass
             return {
                 "status": 400,
                 "reason": "Assertion Error",
-                "text": str(ae)
+                "text": str(ae),
+                "screenshot_b64": failure_screenshot,
             }
         except Exception as e:
             logger.error(f"📱 Step Failed: {e}")
+            # — Screenshot on Unexpected Error
+            failure_screenshot = None
+            if self._driver:
+                try:
+                    failure_screenshot = self._driver.get_screenshot_as_base64()
+                except Exception:
+                    pass
             return {
                 "status": 500,
                 "reason": "Appium Error",
-                "text": str(e)
+                "text": str(e),
+                "screenshot_b64": failure_screenshot,
             }
 
     def _find_element(self, selector: str):
