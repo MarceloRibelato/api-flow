@@ -1,0 +1,134 @@
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from app.database import get_db
+from app.services.skill_service import SkillService
+from typing import List, Dict, Any
+
+router = APIRouter(prefix="/analysis/skills", tags=["skills"])
+
+@router.get("/")
+def list_skills():
+    """Lists available specialist skills by reading the skills directory."""
+    import os
+    import json
+    
+    skills_dir = SkillService.SKILLS_DIR
+    skills = []
+    
+    if os.path.exists(skills_dir):
+        for filename in os.listdir(skills_dir):
+            if filename.endswith(".json"):
+                try:
+                    with open(os.path.join(skills_dir, filename), "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        skills.append({
+                            "id": data.get("id"),
+                            "name": data.get("name"),
+                            "description": data.get("description")
+                        })
+                except Exception as e:
+                    print(f"Error loading skill {filename}: {e}")
+    
+    # Fallback if directory empty or error
+    if not skills:
+        skills = [
+            { "id": "mapping_flow_skill", "name": "Mapeamento de Fluxo", "description": "Analisa o fluxo principal." },
+            { "id": "generate_alternatives_skill", "name": "Geração de Alternativas", "description": "Cria variações de teste." }
+        ]
+    return skills
+
+@router.post("/flow/{flow_id}/execute/{skill_id}")
+def execute_general_skill(
+    flow_id: int,
+    skill_id: str,
+    user_id: int = Query(...),
+    company_id: int = Query(1),
+    db: Session = Depends(get_db)
+):
+    """Executes a generic skill with standard flow context."""
+    from app.services.flow_service import FlowService
+    
+    try:
+        # Load full structure (nodes, edges, cardData)
+        flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail="Flow not found")
+            
+        flow_data = FlowService.load(db, flow.project_id, company_id, flow.id, flow.flow_type)
+        
+        context = {
+            "nodes": flow_data.get("nodes", []),
+            "edges": flow_data.get("edges", []),
+            "cardData": flow_data.get("cardData", {}),
+            "flow_type": flow.flow_type,
+            "project_id": flow.project_id,
+            "mcp_insight": "" # Default empty
+        }
+
+        # SPECIAL HANDLING for UI Inspector: Inject live browser insights via MCP
+        if skill_id == "qa_specialist_ui_inspector":
+            try:
+                from app.services.mcp_playwright_service import MCPPlaywrightService
+                import asyncio
+                
+                # Check if we have a URL to inspect in the first node or card data
+                # Typically, the user would provide a base URL or it's in the flow
+                target_url = "" # No default URL
+                
+                # Try to find a URL in cardData
+                for node_id, data in flow_data.get("cardData", {}).items():
+                    if "url" in data and data["url"]:
+                        target_url = data["url"]
+                        break
+                
+                # Run MCP inspection
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                mcp_data = loop.run_until_complete(MCPPlaywrightService.inspect_url(target_url))
+                loop.close()
+                
+                if mcp_data.get("status") == "success":
+                    context["mcp_insight"] = f"Live inspection of {target_url} succeeded. Snapshot metadata attached."
+                else:
+                    context["mcp_insight"] = f"Live inspection failed: {mcp_data.get('message')}"
+            except Exception as e:
+                print(f"MCP Integration Error: {e}")
+                context["mcp_insight"] = "Navegador MCP não disponível no momento."
+        
+        result = SkillService.execute_skill(db, user_id, skill_id, context)
+        return result 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/flow/{flow_id}/generate-alternatives")
+def generate_alternatives(
+    flow_id: int,
+    user_id: int = Query(...), 
+    company_id: int = Query(1),
+    db: Session = Depends(get_db)
+):
+    """Executes the specialist mapping -> generation workflow for a specific flow."""
+    try:
+        alternatives = SkillService.generate_alternatives_workflow(db, user_id, flow_id, company_id)
+        return alternatives
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/save-generated-flow")
+def save_generated_flow(
+    payload: Dict[str, Any],
+    user_id: int = Query(...),
+    company_id: int = Query(1),
+    db: Session = Depends(get_db)
+):
+    """Saves a flow that was generated by the AI skill."""
+    from app.services.flow_service import FlowService
+    from app.schemas.flow_schemas import FlowSaveSchema
+    
+    try:
+        # The AI returns a structure compatible with FlowSaveSchema
+        save_schema = FlowSaveSchema(**payload)
+        result = FlowService.save(db, save_schema, company_id, user_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save generated flow: {str(e)}")

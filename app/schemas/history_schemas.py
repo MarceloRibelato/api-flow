@@ -18,13 +18,13 @@ class AssertionResult(BaseModel):
 
 class ExecutionHistoryBase(BaseModel):
     batch_id: Optional[str] = None  # Groups all API calls from a single run
-    api_id: Optional[int] = None
+    api_id: Optional[Union[int, str]] = None
     api_name: Optional[str] = None  # Added api_name
     project_id: Optional[int] = None
-    flow_id: Optional[int] = None
+    flow_id: Optional[Union[int, str]] = None
     schedule_id: Optional[int] = None  # Added schedule_id
     feature_name: Optional[str] = None # Added feature_name
-    node_id: Optional[str] = None # Added node_id for stable identifier (e.g. '1-1')
+    node_id: Optional[Union[int, str]] = None # Added node_id for stable identifier (e.g. '1-1')
     node_name: Optional[str] = None  # Added node_name for functional grouping
     method: Optional[str] = "GET"
     url: str
@@ -100,7 +100,9 @@ class ExecutionHistorySummary(BaseModel):
     environment_id: Optional[int] = None  # Added environment_id
     environment_name: Optional[str] = None
     node_name: Optional[str] = None  # Added node_name
-    node_id: Optional[str] = None  # Added node_id
+    node_id: Optional[Union[int, str]] = None  # Added node_id
+    api_id: Optional[Union[int, str]] = None
+    flow_id: Optional[Union[int, str]] = None
     api_name: Optional[str] = None  # RESTORED: Critical for matching in frontend
     success: bool # Read directly from Model property
     error_message: Optional[str] = None # Critical for diagnostics

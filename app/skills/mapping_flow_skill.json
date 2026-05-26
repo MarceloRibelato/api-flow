@@ -1,0 +1,6 @@
+{
+  "id": "mapping_flow_skill",
+  "name": "Map Flow Logic",
+  "description": "Analyzes a React Flow structure to extract business logic and technical constraints.",
+  "prompt": "You are an expert QA Solutions Architect. Your task is to analyze the following Test Flow (API, Web E2E, or Mobile) and create a semantic semantic blueprint.\n\nFlow Data:\nNodes: {{nodes}}\nEdges: {{edges}}\nCard Data: {{cardData}}\n\nInstructions:\n1. Identify the 'Main Success Path' (Happy Path).\n2. Identify critical data and logical dependencies (e.g., Token from login used in Profile, or UI element that appears after a specific click).\n3. List all technical touchpoints: \n   - API: Method and Path.\n   - Web/Mobile: Key selectors and actions (click, type, etc.).\n4. Describe the overall business goal of this flow.\n\nReturn a JSON object with this structure:\n{\n  \"goal\": \"string\",\n  \"platform\": \"api|web|mobile\",\n  \"touchpoints\": [ { \"type\": \"api|ui\", \"method_or_action\": \"string\", \"path_or_selector\": \"string\" } ],\n  \"dependencies\": [ { \"from_node\": \"string\", \"to_node\": \"string\", \"variable_or_element\": \"string\" } ],\n  \"logic_summary\": \"string\"\n}\nRespond ONLY with raw JSON."
+}

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
+from app.auth import get_current_user, verify_password
 from app.database import get_db
 from app.exceptions import (
     InvalidCredentialsError, AccountPendingError, DuplicateResourceError,
@@ -30,17 +30,20 @@ def login(
     logger.info("=== LOGIN REQUEST ===")
     logger.info(f"Username attempt: {login_data.username}")
 
-    user = AuthService.authenticate_user(db, login_data.username, login_data.password)
-
+    user = AuthService.get_user_by_username(db, login_data.username)
     if not user:
+        logger.warning(f"Login failed: User '{login_data.username}' not found in database.")
         raise InvalidCredentialsError()
-        
+
+    if not verify_password(login_data.password, user.hashed_password):
+        logger.warning(f"Login failed: Incorrect password for user '{login_data.username}'.")
+        raise InvalidCredentialsError()
+
     if user.status != 'active':
+        logger.warning(f"Login failed: User '{login_data.username}' is in status '{user.status}'.")
         raise AccountPendingError()
 
     logger.info(f"Login successful for user: {login_data.username}")
-    logger.info(f"Access token generated for: {user.username}")
-
     return AuthService.create_token_response(user)
 
 

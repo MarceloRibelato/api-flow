@@ -2,6 +2,7 @@ import logging
 import json
 import time as _time
 from playwright.sync_api import sync_playwright
+import playwright_stealth
 
 logger = logging.getLogger(__name__)
 
@@ -83,19 +84,32 @@ class PlaywrightExecutorService:
             logger.info("Playwright Browser launched (Sync/Headless/Optimized)")
         
         if not self._context:
-            context_args = {}
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            context_args = {
+                "viewport": {"width": 1280, "height": 720},
+                "user_agent": user_agent,
+                "extra_http_headers": {
+                    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                }
+            }
+            
             if video_dir:
-                # Re-enabled video recording but at a lower resolution to explicitly prevent CPU bottleneck
                 context_args["record_video_dir"] = video_dir
-                context_args["record_video_size"] = {"width": 800, "height": 600}
-                logger.info(f"📹 Video Recording enabled in: {video_dir} (Optimized 800x600 resolution)")
+                context_args["record_video_size"] = {"width": 1280, "height": 720}
+                logger.info(f"📹 Video Recording enabled in: {video_dir} (1280x720 resolution)")
                 
             self._context = self._browser.new_context(**context_args)
-            self._context.set_default_timeout(30000)
-            self._context.set_default_navigation_timeout(30000)
+            self._context.set_default_timeout(60000)
+            self._context.set_default_navigation_timeout(60000)
         
         if not self._page:
             self._page = self._context.new_page()
+            
+            # Apply stealth to bypass bot detection
+            try:
+                playwright_stealth.stealth_sync(self._page)
+            except Exception as e:
+                logger.warning(f"Stealth application failed: {e}")
             
             # Auto-handle dialogs to prevent deadlocks
             self._page.on("dialog", lambda dialog: dialog.accept())
@@ -194,9 +208,9 @@ class PlaywrightExecutorService:
             except:
                 timeout = 45000
         
-        # Ensure a minimum timeout for Docker environments
-        if timeout < 15000:
-            timeout = 15000
+        # Ensure a minimum timeout for Docker environments (increased for slow pages like banks)
+        if timeout < 60000:
+            timeout = 60000
         
         logger.info(f"Executing E2E step: {name} ({step_type}) [Timeout: {timeout}ms]")
         
@@ -239,14 +253,16 @@ class PlaywrightExecutorService:
                         except Exception as e:
                             logger.warning(f"      ⚠️ Could not sanitize URL for Docker: {e}")
 
-                        # Use 'domcontentloaded' for better reliability and speed in Docker instead of waiting for all assets
-                        self._page.goto(url, timeout=timeout, wait_until='domcontentloaded')
+                        # Use 'commit' for maximum resilience in Docker, same as Web Studio
+                        self._page.goto(url, timeout=timeout, wait_until='commit')
                         step_result["text"] = f"Navigated to {url}"
                     else:
                         raise ValueError("URL is missing for browser step")
 
                 elif step_type == 'click':
                     selector = properties.get('selector', '')
+                    x_coord = properties.get('x')
+                    y_coord = properties.get('y')
                     if selector:
                         el = target.locator(selector).first
                         try:
@@ -263,12 +279,21 @@ class PlaywrightExecutorService:
                         # Brief wait for UI to handle event
                         self._page.wait_for_timeout(50)
                         step_result["text"] = f"Clicked element: {selector}"
+                    elif x_coord is not None and y_coord is not None:
+                        # Fallback: click by coordinates recorded during Web Studio capture
+                        import time
+                        t1 = time.time()
+                        self._page.mouse.click(float(x_coord), float(y_coord))
+                        t2 = time.time()
+                        logger.info(f"⏱️ Coordinate click at ({x_coord},{y_coord}): {round((t2-t1)*1000)}ms")
+                        self._page.wait_for_timeout(50)
+                        step_result["text"] = f"Clicked at coordinates ({x_coord}, {y_coord})"
                     else:
                         raise ValueError("Selector is missing for click step")
                         
                 elif step_type == 'type':
                     selector = properties.get('selector', '')
-                    value = properties.get('value', '')
+                    value = str(properties.get('value', ''))
                     if selector:
                         el = target.locator(selector).first
                         try:
@@ -287,6 +312,27 @@ class PlaywrightExecutorService:
                         display_value = '••••••' if any(s in selector.lower() for s in _sensitive) else (value[:60] + ('…' if len(value) > 60 else ''))
                         step_result["text"] = f"Typed '{display_value}' into {selector}"
                     else:
+                        # 🧠 Smart Fallback: Try to use the currently focused element
+                        # (Very useful if Step A clicked the input and Step B is the typing)
+                        try:
+                            # Wait a brief moment for focus to settle after the previous click
+                            for _ in range(10):
+                                is_input = self._page.evaluate("""() => {
+                                    const el = document.activeElement;
+                                    if (!el) return false;
+                                    const tag = el.tagName;
+                                    const role = el.getAttribute('role');
+                                    return (['INPUT', 'TEXTAREA'].includes(tag) || role === 'textbox' || el.contentEditable === 'true');
+                                }""")
+                                if is_input:
+                                    logger.info(f"🧠 [Smart Fallback] No selector for type step, but an input is focused. Typing directly.")
+                                    self._page.keyboard.type(value)
+                                    step_result["text"] = f"Typed into focused element (no selector provided)"
+                                    return step_result # Success
+                                self._page.wait_for_timeout(200)
+                        except Exception as fe:
+                            logger.warning(f"Smart fallback check failed: {fe}")
+                        
                         raise ValueError("Selector is missing for type step")
                         
                 elif step_type == 'wait_selector':
@@ -304,10 +350,15 @@ class PlaywrightExecutorService:
                     
                 elif step_type == 'hover':
                     selector = properties.get('selector', '')
+                    x_coord = properties.get('x')
+                    y_coord = properties.get('y')
                     if selector:
                         el = target.locator(selector).first
                         el.hover(timeout=timeout)
                         step_result["text"] = f"Hovered over {selector}"
+                    elif x_coord is not None and y_coord is not None:
+                        self._page.mouse.move(float(x_coord), float(y_coord))
+                        step_result["text"] = f"Hovered over coordinates ({x_coord}, {y_coord})"
                     else:
                         raise ValueError("Selector is missing for hover step")
                         
@@ -317,18 +368,34 @@ class PlaywrightExecutorService:
                         target.locator(selector).first.scroll_into_view_if_needed(timeout=timeout)
                         step_result["text"] = f"Scrolled to {selector}"
                     else:
-                        value = properties.get('value', '0').lower()
-                        # Use body locator for evaluation to support both Page and FrameLocator
-                        eval_target = target if hasattr(target, 'evaluate') else target.locator("body")
-                        if value == 'bottom':
-                            eval_target.evaluate("el => (el.scrollTo ? el.scrollTo(0, el.scrollHeight) : window.scrollTo(0, document.body.scrollHeight))")
-                            step_result["text"] = "Scrolled to bottom"
-                        elif value == 'top':
-                            eval_target.evaluate("el => (el.scrollTo ? el.scrollTo(0, 0) : window.scrollTo(0, 0))")
-                            step_result["text"] = "Scrolled to top"
-                        else:
-                            eval_target.evaluate(f"el => (el.scrollBy ? el.scrollBy(0, {value}) : window.scrollBy(0, {value}))")
-                            step_result["text"] = f"Scrolled by {value}px"
+                        dx = properties.get('deltaX', 0)
+                        dy = properties.get('deltaY', properties.get('value', 0))
+                        x = properties.get('x')
+                        y = properties.get('y')
+                        
+                        logger.info(f"📜 [Executor] Scroll action: deltaX={dx}, deltaY={dy}, x={x}, y={y}")
+                        
+                        try:
+                            # 🧠 Granular Scroll: use mouse.wheel to respect inner scrollable containers
+                            dx_val = int(float(dx)) if dx is not None else 0
+                            dy_val = int(float(dy)) if dy is not None else 0
+                            
+                            if dy == 'bottom':
+                                self._page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                                step_result["text"] = "Scrolled to bottom"
+                            elif dy == 'top':
+                                self._page.evaluate("() => window.scrollTo(0, 0)")
+                                step_result["text"] = "Scrolled to top"
+                            else:
+                                if x is not None and y is not None:
+                                    self._page.mouse.move(float(x), float(y))
+                                self._page.mouse.wheel(dx_val, dy_val)
+                                step_result["text"] = f"Scrolled by X:{dx_val} Y:{dy_val}"
+                        except Exception as e:
+                            logger.warning(f"Scroll via mouse.wheel failed: {e}")
+                            # Final fallback to window.scrollBy
+                            self._page.evaluate(f"window.scrollBy({dx_val if 'dx_val' in locals() else 0}, {dy_val if 'dy_val' in locals() else 0})")
+                            step_result["text"] = f"Scrolled by X:{dx_val if 'dx_val' in locals() else 0} Y:{dy_val if 'dy_val' in locals() else 0} (fallback)"
                             
                 elif step_type == 'keypress':
                     key = properties.get('value', 'Enter')

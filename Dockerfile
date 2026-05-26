@@ -1,6 +1,6 @@
 # Use an official lightweight Python image.
 # https://hub.docker.com/_/python
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # Set environment variables
 # PYTHONDONTWRITEBYTECODE: Prevents Python from writing pyc files to disc
@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
     ffmpeg \
+    unzip \
+    curl \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file

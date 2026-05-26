@@ -28,6 +28,9 @@ from app.routes.agent_routes import router as agent_router
 from app.routes.execution_routes import router as execution_router
 from app.routes.import_routes import router as import_router
 from app.routes.cicd_routes import router as cicd_router
+from app.routes.skill_routes import router as skill_router
+from app.routes.appium_inspector_routes import router as appium_inspector_router
+from app.routes.web_inspector_routes import router as web_inspector_router
 
 # ===== CONFIGURAÇÃO DE LOGGING =====
 setup_logging()
@@ -49,21 +52,39 @@ async def lifespan(app: FastAPI):
     for i in range(max_retries):
         try:
             logger.info(f"Tentativa de conexão com DB ({i+1}/{max_retries})...")
+            # Step 1: Create missing tables via SQL Alchemy
             Base.metadata.create_all(bind=engine)
-            logger.info("Tabelas verificadas/criadas com sucesso")
+            logger.info("Tabelas verificadas/criadas via metadata sqlalchemy")
             
-            # Run Alembic migrations (replaces the old manual ALTER TABLE statements)
+            # CRITICAL: Dispose engine to release connections before Alembic takes over
+            # This prevents deadlocks in standard PostgreSQL/SQLAlchemy pooling.
+            engine.dispose()
+            logger.debug("SQLAlchemy Engine disposed before Alembic upgrade")
+            
+            # Step 2: Run Alembic migrations via Subprocess (Avoids deadlocks/logging clashes)
             try:
-                from alembic.config import Config as AlembicConfig
-                from alembic import command as alembic_command
-                import os
-
-                alembic_cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), '..', 'alembic.ini'))
-                alembic_cfg.set_main_option("sqlalchemy.url", str(engine.url))
-                alembic_command.upgrade(alembic_cfg, "head")
-                logger.info("Alembic migrations executadas com sucesso")
+                import subprocess
+                logger.info("Iniciando Alembic upgrade head via subprocess...")
+                
+                # Get path to alembic.ini
+                ini_path = os.path.join(os.path.dirname(__file__), '..', 'alembic.ini')
+                
+                result = subprocess.run(
+                    ["alembic", "-c", ini_path, "upgrade", "head"],
+                    capture_output=True,
+                    text=True,
+                    env=os.environ.copy()
+                )
+                
+                if result.returncode == 0:
+                    logger.info(f"Alembic migrations executadas com sucesso")
+                    if result.stdout:
+                        logger.debug(f"Alembic stdout: {result.stdout}")
+                else:
+                    logger.warning(f"Alembic migration failed with return code {result.returncode}")
+                    logger.warning(f"Alembic stderr: {result.stderr}")
             except Exception as alembic_err:
-                logger.warning(f"Alembic migration skipped (may need manual run): {alembic_err}")
+                logger.warning(f"Alembic migration via subprocess failed: {alembic_err}")
             
             break
         except Exception as e:
@@ -72,8 +93,6 @@ async def lifespan(app: FastAPI):
                 time.sleep(retry_interval)
             else:
                 logger.error(f"Erro CRÍTICO ao conectar no DB após {max_retries} tentativas: {e}")
-                # We could raise here to crash the container and let Docker restart it, 
-                # but for now let's just log critical error.
                 raise e
 
     logger.info("Iniciando scheduler...")
@@ -147,6 +166,9 @@ app.include_router(agent_router)
 app.include_router(execution_router)
 app.include_router(import_router)
 app.include_router(cicd_router)
+app.include_router(skill_router)
+app.include_router(appium_inspector_router, prefix="/mobile-inspector", tags=["Mobile Inspector"])
+app.include_router(web_inspector_router, prefix="/web-inspector", tags=["Web Studio"])
 
 # Dashboard Router
 from app.routes.dashboard_routes import router as dashboard_router
@@ -159,6 +181,7 @@ app.include_router(proxy_router)
 # Front Recording Router
 from app.routes.front_recording_routes import router as front_recording_router
 app.include_router(front_recording_router)
+
 
 # Mount Videos Static Directory
 from fastapi.staticfiles import StaticFiles
@@ -187,6 +210,12 @@ async def log_requests(request, call_next):
 
     try:
         response = await call_next(request)
+        if response.status_code == 404:
+            logger.warning(f"🔍 [404 Diagnostic] Path: {request.url.path} | Method: {request.method} | Params: {request.query_params}")
+            # Log all registered routes for comparison when 404 occurs
+            # routes = [r.path for r in request.app.routes]
+            # logger.debug(f"🔍 [404 Diagnostic] Available: {routes}")
+        
         if response.status_code >= 400:
             logger.warning(f"RESPONSE: {request.method} {request.url} - Status: {response.status_code}")
         else:

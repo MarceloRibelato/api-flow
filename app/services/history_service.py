@@ -173,10 +173,10 @@ class HistoryService:
                   UserDB.company_id == company_id
              )
 
-        if api_id is not None: query = query.filter(ApiExecutionHistory.api_id == api_id)
-        if flow_id is not None: query = query.filter(ApiExecutionHistory.flow_id == flow_id)
+        if api_id is not None: query = query.filter(ApiExecutionHistory.api_id == str(api_id))
+        if flow_id is not None: query = query.filter(ApiExecutionHistory.flow_id == str(flow_id))
         if environment_id is not None: query = query.filter(ApiExecutionHistory.environment_id == environment_id)
-        if node_id: query = query.filter(ApiExecutionHistory.node_id == node_id)
+        if node_id: query = query.filter(ApiExecutionHistory.node_id == str(node_id))
         if execution_type: query = query.filter(ApiExecutionHistory.execution_type == execution_type)
         if method: query = query.filter(ApiExecutionHistory.method == method.upper())
         if status_code is not None: query = query.filter(ApiExecutionHistory.status_code == status_code)

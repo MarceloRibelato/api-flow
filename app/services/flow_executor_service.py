@@ -420,7 +420,8 @@ class FlowExecutorService:
                                     # Fail-Fast: Interrupt path on ANY primary step failure
                                     path_success = False
                                     flow_fail_count += 1
-                                    logger.error(f"        ❌ Step failed: {final_error_message}. Interrupting execution.")
+                                    logger.error(f"        ❌ Step failed: {final_error_message}. "
+                                                 f"Type: {flow_type}. Node: {current_id}. Interrupting execution.")
                                 else: 
                                     flow_success_count += 1
 
@@ -663,7 +664,7 @@ class FlowExecutorService:
             if len(flows) > 1:
                 logger.info(f"ℹ️  Selecting flow '{latest_flow.get('name')}' (ID: {latest_flow.get('id')}, Type: {latest_flow.get('flow_type')}) for execution.")
             
-            s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot)
+            s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type)
             success_count += s
             fail_count += f
         else:
@@ -708,7 +709,7 @@ class FlowExecutorService:
         variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
 
         # 5. Execute
-        return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot)
+        return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type)
 
     @staticmethod
     def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False):
@@ -766,7 +767,7 @@ class FlowExecutorService:
                         s, f = FlowExecutorService.execute_flow_logic(
                             thread_db, latest_flow, product_id, env_id, company_id, 
                             variables.copy(), # Copy vars to avoid contamination
-                            feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot
+                            feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type
                         )
                         f_success = s
                         f_fail = f

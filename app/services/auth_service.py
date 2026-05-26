@@ -16,10 +16,12 @@ from app.schemas.auth_schemas import UserCreate, UserUpdate, ResetPasswordReques
 class AuthService:
     @staticmethod
     def get_user_by_username(db: Session, username: str):
-        user = db.query(UserDB).filter(UserDB.username == username).first()
+        username_clean = username.strip().lower()
+        # Case-insensitive lookup for both fields
+        user = db.query(UserDB).filter(UserDB.username.ilike(username_clean)).first()
         if user:
             return user
-        return db.query(UserDB).filter(UserDB.email == username).first()
+        return db.query(UserDB).filter(UserDB.email.ilike(username_clean)).first()
 
     @staticmethod
     def authenticate_user(db: Session, username: str, password: str):
@@ -100,8 +102,8 @@ class AuthService:
         terms_accepted_at = datetime.utcnow()
 
         db_user = UserDB(
-            username=user.username,
-            email=user.email,
+            username=user.username.strip().lower(),
+            email=user.email.strip().lower() if user.email else None,
             hashed_password=hashed_pwd,
             full_name=user.full_name,
             cpf=cpf_clean,

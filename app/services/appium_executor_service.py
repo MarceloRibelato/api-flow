@@ -70,21 +70,52 @@ class AppiumExecutorService:
         """Conecta ao servidor Appium local via webdriver.Remote."""
         try:
             from appium import webdriver as appium_webdriver
-            from appium.options import AppiumOptions
+            from appium.options.common.base import AppiumOptions
 
             options = AppiumOptions()
             options.platform_name = "Android"
-            options.set_capability("deviceName", self._settings["device_name"])
+            options.set_capability("appium:deviceName", self._settings["device_name"])
             if self._settings.get("platform_version"):
-                options.set_capability("platformVersion", self._settings["platform_version"])
+                options.set_capability("appium:platformVersion", self._settings["platform_version"])
             if self._settings.get("app_identifier"):
-                options.set_capability("app", self._settings["app_identifier"])
-            options.set_capability("automationName", "UiAutomator2")
-            options.set_capability("noReset", True)
+                app_id = self._settings["app_identifier"]
+                # Detect if it's an APK file path or an installed package name
+                is_apk_path = (
+                    app_id.lower().endswith('.apk') or
+                    '\\' in app_id or
+                    ('/' in app_id and not app_id.startswith('com.') and not app_id.startswith('br.') and not app_id.startswith('io.'))
+                )
+                if is_apk_path:
+                    # Rewrite Windows path for Docker if needed
+                    if app_id.startswith('C:\\') or app_id.startswith('c:\\'):
+                        # APK must be accessible from within the container — warn but still set
+                        logger.warning(f"📱 [Appium] APK path '{app_id}' is a Windows local path. "
+                                       "Ensure Appium server runs on the host (not inside Docker).")
+                    options.set_capability("appium:app", app_id)
+                    logger.info(f"📱 [Appium] Using APK install path: {app_id}")
+                else:
+                    # e.g. 'br.com.sicoob' or 'com.vibra.app' or 'com.pkg/com.pkg.MainActivity'
+                    if '/' in app_id:
+                        pkg, activity = app_id.split('/', 1)
+                        options.set_capability("appium:appPackage", pkg)
+                        options.set_capability("appium:appActivity", activity)
+                        # Wait for any activity to avoid splash screen timeouts
+                        options.set_capability("appium:appWaitActivity", "*")
+                        logger.info(f"📱 [Appium] Using package: {pkg} and activity: {activity}")
+                    else:
+                        options.set_capability("appium:appPackage", app_id)
+                        logger.info(f"📱 [Appium] Using installed package: {app_id}")
+            options.set_capability("appium:automationName", "UiAutomator2")
+            options.set_capability("appium:noReset", False)
+            options.set_capability("appium:newCommandTimeout", 3600)
+            options.set_capability("appium:ignoreUnimportantViews", False)
 
             server_url = self._settings["server_url"]
-            if not server_url.endswith("/wd/hub"):
-                server_url = server_url.rstrip("/") + "/wd/hub"
+            
+            # Automatically route localhost to host machine when running in Docker
+            if "localhost" in server_url or "127.0.0.1" in server_url:
+                server_url = server_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+                logger.info("📱 [Appium] Auto-rewriting localhost to host.docker.internal for Docker networking")
 
             self._driver = appium_webdriver.Remote(
                 command_executor=server_url,
@@ -104,18 +135,36 @@ class AppiumExecutorService:
         """Conecta ao BrowserStack / SauceLabs via Remote WebDriver."""
         try:
             from appium import webdriver as appium_webdriver
-            from appium.options import AppiumOptions
+            from appium.options.common.base import AppiumOptions
 
             options = AppiumOptions()
             options.platform_name = "Android"
             s = self._settings
 
-            options.set_capability("deviceName", s["device_name"])
+            options.set_capability("appium:deviceName", s["device_name"])
             if s.get("platform_version"):
-                options.set_capability("platformVersion", s["platform_version"])
+                options.set_capability("appium:platformVersion", s["platform_version"])
             if s.get("app_identifier"):
-                options.set_capability("app", s["app_identifier"])
-            options.set_capability("automationName", "UiAutomator2")
+                app_id = s["app_identifier"]
+                is_apk_path = (
+                    app_id.lower().endswith('.apk') or
+                    '\\' in app_id or
+                    ('/' in app_id and not app_id.startswith('com.') and not app_id.startswith('br.') and not app_id.startswith('io.'))
+                )
+                if is_apk_path:
+                    options.set_capability("appium:app", app_id)
+                else:
+                    if '/' in app_id:
+                        pkg, activity = app_id.split('/', 1)
+                        options.set_capability("appium:appPackage", pkg)
+                        options.set_capability("appium:appActivity", activity)
+                        options.set_capability("appium:appWaitActivity", "*")
+                    else:
+                        options.set_capability("appium:appPackage", app_id)
+            options.set_capability("appium:automationName", "UiAutomator2")
+            options.set_capability("appium:noReset", False)
+            options.set_capability("appium:newCommandTimeout", 3600)
+            options.set_capability("appium:ignoreUnimportantViews", False)
 
             # Cloud-specific extras
             if self._provider == "browserstack":
@@ -173,6 +222,11 @@ class AppiumExecutorService:
         logger.info(f"📱 [{self._provider or 'appium'}] Executing step: {step_type} — {step_name}")
 
         try:
+            # Log current screen state for debugging physical device mismatches
+            try:
+                window_size = self._driver.get_window_size()
+                logger.info(f"📱 [Appium] Screen resolution: {window_size['width']}x{window_size['height']}")
+            except: pass
             if not self._driver:
                 logger.warning("📱 No active Appium driver — step simulated.")
                 time.sleep(0.5)
@@ -184,12 +238,30 @@ class AppiumExecutorService:
 
             if step_type == 'tap':
                 selector = props.get('selector') or props.get('value', '')
+                x = props.get('x')
+                y = props.get('y')
+                if x is not None: x = int(x)
+                if y is not None: y = int(y)
                 timeout = int(props.get('timeout', 5000))
+                
                 el = self._find_element(selector, timeout_ms=timeout)
                 if el:
-                    el.click()
+                    # Robust Click: Get element location and tap the center
+                    # el.click() often fails silently on some Android builds
+                    loc = el.location
+                    size = el.size
+                    cx = loc['x'] + (size['width'] // 2)
+                    cy = loc['y'] + (size['height'] // 2)
+                    logger.info(f"📍 [Appium] Tapping element center: ({cx}, {cy})")
+                    self._driver.tap([(cx, cy)])
+                elif x is not None and y is not None:
+                    logger.info(f"📍 [Appium] Selector '{selector}' failed. Falling back to explicit coordinates ({x}, {y})")
+                    self._driver.tap([(x, y)])
                 else:
-                    raise Exception(f"Element '{selector}' not found for click after {timeout}ms")
+                    raise Exception(f"Element '{selector}' not found for click and no coordinates available as fallback.")
+                
+                # Small wait for UI response
+                time.sleep(0.5)
 
             elif step_type == 'long_press':
                 from appium.webdriver.common.touch_action import TouchAction
@@ -206,12 +278,49 @@ class AppiumExecutorService:
             elif step_type == 'type':
                 selector = props.get('selector', '')
                 value = props.get('value', '')
+                x = props.get('x')
+                y = props.get('y')
+                if x is not None: x = int(x)
+                if y is not None: y = int(y)
                 timeout = int(props.get('timeout', 5000))
+                
                 el = self._find_element(selector, timeout_ms=timeout)
+                success = False
+                
                 if el:
-                    el.send_keys(value)
-                else:
-                    raise Exception(f"Element '{selector}' not found for type after {timeout}ms")
+                    try:
+                        # 1. Fast Path: Try direct input (works for standard EditText)
+                        el.send_keys(value)
+                        success = True
+                        logger.info(f"⌨️ [Appium] Direct input success")
+                    except Exception:
+                        # 2. Robust Fallback: Tap center then type (works for Flutter/Hybrid)
+                        try:
+                            loc = el.location
+                            size = el.size
+                            cx = loc['x'] + (size['width'] // 2)
+                            cy = loc['y'] + (size['height'] // 2)
+                            self._driver.tap([(cx, cy)])
+                            time.sleep(0.4)
+                            self._driver.execute_script('mobile: type', {'text': value})
+                            success = True
+                            logger.info(f"⌨️ [Appium] Enhanced type success (Tap+Type)")
+                        except Exception as e:
+                            logger.warning(f"⚠️ [Appium] Fast and Enhanced type failed: {e}")
+                
+                if not success:
+                    if x is not None and y is not None:
+                        logger.info(f"📍 [Appium] Falling back to coordinate type at ({x}, {y})")
+                        self._driver.tap([(x, y)])
+                        time.sleep(0.8) # Wait for focus/keyboard
+                        try:
+                            self._driver.execute_script('mobile: type', {'text': value})
+                            success = True
+                        except Exception as e2:
+                            logger.error(f"❌ [Appium] Global type failed: {e2}")
+                            raise e2
+                    else:
+                        raise Exception(f"Element '{selector}' cannot receive text and no coordinates available as fallback.")
 
             elif step_type == 'clear_field':
                 selector = props.get('selector', '')
@@ -445,10 +554,21 @@ class AppiumExecutorService:
             else:
                 logger.warning(f"📱 Unsupported step type: {step_type}")
 
+            # --- Capture screenshot on success if requested ---
+            screenshot_b64 = None
+            if capture_screenshot:
+                try:
+                    # Small grace period for UI stabilization before screenshot
+                    time.sleep(0.2)
+                    screenshot_b64 = self._driver.get_screenshot_as_base64()
+                except Exception:
+                    pass
+
             return {
                 "status": 200,
                 "reason": "OK",
-                "text": f"Step '{step_type}' executed successfully."
+                "text": f"Step '{step_type}' executed successfully.",
+                "screenshot_b64": screenshot_b64
             }
 
         except AssertionError as ae:
@@ -482,8 +602,42 @@ class AppiumExecutorService:
                 "screenshot_b64": failure_screenshot,
             }
 
+    def _find_elements(self, selector: str, timeout_ms: int = 5000):
+        """Localiza todos os elementos que combinam com o seletor usando espera explícita."""
+        if not self._driver or not selector:
+            return []
+        try:
+            from appium.webdriver.common.appiumby import AppiumBy
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+
+            timeout_s = max(0.5, timeout_ms / 1000.0)
+            wait = WebDriverWait(self._driver, timeout_s)
+            
+            # Detect proper locator strategy
+            if selector.startswith('/') or selector.startswith('//'):
+                locator = (AppiumBy.XPATH, selector)
+            elif ':id/' in selector or '/' in selector:
+                locator = (AppiumBy.ID, selector)
+            else:
+                locator = (AppiumBy.ACCESSIBILITY_ID, selector)
+
+            try:
+                # wait.until(EC.presence_of_all_elements_located) can be slow or fail if some elements 
+                # are partially off-screen. We'll use a safer approach: wait for at least one, 
+                # then return all currently found.
+                wait.until(EC.presence_of_element_located(locator))
+                return self._driver.find_elements(*locator)
+            except:
+                # If timeout reached, return empty instead of raising
+                return []
+
+        except Exception as e:
+            logger.warning(f"📱 Elements search failed: {selector} — {e}")
+            return []
+
     def _find_element(self, selector: str, timeout_ms: int = 5000):
-        """Localiza elemento por accessibility id, xpath ou text usando timeout explícito."""
+        """Localiza elemento por ID, accessibility id, xpath ou text usando timeout explícito e fallback."""
         if not self._driver or not selector:
             return None
         try:
@@ -491,15 +645,76 @@ class AppiumExecutorService:
             from selenium.webdriver.support.ui import WebDriverWait
             from selenium.webdriver.support import expected_conditions as EC
             
+            # --- 0. Normalize Selector (Handle multi-line or extra spaces) ---
+            # Remove newlines and trim to increase match chances on physical devices
+            clean_selector = " ".join(selector.split()) 
+            
             timeout_s = max(0.5, timeout_ms / 1000.0)
             wait = WebDriverWait(self._driver, timeout_s)
             
+            # 1. Detect proper locator strategy
             if selector.startswith('/') or selector.startswith('//'):
                 locator = (AppiumBy.XPATH, selector)
+            elif ':id/' in selector or '/' in selector:
+                # Common Android resource-id pattern
+                locator = (AppiumBy.ID, selector)
             else:
+                # Default to accessibility ID (content-desc)
                 locator = (AppiumBy.ACCESSIBILITY_ID, selector)
                 
-            return wait.until(EC.presence_of_element_located(locator))
+            try:
+                el = wait.until(EC.presence_of_element_located(locator))
+                logger.info(f"🎯 [Appium] Found element with primary strategy {locator[0]}")
+                return el
+            except Exception:
+                # Fallback: if ID/AccessibilityID fails, try the other one briefly
+                fallback_timeout = 1.5
+                short_wait = WebDriverWait(self._driver, fallback_timeout)
+                
+                # If we tried ID, try Accessibility ID now
+                if locator[0] == AppiumBy.ID:
+                    try: 
+                        el = short_wait.until(EC.presence_of_element_located((AppiumBy.ACCESSIBILITY_ID, selector)))
+                        logger.info(f"🎯 [Appium] Found with fallback: Accessibility ID")
+                        return el
+                    except: pass
+                # If we tried Accessibility ID, try ID now
+                elif locator[0] == AppiumBy.ACCESSIBILITY_ID:
+                    try: 
+                        el = short_wait.until(EC.presence_of_element_located((AppiumBy.ID, selector)))
+                        logger.info(f"🎯 [Appium] Found with fallback: ID")
+                        return el
+                    except: pass
+                
+                # 3. Final fallback strategy: Combined attribute search (High Performance)
+                # Instead of looping through strategies, we use a single broad XPath search
+                # to reduce network round-trips between the backend and Appium.
+
+                partial_text = clean_selector[:30] if len(clean_selector) > 30 else clean_selector
+                
+                # Combine multiple possible locations in one query
+                combined_xpath = (
+                    f"//*[@text='{selector}' or @content-desc='{selector}' or "
+                    f"contains(@text, '{partial_text}') or contains(@content-desc, '{partial_text}') or "
+                    f"@hint='{selector}' or @placeholder='{selector}']"
+                )
+
+                try:
+                    el = short_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, combined_xpath)))
+                    logger.info(f"🎯 [Appium] Found with combined adaptive XPath")
+                    return el
+                except:
+                    # Final attempt: UIAutomator (sometimes more reliable than XPath on Android)
+                    try:
+                        uia_strategy = f'new UiSelector().textContains("{partial_text}")'
+                        el = short_wait.until(EC.presence_of_element_located((AppiumBy.ANDROID_UIAUTOMATOR, uia_strategy)))
+                        logger.info(f"🎯 [Appium] Found with UIAutomator fallback")
+                        return el
+                    except:
+                        pass
+                    
+                raise # Re-raise if all fail
+                
         except Exception as e:
             logger.warning(f"📱 Element not found: {selector} after {timeout_ms}ms — {e}")
             return None

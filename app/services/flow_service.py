@@ -80,15 +80,19 @@ class FlowService:
             db.flush()
 
         # 2. Sync Logic (Proper Deletion Order to avoid FK Violations)
-        # Delete E2E steps first (child of CardData)
-        card_ids = [c.db_id for c in db.query(FlowCardDataDB.db_id).filter(FlowCardDataDB.flow_id == flow.id).all()]
-        if card_ids:
-            db.query(FlowE2EStepDB).filter(FlowE2EStepDB.card_db_id.in_(card_ids)).delete(synchronize_session=False)
+        # We delete all children (steps) first, then parents (cards, nodes, edges)
+        # Using a subquery for steps ensures we catch all references even if the session is out of sync
+        db.query(FlowE2EStepDB).filter(
+            FlowE2EStepDB.card_db_id.in_(
+                db.query(FlowCardDataDB.db_id).filter(FlowCardDataDB.flow_id == flow.id)
+            )
+        ).delete(synchronize_session=False)
         
-        # Now delete others
         db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == flow.id).delete(synchronize_session=False)
         db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == flow.id).delete(synchronize_session=False)
         db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow.id).delete(synchronize_session=False)
+        
+        # Flush to ensure all deletions are processed by the DB before we start adding new ones
         db.flush()
 
         # 3. Add Nodes
@@ -254,8 +258,21 @@ class FlowService:
             return False
         
         for f in flows:
-            # Need to rely on SQLAlchemy cascades or manual child delete
+            # 1. Delete E2E steps first (child of flow_card_data) using a subquery
+            db.query(FlowE2EStepDB).filter(
+                FlowE2EStepDB.card_db_id.in_(
+                    db.query(FlowCardDataDB.db_id).filter(FlowCardDataDB.flow_id == f.id)
+                )
+            ).delete(synchronize_session=False)
+            
+            # 2. Delete cards, nodes, edges
+            db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == f.id).delete(synchronize_session=False)
+            db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == f.id).delete(synchronize_session=False)
+            db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == f.id).delete(synchronize_session=False)
+            
+            # 4. Finally delete the flow itself
             db.delete(f)
+        
         db.commit()
         return True
 
