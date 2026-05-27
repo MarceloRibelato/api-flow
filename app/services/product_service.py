@@ -31,6 +31,31 @@ class ProductService:
     def delete(db: Session, product_id: int, company_id: int):
         db_product = db.query(ProductModel).filter(ProductModel.id == product_id, ProductModel.company_id == company_id).first()
         if db_product:
+            from app.models.feature_models import FeatureModel
+            from app.models.schedule_models import ScheduleModel
+            from app.models.api_test_history_models import ExecutionHistoryModel
+            from app.models.flow_models import FlowDB
+            from app.models.front_recording_models import FrontRecordingDB
+            from app.services.flow_service import FlowService
+            
+            # Fetch all features to clean up their orphans since SQL cascade bypasses Python code
+            features = db.query(FeatureModel).filter(FeatureModel.product_id == product_id).all()
+            for feat in features:
+                # Clean up flows
+                flow = db.query(FlowDB).filter(FlowDB.project_id == feat.id).first()
+                if flow:
+                    FlowService.delete(db, feat.id, company_id)
+                # Clean up front recordings
+                db.query(FrontRecordingDB).filter(FrontRecordingDB.feature_id == feat.id).delete(synchronize_session=False)
+                # Clean up feature schedules
+                db.query(ScheduleModel).filter(ScheduleModel.target_id == feat.id, ScheduleModel.type == 'feature').delete(synchronize_session=False)
+
+            # Clean up suite schedules
+            db.query(ScheduleModel).filter(ScheduleModel.target_id == product_id, ScheduleModel.type == 'suite').delete(synchronize_session=False)
+            
+            # Clean up Execution History for the Product
+            db.query(ExecutionHistoryModel).filter(ExecutionHistoryModel.project_id == product_id).delete(synchronize_session=False)
+            
             db.delete(db_product)
             db.commit()
             return True

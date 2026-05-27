@@ -166,6 +166,7 @@ class FlowExecutorService:
                         # Combine steps into a unified execution list
                         all_steps = []
                         is_e2e_flow = flow_data.get('flow_type') in ['e2e', 'mobile'] or flow_meta.get('flow_type') in ['e2e', 'mobile']
+                        actual_exec_type = "mobile" if flow_type == 'mobile' else ("web" if flow_type == 'e2e' or flow_data.get('flow_type') == 'e2e' else "api")
                         
                         # Do NOT execute api_calls if this is an E2E node,
                         # because they are mapped APIs from the browser extension.
@@ -443,7 +444,7 @@ class FlowExecutorService:
                                 environment_id=env_id,
                                 error_message=final_error_message,
                                 assertions=assertion_results,
-                                execution_type=flow_type if flow_type in ['e2e', 'mobile'] else "api"
+                                execution_type=actual_exec_type
                             )
                             
                             # The main action step (e.g., Click, Type) is appended FIRST
@@ -478,7 +479,7 @@ class FlowExecutorService:
                                         environment_id=env_id,
                                         error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
                                         assertions=None,
-                                        execution_type=flow_type if flow_type in ['e2e', 'mobile'] else "api"
+                                        execution_type=actual_exec_type
                                     )
                                     history_buffer.append(bg_hist)
                                     
@@ -561,7 +562,7 @@ class FlowExecutorService:
                                     environment_id=env_id,
                                     error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
                                     assertions=None,
-                                    execution_type="web" if is_e2e_flow else "api"
+                                    execution_type=actual_exec_type
                                 )
                                 final_buffer.append(bg_hist)
                             HistoryService.save_batch(db, final_buffer, user_id)
