@@ -75,7 +75,7 @@ class FeatureService:
             db.query(FrontRecordingDB).filter(FrontRecordingDB.feature_id == feature_id).delete(synchronize_session=False)
             
             from app.models.schedule_models import ScheduleModel
-            from app.models.api_test_history_models import ExecutionHistoryModel
+            from app.models.api_test_history_models import ApiExecutionHistory
             from app.models.flow_models import FlowDB
             from app.services.flow_service import FlowService
             
@@ -83,7 +83,7 @@ class FeatureService:
             flow = db.query(FlowDB).filter(FlowDB.project_id == feature_id).first()
             if flow:
                 # Clean up Execution History Orphaned by flow
-                db.query(ExecutionHistoryModel).filter(ExecutionHistoryModel.flow_id == str(flow.id)).delete(synchronize_session=False)
+                db.query(ApiExecutionHistory).filter(ApiExecutionHistory.flow_id == str(flow.id)).delete(synchronize_session=False)
                 FlowService.delete(db, feature_id, company_id)
                 
             # Clean up Schedules Orphaned

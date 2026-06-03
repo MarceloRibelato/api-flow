@@ -8,11 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, computed_fie
 
 class AssertionResult(BaseModel):
     source: str
-    operator: str
+    operator: Optional[str] = None
     property: Optional[str] = None # Added missing field
     target: Optional[Any] = None
     actual: Optional[Any] = None
-    success: bool
+    success: bool = False
     error_message: Optional[str] = None
 
 
@@ -27,15 +27,15 @@ class ExecutionHistoryBase(BaseModel):
     node_id: Optional[Union[int, str]] = None # Added node_id for stable identifier (e.g. '1-1')
     node_name: Optional[str] = None  # Added node_name for functional grouping
     method: Optional[str] = "GET"
-    url: str
+    url: Optional[str] = None
     request_headers: Optional[Union[Dict[str, Any], List[Any]]] = None
     request_body: Optional[Any] = None # Robust to non-string
     request_params: Optional[Union[Dict[str, Any], List[Any]]] = None
-    status_code: int
+    status_code: int = 0
     status_text: Optional[str] = "OK"
     response_headers: Optional[Union[Dict[str, Any], List[Any]]] = None
     response_body: Optional[Any] = None # Robust to non-string
-    response_time: int
+    response_time: int = 0
     error_message: Optional[str] = None
     variables_used: Optional[Union[Dict[str, Any], List[Any]]] = None
     processed_url: Optional[str] = None
@@ -91,10 +91,10 @@ class ExecutionHistorySummary(BaseModel):
     batch_id: Optional[str] = None  # Used by frontend to group executions
     feature_name: Optional[str] = None # Added feature_name
     method: Optional[str] = "GET"
-    url: str
-    status_code: int
+    url: Optional[str] = None
+    status_code: int = 0
     status_text: Optional[str] = "OK"
-    response_time: int
+    response_time: int = 0
     created_at: datetime
     processed_url: Optional[str] = None
     environment_id: Optional[int] = None  # Added environment_id
@@ -134,6 +134,6 @@ class PaginatedHistoryResponse(BaseModel):
 
 class UniqueApiSummary(BaseModel):
     method: str
-    url: str
+    url: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)

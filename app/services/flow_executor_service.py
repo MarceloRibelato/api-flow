@@ -48,7 +48,7 @@ class FlowExecutorService:
         return _is_blocked_domain(url)
 
     @staticmethod
-    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api'):
+    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False):
         # (imports now at top of file)
 
         base_batch_id = f"sched_{uuid.uuid4().hex}"
@@ -242,7 +242,7 @@ class FlowExecutorService:
                                                 )
                                             else:
                                                 from app.services.playwright_executor_service import PlaywrightExecutorService
-                                                e2e_executor = PlaywrightExecutorService()
+                                                e2e_executor = PlaywrightExecutorService(headless=not visible_execution)
                                                 e2e_executor.start(video_dir=video_dir if capture_video else None)
                                         # Resolve variables in E2E step data
                                         step_data_str = json.dumps(step_data)
@@ -280,7 +280,7 @@ class FlowExecutorService:
                                         try:
                                             if not e2e_executor:
                                                 from app.services.playwright_executor_service import PlaywrightExecutorService
-                                                e2e_executor = PlaywrightExecutorService()
+                                                e2e_executor = PlaywrightExecutorService(headless=not visible_execution)
                                                 e2e_executor.start()
                                             resp = e2e_executor.execute_step(step_data, capture_screenshot=capture_screenshot, db=db, user_id=user_id)
                                             resp_status = resp['status']
@@ -627,7 +627,7 @@ class FlowExecutorService:
         return variables
 
     @staticmethod
-    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False):
+    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False):
         """
         Executes all flows within a specific feature.
         """
@@ -665,7 +665,7 @@ class FlowExecutorService:
             if len(flows) > 1:
                 logger.info(f"ℹ️  Selecting flow '{latest_flow.get('name')}' (ID: {latest_flow.get('id')}, Type: {latest_flow.get('flow_type')}) for execution.")
             
-            s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type)
+            s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution)
             success_count += s
             fail_count += f
         else:
@@ -674,7 +674,7 @@ class FlowExecutorService:
         return success_count, fail_count
 
     @staticmethod
-    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False):
+    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False):
         """
         Executes a single specific flow.
         """
@@ -710,10 +710,10 @@ class FlowExecutorService:
         variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
 
         # 5. Execute
-        return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type)
+        return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution)
 
     @staticmethod
-    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False):
+    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False):
         """
         Executes all features within a product.
         """

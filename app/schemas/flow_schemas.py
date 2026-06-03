@@ -42,6 +42,7 @@ class NodeDataBasic(BaseModel):
     color: str = Field("#10b981", description="Cor de destaque do nó")
     childCount: int = Field(0, description="Número de filhos diretos")
     isCollapsed: bool = Field(False, description="Estado de colapso visual")
+    layoutDirection: Optional[str] = Field(None, description="Direção do layout (LR ou TB)")
 
 class NodeDataFull(BaseModel):
     name: str = Field(..., description="Nome do nó")

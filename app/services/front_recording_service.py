@@ -20,6 +20,12 @@ class FrontRecordingService:
             if not feature:
                 return {"error": "Feature não encontrada"}
 
+            # Filter out chrome-extension internal URLs
+            if interactions:
+                interactions = [i for i in interactions if not str(i.get('pageUrl', '')).startswith('chrome-extension://') and not str(i.get('frameUrl', '')).startswith('chrome-extension://')]
+            if requests:
+                requests = [r for r in requests if not str(r.get('url', '')).startswith('chrome-extension://') and not str(r.get('pageUrl', '')).startswith('chrome-extension://')]
+
             new_recording = FrontRecordingDB(
                 feature_id=feature_id,
                 name=name,
@@ -136,6 +142,45 @@ class FrontRecordingService:
         if current_step["inters"]:
             steps.append(current_step)
 
+        # Assign requests to steps to avoid orphans
+        if recording.requests and steps:
+            for req in recording.requests:
+                req_page_url = req.get('pageUrl')
+                req_custom_name = req.get('customNodeName')
+                req_ts = req.get('timestamp', 0)
+                
+                assigned_idx = -1
+                
+                # 1. Match by custom name
+                if req_custom_name:
+                    for i, s in enumerate(steps):
+                        if s["name"] == req_custom_name:
+                            assigned_idx = i
+                            break
+                
+                # 2. Match by pageUrl and timestamp proximity
+                if assigned_idx == -1 and req_page_url:
+                    for i, s in enumerate(steps):
+                        step_page_url = s["inters"][0].get('pageUrl') if s["inters"] else None
+                        if step_page_url == req_page_url:
+                            step_start = s["inters"][0].get('timestamp', 0) if s["inters"] else 0
+                            if req_ts >= step_start - 5000:
+                                assigned_idx = i
+                            elif assigned_idx == -1:
+                                assigned_idx = i
+                
+                # 3. Fallback: Assign to the step that has the closest timestamp before it
+                if assigned_idx == -1:
+                    closest_idx = 0
+                    for i, s in enumerate(steps):
+                        step_start = s["inters"][0].get('timestamp', 0) if s["inters"] else 0
+                        if step_start <= req_ts:
+                            closest_idx = i
+                    assigned_idx = closest_idx
+                
+                # Store in the step
+                steps[assigned_idx].setdefault('matched_requests', []).append(req)
+
         # 2. Build React Flow Structure
         nodes = []
         edges = []
@@ -189,46 +234,12 @@ class FrontRecordingService:
             for inter in step["inters"]:
                 combined_steps.append({"raw": inter, "type": "e2e", "ts": inter.get('timestamp', 0)})
             
-            # Filter requests matching this step
-            # Association Strategy: match by customNodeName OR pageUrl fallback
-            step_requests = []
-            step_page_url = step["inters"][0].get('pageUrl') if step["inters"] else None
-
-            for r in (recording.requests or []):
-                req_page_url = r.get('pageUrl')
-                # 1. Direct match by custom name (best)
-                if r.get('customNodeName') and r.get('customNodeName') == step["name"]:
-                    step_requests.append(r)
-                # 2. Fallback: Match by pageUrl if both have it (and customNodeName is absent in request)
-                elif not r.get('customNodeName'):
-                    if req_page_url and step_page_url and req_page_url == step_page_url:
-                        step_requests.append(r)
-                # 3. New Fallback: Match by timestamp (requests occurring shortly after the step interactions)
-                elif not r.get('customNodeName'):
-                    req_ts = r.get('timestamp', 0)
-                    if step["inters"]:
-                        step_start = step["inters"][0].get('timestamp', 0)
-                        step_end = step["inters"][-1].get('timestamp', 0)
-                        # If request happened during or up to 2s after the step
-                        if step_start <= req_ts <= (step_end + 2000):
-                            step_requests.append(r)
-            
-            for req in step_requests:
+            # Add all matched requests
+            for req in step.get("matched_requests", []):
                 combined_steps.append({"raw": req, "type": "api", "ts": req.get('timestamp', 0)})
 
             # Sort by timestamp to preserve real user flow
             combined_steps.sort(key=lambda x: x['ts'])
-
-            # Handle Orphaned Requests (not matched to any step)
-            # Find all requests that were not added to any node
-            all_req_ids_in_steps = set()
-            for s in steps:
-                for r in (s.get('matched_requests') or []): # We need to track this
-                    all_req_ids_in_steps.add(id(r))
-            
-            # This logic needs a structural rethink for simplicity:
-            # Let's just gather all requests into a "Global Requests" node if they didn't match.
-            # But the current generator is one-pass. 
 
             # 2. Process Combined Steps and Assign Order
             api_calls_payload = []

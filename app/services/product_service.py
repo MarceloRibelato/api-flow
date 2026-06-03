@@ -33,7 +33,7 @@ class ProductService:
         if db_product:
             from app.models.feature_models import FeatureModel
             from app.models.schedule_models import ScheduleModel
-            from app.models.api_test_history_models import ExecutionHistoryModel
+            from app.models.api_test_history_models import ApiExecutionHistory
             from app.models.flow_models import FlowDB
             from app.models.front_recording_models import FrontRecordingDB
             from app.services.flow_service import FlowService
@@ -54,7 +54,7 @@ class ProductService:
             db.query(ScheduleModel).filter(ScheduleModel.target_id == product_id, ScheduleModel.type == 'suite').delete(synchronize_session=False)
             
             # Clean up Execution History for the Product
-            db.query(ExecutionHistoryModel).filter(ExecutionHistoryModel.project_id == product_id).delete(synchronize_session=False)
+            db.query(ApiExecutionHistory).filter(ApiExecutionHistory.project_id == product_id).delete(synchronize_session=False)
             
             db.delete(db_product)
             db.commit()

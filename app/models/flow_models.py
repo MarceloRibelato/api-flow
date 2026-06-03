@@ -8,7 +8,7 @@ from app.database import Base
 class FlowDB(Base):
     __tablename__ = "flow_data"
     id = Column(Integer, primary_key=True, index=True)
-    project_id = Column(Integer, index=True)
+    project_id = Column(Integer, ForeignKey("features.id", ondelete="CASCADE"), index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     
     # New Columns for Multi-Flow Support
@@ -37,7 +37,7 @@ class FlowNodeDB(Base):
     # The ID coming from the frontend (e.g., "node-1", "dndnode_0")
     client_id = Column(String(255), index=True)
     
-    flow_id = Column(Integer, ForeignKey("flow_data.id"), index=True)
+    flow_id = Column(Integer, ForeignKey("flow_data.id", ondelete="CASCADE"), index=True)
     
     type = Column(String(50))
     position_x = Column(Float)
@@ -57,7 +57,7 @@ class FlowEdgeDB(Base):
     db_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     client_id = Column(String(255), index=True)
     
-    flow_id = Column(Integer, ForeignKey("flow_data.id"), index=True)
+    flow_id = Column(Integer, ForeignKey("flow_data.id", ondelete="CASCADE"), index=True)
     
     source = Column(String(255), index=True)
     target = Column(String(255), index=True)
@@ -72,7 +72,7 @@ class FlowCardDataDB(Base):
     db_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     node_id = Column(String(255), index=True) # Corresponds to client_id of a node
     
-    flow_id = Column(Integer, ForeignKey("flow_data.id"), index=True)
+    flow_id = Column(Integer, ForeignKey("flow_data.id", ondelete="CASCADE"), index=True)
     
     name = Column(String(255))
     description = Column(Text, nullable=True)
@@ -91,7 +91,7 @@ class FlowCardDataDB(Base):
 class FlowE2EStepDB(Base):
     __tablename__ = "flow_e2e_steps"
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    card_db_id = Column(Integer, ForeignKey("flow_card_data.db_id"), index=True)
+    card_db_id = Column(Integer, ForeignKey("flow_card_data.db_id", ondelete="CASCADE"), index=True)
     client_id = Column(String(255), index=True) # step.id from frontend
     
     type = Column(String(50))

@@ -50,13 +50,22 @@ _IGNORED_DOMAINS = (
 )
 
 class PlaywrightExecutorService:
-    def __init__(self):
+    def __init__(self, headless: bool = True):
+        import os
+        import sys
+        
+        # Auto-fallback to headless if running in a container/linux without display
+        if not headless and sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
+            logger.warning("🚨 'Execução Visível' solicitada, mas nenhum X11 DISPLAY foi encontrado. Forçando headless=True para evitar crash (provavelmente rodando em Docker).")
+            headless = True
+            
         self._playwright = None
         self._browser = None
         self._context = None
         self._page = None
         self._captured_requests = []   # list of captured API calls during execution
         self._pending_requests = {}    # url -> {method, start_time}
+        self._headless = headless
 
     def start(self, video_dir: str = None):
         """Starts the playwright engine and browser instance."""
@@ -65,7 +74,7 @@ class PlaywrightExecutorService:
         
         if not self._browser:
             self._browser = self._playwright.chromium.launch(
-                headless=True,
+                headless=self._headless,
                 args=[
                     "--disable-dev-shm-usage", 
                     "--no-sandbox", 

@@ -28,7 +28,7 @@ class FeatureModel(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
     position = Column(Integer, default=0)
     
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=True) # Start nullable, but logic will enforce it
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=True) # Start nullable, but logic will enforce it
     
     # Relationship
     product = relationship("ProductModel", back_populates="features")

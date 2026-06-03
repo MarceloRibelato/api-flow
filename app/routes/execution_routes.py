@@ -24,6 +24,7 @@ class ExecutionRequest(BaseModel):
     max_concurrency: Optional[int] = None # Added max_concurrency
     capture_video: Optional[bool] = False # Optional flag to record video
     capture_screenshot: Optional[bool] = False # Optional flag to capture per-step screenshots
+    visible_execution: Optional[bool] = False # Run with visible browser window (headless=False)
 
 from app.auth import get_current_user
 from app.models.user_models import UserDB
@@ -68,6 +69,7 @@ def trigger_execution(
         flow_type=req.flow_type or 'api', # Track if this is an E2E or API run
         capture_video=req.capture_video,
         capture_screenshot=req.capture_screenshot,
+        visible_execution=req.visible_execution,
 
         company_id=current_user.company_id, # Use Auth
         user_id=current_user.id # Use Auth

@@ -88,7 +88,8 @@ def execute_job(schedule_id: int):
                 schedule_id=schedule.id, user_id=schedule.user_id or 1,
                 flow_type=getattr(schedule, 'flow_type', 'api'),
                 capture_video=getattr(schedule, 'capture_video', False),
-                capture_screenshot=getattr(schedule, 'capture_screenshot', False)
+                capture_screenshot=getattr(schedule, 'capture_screenshot', False),
+                visible_execution=getattr(schedule, 'visible_execution', False)
             )
             success_count = s
             fail_count = f
@@ -108,7 +109,8 @@ def execute_job(schedule_id: int):
                 schedule_id=schedule.id, user_id=schedule.user_id or 1,
                 flow_type=getattr(schedule, 'flow_type', 'api'),
                 capture_video=getattr(schedule, 'capture_video', False),
-                capture_screenshot=getattr(schedule, 'capture_screenshot', False)
+                capture_screenshot=getattr(schedule, 'capture_screenshot', False),
+                visible_execution=getattr(schedule, 'visible_execution', False)
             )
             success_count = s
             fail_count = f
@@ -131,7 +133,8 @@ def execute_job(schedule_id: int):
                 max_concurrency=schedule.max_concurrency,
                 flow_type=getattr(schedule, 'flow_type', 'api'),
                 capture_video=getattr(schedule, 'capture_video', False),
-                capture_screenshot=getattr(schedule, 'capture_screenshot', False)
+                capture_screenshot=getattr(schedule, 'capture_screenshot', False),
+                visible_execution=getattr(schedule, 'visible_execution', False)
             )
             success_count = s
             fail_count = f

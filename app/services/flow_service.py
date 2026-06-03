@@ -279,12 +279,22 @@ class FlowService:
     @staticmethod
     def get_cards_inventory(db: Session, company_id: int):
         """Retorna uma lista de todos os cards configurados na empresa para reaproveitamento"""
-        cards = db.query(FlowCardDataDB).join(FlowDB).filter(FlowDB.company_id == company_id).all()
+        from app.models.product_models import ProductModel
         
-        inventory = []
-        seen = set()
+        results = db.query(FlowCardDataDB, FeatureModel, ProductModel).join(
+            FlowDB, FlowDB.id == FlowCardDataDB.flow_id
+        ).join(
+            FeatureModel, FeatureModel.id == FlowDB.project_id
+        ).join(
+            ProductModel, ProductModel.id == FeatureModel.product_id
+        ).filter(FlowDB.company_id == company_id).all()
         
-        for c in cards:
+        flow_ids = list({c.flow_id for c, f, p in results})
+        edges_db = db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id.in_(flow_ids)).all() if flow_ids else []
+        
+        inventory_cards = []
+        
+        for c, feature, product in results:
             raw_type = (c.flow.flow_type if c.flow else None) or "api"
 
             # Normalize: keep 'mobile' as-is; map web/frontend/e2e → 'web'; rest → 'api'
@@ -295,23 +305,46 @@ class FlowService:
             else:
                 f_type = "api"
 
-            # Simple deduplication by Name, Type and Description
-            card_key = (c.name or "", f_type, c.description or "")
-            if card_key in seen:
-                continue
-            seen.add(card_key)
+            steps = []
+            if c.e2e_steps_rel:
+                steps = [{
+                    "id": s.client_id,
+                    "type": s.type,
+                    "name": s.name,
+                    "properties": s.properties
+                } for s in sorted(c.e2e_steps_rel, key=lambda x: x.order)]
+            elif c.e2e_steps:
+                # fallback for legacy data if any
+                steps = c.e2e_steps
 
-            inventory.append({
+            inventory_cards.append({
                 "id": c.db_id,
+                "node_id": c.node_id,
+                "flow_id": c.flow_id,
                 "name": c.name,
                 "description": c.description,
                 "color": c.color,
                 "bddScenarios": c.bdd_scenarios,
                 "apiCalls": c.api_calls,
-                "e2eSteps": c.e2e_steps,  # mobile flows also use e2e_steps field
+                "e2eSteps": steps,
                 "envData": c.env_data,
                 "flowType": f_type,
-                "sourceFlow": c.flow.name if c.flow else "Desconhecido"
+                "sourceFlow": c.flow.name if c.flow else "Desconhecido",
+                "productId": product.id,
+                "productName": product.name,
+                "featureId": feature.id,
+                "featureName": feature.name
             })
-        return inventory
+            
+        inventory_edges = [{
+            "id": e.client_id,
+            "source": e.source,
+            "target": e.target,
+            "flow_id": e.flow_id
+        } for e in edges_db]
+        
+        return {
+            "cards": inventory_cards,
+            "edges": inventory_edges
+        }
 
