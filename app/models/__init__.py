@@ -10,6 +10,7 @@ from app.models.api_test_history_models import ApiExecutionHistory
 from app.models.schedule_models import ScheduleModel
 from app.models.auth_models import BlacklistedToken
 from app.models.service_token_models import ServiceTokenDB
+from app.models.performance_models import PerformanceTestResult
 
 __all__ = [
     "UserDB",
@@ -23,4 +24,5 @@ __all__ = [
     "ScheduleModel",
     "BlacklistedToken",
     "ServiceTokenDB",
+    "PerformanceTestResult",
 ]

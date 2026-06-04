@@ -18,10 +18,7 @@ class FlowDB(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    # Deprecated JSON columns (kept for migration safety, ignore in new logic)
-    nodes = Column(JSON, nullable=True)
-    edges = Column(JSON, nullable=True)
-    card_data = Column(JSON, nullable=True, default=dict)
+
 
     # Relationships
     flow_nodes = relationship("FlowNodeDB", back_populates="flow", cascade="all, delete-orphan")

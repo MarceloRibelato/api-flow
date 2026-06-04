@@ -11,7 +11,7 @@ class ProductBase(BaseModel):
     channel_type: Optional[str] = 'webhook'
 
 class ProductCreate(ProductBase):
-    pass
+    initial_environment_name: Optional[str] = None
 
 class ProductResponse(ProductBase):
     id: int

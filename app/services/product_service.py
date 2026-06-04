@@ -21,6 +21,17 @@ class ProductService:
         db.add(db_product)
         db.commit()
         db.refresh(db_product)
+
+        if product.initial_environment_name:
+            from app.services.environment_service import EnvironmentService
+            from app.schemas.environment_schemas import EnvironmentCreate
+            
+            env_create = EnvironmentCreate(
+                name=product.initial_environment_name,
+                project_id=db_product.id
+            )
+            EnvironmentService.create(db, env_create)
+
         return db_product
 
     @staticmethod

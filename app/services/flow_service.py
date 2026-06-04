@@ -95,7 +95,8 @@ class FlowService:
         # Flush to ensure all deletions are processed by the DB before we start adding new ones
         db.flush()
 
-        # 3. Add Nodes
+        # 3. Add Nodes (Bulk Insert)
+        node_db_list = []
         for n in (data.nodes or []):
             node_data = n.data
             if hasattr(node_data, 'model_dump'):
@@ -103,29 +104,33 @@ class FlowService:
             elif hasattr(node_data, 'dict'):
                 node_data = node_data.dict()
 
-            node_db = FlowNodeDB(
+            node_db_list.append(FlowNodeDB(
                 flow_id=flow.id,
                 client_id=str(n.id),
                 type=n.type,
                 position_x=n.position.get('x', 0) if isinstance(n.position, dict) else 0,
                 position_y=n.position.get('y', 0) if isinstance(n.position, dict) else 0,
                 data=node_data
-            )
-            db.add(node_db)
+            ))
+        if node_db_list:
+            db.add_all(node_db_list)
 
-        # 4. Add Edges
+        # 4. Add Edges (Bulk Insert)
+        edge_db_list = []
         for e in (data.edges or []):
-            edge_db = FlowEdgeDB(
+            edge_db_list.append(FlowEdgeDB(
                 flow_id=flow.id,
                 client_id=str(e.id),
                 source=str(e.source),
                 target=str(e.target),
                 type=e.type,
                 animated=e.animated
-            )
-            db.add(edge_db)
+            ))
+        if edge_db_list:
+            db.add_all(edge_db_list)
 
         # 5. Add CardData
+        e2e_steps_list_db = []
         for nid, c in (data.cardData or {}).items():
             # Ensure complex fields are converted to dict/list for JSON storage
             api_calls = []
@@ -153,19 +158,21 @@ class FlowService:
             db.add(card_db)
             db.flush()
 
-            # Add E2E Steps
+            # Prepare E2E Steps for Bulk Insert
             e2e_steps_list = getattr(c, 'e2eSteps', [])
             if e2e_steps_list:
                 for idx, step in enumerate(e2e_steps_list):
-                    step_db = FlowE2EStepDB(
+                    e2e_steps_list_db.append(FlowE2EStepDB(
                         card_db_id=card_db.db_id,
                         client_id=step.get('id', str(idx)),
                         type=step.get('type', 'action'),
                         name=step.get('name', f'Step {idx}'),
                         properties=step.get('properties', {}),
                         order=idx
-                    )
-                    db.add(step_db)
+                    ))
+
+        if e2e_steps_list_db:
+            db.add_all(e2e_steps_list_db)
 
         flow.updated_at = datetime.utcnow()
         db.commit()

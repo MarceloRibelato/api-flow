@@ -149,8 +149,16 @@ async def log_exceptions_middleware(request: Request, call_next):
     except Exception as e:
         import traceback
         logger.error(f"❌ Unhandled Exception: {str(e)}\n{traceback.format_exc()}")
-        # We don't want to swallow the error, but we want to log it before it reaches FastAPI's default handler
         raise e
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    # This catches any unhandled exceptions and returns a clean 500 JSON response
+    # instead of crashing the server or returning raw HTML errors.
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Ocorreu um erro interno no servidor."},
+    )
 
 # Incluir rotas
 app.include_router(admin_router)
@@ -184,6 +192,9 @@ app.include_router(proxy_router)
 from app.routes.front_recording_routes import router as front_recording_router
 app.include_router(front_recording_router)
 
+# Performance Testing Router
+from app.routes.performance_routes import router as performance_router
+app.include_router(performance_router)
 
 # Mount Videos Static Directory
 from fastapi.staticfiles import StaticFiles

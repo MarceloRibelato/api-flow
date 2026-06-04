@@ -33,13 +33,19 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
 from app.database import Base
-# Import ALL models so Base.metadata is complete for autogenerate & create_all
 from app.models.agent_models import AgentSettingsDB
 from app.models.user_models import UserDB
 from app.models.company_models import CompanyDB
 from app.models.product_models import ProductModel, ProductMobileSettingsDB, ProductMobileDeviceDB
 from app.models.auth_models import BlacklistedToken
 from app.models.service_token_models import ServiceTokenDB
+from app.models.feature_models import FeatureModel
+from app.models.flow_models import FlowDB, FlowNodeDB, FlowEdgeDB, FlowCardDataDB, FlowE2EStepDB
+from app.models.variable_model import Variable
+from app.models.environment_model import Environment
+from app.models.api_test_history_models import ApiExecutionHistory, ApiExecutionHistoryArchive
+from app.models.schedule_models import ScheduleModel
+from app.models.front_recording_models import FrontRecordingDB
 
 target_metadata = Base.metadata
 
