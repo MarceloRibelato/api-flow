@@ -28,6 +28,7 @@ class PerformanceTestResult(Base):
     avg_latency = Column(Float, default=0.0)
     min_latency = Column(Float, default=0.0)
     max_latency = Column(Float, default=0.0)
+    p50_latency = Column(Float, default=0.0)
     p90_latency = Column(Float, default=0.0)
     p95_latency = Column(Float, default=0.0)
     p99_latency = Column(Float, default=0.0)
@@ -37,6 +38,9 @@ class PerformanceTestResult(Base):
     # Detailed time series stats for charting (JSON)
     # [{"timestamp": 12345, "rps": 10, "avg_latency": 120, "errors": 0}, ...]
     time_series_data = Column(JSON, default=list) 
+
+    # Detailed final stats per API (JSON)
+    api_stats = Column(JSON, nullable=True)
 
     started_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)

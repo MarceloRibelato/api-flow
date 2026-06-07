@@ -251,6 +251,18 @@ class HistoryService:
         return True
 
     @staticmethod
+    def delete_batch(db: Session, batch_id: str, company_id: int):
+        from app.models.user_models import UserDB
+        deleted_count = db.query(ApiExecutionHistory).filter(
+            ApiExecutionHistory.batch_id == batch_id,
+            ApiExecutionHistory.id.in_(
+                db.query(ApiExecutionHistory.id).join(UserDB).filter(UserDB.company_id == company_id)
+            )
+        ).delete(synchronize_session=False)
+        db.commit()
+        return deleted_count > 0
+
+    @staticmethod
     def clear_all(db: Session, company_id: int):
         db.query(ApiExecutionHistory).filter(
             ApiExecutionHistory.id.in_(

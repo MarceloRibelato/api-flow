@@ -373,18 +373,58 @@ class FlowExecutorService:
                                             except Exception as de:
                                                 logger.warning(f"      ⚠️ Invalid delay value '{delay_val}': {de}")
 
-                                        start_time = time.time()
-                                        resp = flow_session.request(method, url, headers=headers, data=body, params=params, timeout=30)
-                                        duration = int((time.time() - start_time) * 1000)
-                                        resp_status = resp.status_code
-                                        resp_reason = resp.reason
-                                        resp_headers = dict(resp.headers)
-                                        resp_text = resp.text
-                                        
                                         try:
-                                            resp_json = resp.json()
+                                            cache_ttl_minutes = int(step_data.get('cacheTTL', 0) or 0)
                                         except ValueError:
-                                            resp_json = None
+                                            cache_ttl_minutes = 0
+
+                                        cached_run = None
+                                        
+                                        if cache_ttl_minutes > 0:
+                                            from app.models.api_test_history_models import ApiExecutionHistory
+                                            from sqlalchemy import desc, func
+                                            from datetime import timedelta
+                                            import datetime
+                                            
+                                            # Depending on timezone configuration, func.now() or datetime.now(datetime.timezone.utc) could be used
+                                            time_threshold = func.now() - timedelta(minutes=cache_ttl_minutes)
+                                            cached_run = db.query(ApiExecutionHistory).filter(
+                                                ApiExecutionHistory.api_id == str(step_data.get('id')),
+                                                ApiExecutionHistory.environment_id == env_id,
+                                                ApiExecutionHistory.error_message == None,
+                                                ApiExecutionHistory.status_text != 'OK (Cached)',
+                                                ApiExecutionHistory.created_at >= time_threshold
+                                            ).order_by(desc(ApiExecutionHistory.created_at)).first()
+                                            
+                                        if cached_run:
+                                            logger.info(f"      ♻️ CACHE HIT: Skipping HTTP request for API {step_data.get('name', step_data.get('id'))} (Valid for {cache_ttl_minutes}m)")
+                                            resp_status = cached_run.status_code
+                                            resp_reason = "OK (Cached)"
+                                            resp_headers = cached_run.response_headers or {}
+                                            resp_text = cached_run.response_body or ""
+                                            duration = cached_run.response_time or 0
+                                            try:
+                                                import json as _json
+                                                resp_json = _json.loads(resp_text) if resp_text else None
+                                            except Exception:
+                                                resp_json = None
+                                                
+                                            # Adicionar uma anotação na variável step_data para que o histórico
+                                            # também reflita que foi do cache (se desejado).
+                                            step_data['_was_cached'] = True
+                                        else:
+                                            start_time = time.time()
+                                            resp = flow_session.request(method, url, headers=headers, data=body, params=params, timeout=30)
+                                            duration = int((time.time() - start_time) * 1000)
+                                            resp_status = resp.status_code
+                                            resp_reason = resp.reason
+                                            resp_headers = dict(resp.headers)
+                                            resp_text = resp.text
+                                            
+                                            try:
+                                                resp_json = resp.json()
+                                            except ValueError:
+                                                resp_json = None
 
                                         # --- Assertions (delegated to assertion_engine) ---
                                         assertions_raw = step_data.get('assertions', [])
@@ -426,10 +466,14 @@ class FlowExecutorService:
                                 else: 
                                     flow_success_count += 1
 
+                            base_api_name = step_data.get('name') or "Step"
+                            if step_data.get('_was_cached'):
+                                base_api_name += " (CACHED)"
+
                             hist = ExecutionHistoryCreate(
                                 batch_id=batch_id,
-                                api_id=int(step_data.get('id')) if str(step_data.get('id')).isdigit() else None,
-                                api_name=step_data.get('name') or "Step",
+                                api_id=str(step_data.get('id')),
+                                api_name=base_api_name,
                                 project_id=product_id,
                                 flow_id=flow_meta['id'],
                                 node_id=current_id,

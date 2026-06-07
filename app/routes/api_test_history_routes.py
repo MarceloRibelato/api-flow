@@ -127,6 +127,19 @@ def delete_execution_history(
     return {"status": "success", "message": "Registro removido"}
 
 
+@router.delete("/batch/{batch_id}")
+def delete_batch_history(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
+):
+    """Remove todos os registros associados a um batch_id"""
+    success = HistoryService.delete_batch(db, batch_id, current_user.company_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Nenhum registro encontrado para este batch")
+    return {"status": "success", "message": "Batch removido"}
+
+
 @router.delete("/")
 def clear_execution_history(
     confirm: bool = Query(False),

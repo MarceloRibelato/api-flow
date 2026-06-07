@@ -683,6 +683,64 @@ class AnalysisService:
         return alerts
 
     @staticmethod
+    def analyze_performance_test(db: Session, job_id: str, user_id: int):
+        from app.models.performance_models import PerformanceTestResult
+        result = db.query(PerformanceTestResult).filter(PerformanceTestResult.id == job_id).first()
+        if not result:
+            return "Test result not found."
+
+        summary = f"Test Name: {result.test_name}\nTarget: {result.target_url}\nVirtual Users: {result.virtual_users}\nDuration: {result.duration_seconds}s\n"
+        summary += f"Total Requests: {result.total_requests} (Success: {result.success_requests}, Failed: {result.failed_requests})\n"
+        summary += f"RPS: {result.requests_per_second:.2f}\nAvg Latency: {result.avg_latency:.2f}ms\nP50 Latency: {result.p50_latency:.2f}ms\nP95 Latency: {result.p95_latency:.2f}ms\n"
+
+        prompt = f"""
+        You are an expert QA Performance Engineer. Analyze the following load test result.
+        
+        {summary}
+        
+        Provide a professional diagnostic of this test execution. Discuss:
+        - The reliability and stability of the API.
+        - The latency and throughput (RPS).
+        - Any bottlenecks or error rates that need attention.
+        - Recommendations for improvement or scaling.
+        
+        Format your response in Markdown using bullet points, headers, and bold text for emphasis.
+        Do not use code blocks for the entire response. Write directly in Markdown.
+        """
+        
+        content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.3)
+        return content or "⚠️ Não foi possível gerar o diagnóstico da IA. Verifique se você configurou uma API Key válida no painel de Agentes."
+
+    @staticmethod
+    def analyze_performance_comparison(db: Session, job_id_1: str, job_id_2: str, user_id: int):
+        from app.models.performance_models import PerformanceTestResult
+        res1 = db.query(PerformanceTestResult).filter(PerformanceTestResult.id == job_id_1).first()
+        res2 = db.query(PerformanceTestResult).filter(PerformanceTestResult.id == job_id_2).first()
+        if not res1 or not res2:
+            return "Test results not found."
+
+        summary = f"TEST A: {res1.test_name} ({res1.target_url})\nUsers: {res1.virtual_users}, Duration: {res1.duration_seconds}s, Total Reqs: {res1.total_requests}, Errors: {res1.failed_requests}, RPS: {res1.requests_per_second:.2f}, Latency: {res1.avg_latency:.2f}ms\n\n"
+        summary += f"TEST B: {res2.test_name} ({res2.target_url})\nUsers: {res2.virtual_users}, Duration: {res2.duration_seconds}s, Total Reqs: {res2.total_requests}, Errors: {res2.failed_requests}, RPS: {res2.requests_per_second:.2f}, Latency: {res2.avg_latency:.2f}ms\n"
+
+        prompt = f"""
+        You are an expert QA Performance Engineer. Compare the following two load test executions.
+        
+        {summary}
+        
+        Provide a professional comparative diagnostic. Discuss:
+        - Which test performed better and why?
+        - Was there a regression or improvement in Latency, RPS, or Error Rates?
+        - Did the system handle the load difference (if any) well?
+        - Conclusion and recommendations.
+        
+        Format your response in Markdown using bullet points, headers, and bold text for emphasis.
+        Do not use code blocks for the entire response. Write directly in Markdown.
+        """
+        
+        content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.3)
+        return content or "⚠️ Não foi possível gerar o diagnóstico comparativo com IA. Verifique se você configurou uma API Key válida no painel de Agentes."
+
+    @staticmethod
     def generate_flow_from_text(db: Session, prompt: str, project_id: int, company_id: int, user_id: int):
         """Creates a NEW flow from a natural language prompt."""
         from app.services.flow_service import FlowService
