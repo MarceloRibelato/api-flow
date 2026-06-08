@@ -604,6 +604,7 @@ class PlaywrightExecutorService:
                                     properties['selector'] = new_selector
                                     step['properties'] = properties
                                     step_result["text"] = f"[AI-HEALED -> {new_selector}] "
+                                    step_result["healed_selector"] = new_selector
                             except Exception as heal_err:
                                 import traceback
                                 logger.error(f"🤖 [Auto-Heal] Fatal Exception: {heal_err}")

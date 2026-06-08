@@ -39,18 +39,23 @@ class PerformanceService:
             logger.error("No APIs provided for load test.")
             return
 
-        target_url = api_list[0].get("url", "unknown_url") if len(api_list) == 1 else "Multiple APIs (Flow)"
-        result = PerformanceTestResult(
-            id=job_id,
-            company_id=company_id,
-            user_id=user_id,
-            status="running",
-            virtual_users=virtual_users,
-            duration_seconds=duration_seconds,
-            ramp_up_seconds=ramp_up_seconds,
-            test_name=test_name,
-            target_url=target_url
-        )
+        result = db.query(PerformanceTestResult).filter(PerformanceTestResult.id == job_id).first()
+        if not result:
+            target_url = api_list[0].get("url", "unknown_url") if len(api_list) == 1 else "Multiple APIs (Flow)"
+            result = PerformanceTestResult(
+                id=job_id,
+                company_id=company_id,
+                user_id=user_id,
+                status="running",
+                virtual_users=virtual_users,
+                duration_seconds=duration_seconds,
+                ramp_up_seconds=ramp_up_seconds,
+                test_name=test_name,
+                target_url=target_url
+            )
+            db.add(result)
+        else:
+            result.status = "running"
         db.add(result)
         db.commit()
         db.refresh(result)
@@ -304,6 +309,15 @@ class PerformanceService:
             }
             
             while time.time() < stop_time and active_tests.get(job_id, False):
+                # Check if test was stopped from the API (status updated in DB)
+                try:
+                    db.refresh(result)
+                    if result.status == "stopped":
+                        active_tests[job_id] = False
+                        break
+                except:
+                    pass
+                
                 time.sleep(1)
                 curr_total = stats["total"]
                 curr_success = stats["success"]
@@ -386,6 +400,7 @@ class PerformanceService:
         # Compute final stats
         def percentile(data, p):
             if not data: return 0.0
+            if len(data) == 1: return data[0]
             k = (len(data) - 1) * p
             f = int(k)
             c = f + 1
@@ -435,7 +450,8 @@ class PerformanceService:
             result.requests_per_second = stats["total"] / actual_duration
         
         result.time_series_data = time_series
-        result.status = "completed"
+        if result.status != "stopped":
+            result.status = "completed"
         result.completed_at = datetime.now(timezone.utc)
         
         db.commit()
@@ -450,10 +466,24 @@ class PerformanceService:
 
     @staticmethod
     def stop_load_test(job_id: str):
+        from app.database import SessionLocal
+        from app.models.performance_models import PerformanceTestResult
+        
+        # 1. Fallback for local thread (if not using Celery)
         if job_id in active_tests:
             active_tests[job_id] = False
-            return True
-        return False
+            
+        # 2. Global state for Celery Worker (update DB)
+        db = SessionLocal()
+        try:
+            result = db.query(PerformanceTestResult).filter(PerformanceTestResult.id == job_id).first()
+            if result and result.status == "running":
+                result.status = "stopped"
+                db.commit()
+                return True
+            return False
+        finally:
+            db.close()
 
     @staticmethod
     def delete_test_result(db: Session, job_id: str, company_id: int):

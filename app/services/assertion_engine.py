@@ -47,7 +47,8 @@ def evaluate_assertion(assertion: dict, resp_status: int, resp_headers: dict,
         elif src == 'responseTime':
             actual_val = duration
             try:
-                t_int = int(str(target).strip())
+                target_clean = ''.join(c for c in str(target) if c.isdigit() or c == '.')
+                t_int = int(float(target_clean)) if target_clean else 0
                 is_success = _compare_numeric(actual_val, t_int, op)
             except (ValueError, TypeError):
                 is_success = False

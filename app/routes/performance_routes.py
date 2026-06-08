@@ -1,8 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import uuid
+import json
+import asyncio
+from sse_starlette.sse import EventSourceResponse
 
 from app.database import get_db
 from app.auth import get_current_user
@@ -32,30 +35,36 @@ def start_performance_test(
 ):
     job_id = f"perf_{uuid.uuid4().hex}"
     
-    # We must pass a new DB session to the background task because the current request session will close.
-    def bg_task(job_id, api_data, api_list, vu, duration, ramp_up, comp_id, user_id, test_name):
-        from app.database import SessionLocal
-        bg_db = SessionLocal()
-        try:
-            # Consolidate to list
-            final_list = api_list if api_list else ([api_data] if api_data else [])
-            PerformanceService.run_load_test_sync(
-                bg_db, job_id, final_list, vu, duration, ramp_up, comp_id, user_id, test_name
-            )
-        finally:
-            bg_db.close()
+    final_list = req.api_list if req.api_list else ([req.api_data] if req.api_data else [])
+    target_url = final_list[0].get("url", "unknown_url") if len(final_list) == 1 else "Multiple APIs (Flow)"
+    
+    # Create DB entry synchronously so SSE stream doesn't fail on connection
+    result = PerformanceTestResult(
+        id=job_id,
+        company_id=current_user.company_id,
+        user_id=current_user.id,
+        status="pending",
+        virtual_users=req.virtual_users,
+        duration_seconds=req.duration_seconds,
+        ramp_up_seconds=req.ramp_up_seconds,
+        test_name=req.test_name,
+        target_url=target_url
+    )
+    db.add(result)
+    db.commit()
 
-    background_tasks.add_task(
-        bg_task,
-        job_id,
-        req.api_data,
-        req.api_list,
-        req.virtual_users,
-        req.duration_seconds,
-        req.ramp_up_seconds,
-        current_user.company_id,
-        current_user.id,
-        req.test_name
+    from app.tasks.execution_tasks import celery_run_load_test
+
+    # Send to Celery worker instead of running in background tasks
+    celery_run_load_test.delay(
+        job_id=job_id,
+        api_list=final_list,
+        virtual_users=req.virtual_users,
+        duration_seconds=req.duration_seconds,
+        ramp_up_seconds=req.ramp_up_seconds,
+        company_id=current_user.company_id,
+        user_id=current_user.id,
+        test_name=req.test_name
     )
     
     return {"message": "Performance test started", "job_id": job_id}
@@ -125,6 +134,87 @@ def get_performance_stats(
         "started_at": result.started_at,
         "completed_at": result.completed_at
     }
+
+@router.get("/{job_id}/stream")
+async def stream_performance_stats(
+    job_id: str,
+    request: Request,
+    token: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    # Verify token manually since EventSource cannot send Auth headers
+    if not token:
+        raise HTTPException(status_code=401, detail="Token requerido")
+        
+    try:
+        from app.auth import SECRET_KEY, ALGORITHM
+        from jose import jwt
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Token inválido")
+            
+        user = db.query(UserDB).filter(UserDB.username == username).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="Usuário não encontrado")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token inválido ou expirado")
+
+    async def event_publisher():
+        from app.database import SessionLocal
+        
+        while True:
+            if await request.is_disconnected():
+                break
+                
+            local_db = SessionLocal()
+            try:
+                result = local_db.query(PerformanceTestResult).filter(
+                    PerformanceTestResult.id == job_id,
+                    PerformanceTestResult.company_id == user.company_id
+                ).first()
+                
+                if not result:
+                    yield {"event": "error", "data": json.dumps({"error": "Job not found"})}
+                    break
+                    
+                stats_dict = {
+                    "id": result.id,
+                    "status": result.status,
+                    "total_requests": result.total_requests,
+                    "success_requests": result.success_requests,
+                    "failed_requests": result.failed_requests,
+                    "duration_seconds": result.duration_seconds,
+                    "ramp_up_seconds": result.ramp_up_seconds,
+                    "avg_latency": result.avg_latency,
+                    "min_latency": result.min_latency,
+                    "max_latency": result.max_latency,
+                    "p50_latency": result.p50_latency,
+                    "p90_latency": result.p90_latency,
+                    "p95_latency": result.p95_latency,
+                    "p99_latency": result.p99_latency,
+                    "requests_per_second": result.requests_per_second,
+                    "time_series_data": result.time_series_data,
+                    "api_stats": result.api_stats,
+                    "started_at": result.started_at.isoformat() if result.started_at else None,
+                    "completed_at": result.completed_at.isoformat() if result.completed_at else None
+                }
+                
+                yield {"event": "message", "data": json.dumps(stats_dict)}
+                
+                if result.status in ["completed", "stopped", "error"]:
+                    break
+            except Exception as e:
+                yield {"event": "error", "data": json.dumps({"error": str(e)})}
+                break
+            finally:
+                local_db.close()
+                
+            await asyncio.sleep(1)
+
+    return EventSourceResponse(event_publisher())
+
+
 
 @router.post("/{job_id}/stop")
 def stop_performance_test(

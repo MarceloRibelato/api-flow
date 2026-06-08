@@ -29,11 +29,11 @@ def get_db():
     finally:
         db.close()
 
-def execute_job(schedule_id: int):
+def execute_job_logic(schedule_id: int):
     """
-    Callback function executed by the scheduler.
+    Original callback function now executed by Celery worker.
     """
-    logger.info(f"Executing scheduled job: {schedule_id}")
+    logger.info(f"Executing scheduled job logic: {schedule_id}")
     db = SessionLocal()
     try:
         schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
@@ -286,6 +286,14 @@ def execute_job(schedule_id: int):
         if 'session' in locals():
             session.close()
         db.close()
+
+def execute_job(schedule_id: int):
+    """
+    Callback function executed by the scheduler. Pushes the actual work to Celery.
+    """
+    logger.info(f"APScheduler pushing job {schedule_id} to Celery")
+    from app.tasks.execution_tasks import celery_execute_job
+    celery_execute_job.delay(schedule_id)
 
 class SchedulerService:
     def __init__(self):

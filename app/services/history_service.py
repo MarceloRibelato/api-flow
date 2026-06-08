@@ -49,6 +49,7 @@ class HistoryService:
             if history.assertions
             else None,
             video_url=history.video_url,
+            healed_selector=history.healed_selector,
             execution_type=history.execution_type or "api",
         )
 
@@ -108,6 +109,7 @@ class HistoryService:
                 environment_name=history.environment_name,
                 assertions=[a.model_dump() for a in history.assertions] if history.assertions else None,
                 video_url=history.video_url,
+                healed_selector=history.healed_selector,
                 execution_type=history.execution_type or "api",
             )
             db_objects.append(db_history)

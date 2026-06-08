@@ -79,16 +79,10 @@ def trigger_execution(
     db.commit()
     db.refresh(new_schedule)
 
-    from app.services.scheduler_service import scheduler_service
+    from app.tasks.execution_tasks import celery_execute_job
 
-    # 3. Trigger Async Execution (Detached from request lifecycle)
-    # Using APScheduler directly for "run now" to avoid BackgroundTasks blocking the response in some environments
-    scheduler_service.scheduler.add_job(
-        execute_job,
-        args=[new_schedule.id],
-        id=f"immediate_{new_schedule.id}",
-        misfire_grace_time=3600
-    )
+    # 3. Trigger Async Execution via Celery
+    celery_execute_job.delay(new_schedule.id)
 
     return {
         "message": "Execution started",

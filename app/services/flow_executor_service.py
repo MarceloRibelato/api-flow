@@ -223,6 +223,7 @@ class FlowExecutorService:
                             assertion_results = []
                             assertions_passed = True
                             final_error_message = None
+                            healed_selector = None
                             headers = {}
                             body = ""
                             url = ""
@@ -264,6 +265,7 @@ class FlowExecutorService:
                                         resp_status = resp['status']
                                         resp_reason = resp['reason']
                                         resp_text = resp['text']
+                                        healed_selector = resp.get('healed_selector')
                                         
                                         method = "BROWSER"
                                         url = step_data.get('properties', {}).get('value', '') or step_data.get('properties', {}).get('selector', '')
@@ -286,6 +288,7 @@ class FlowExecutorService:
                                             resp_status = resp['status']
                                             resp_reason = resp['reason']
                                             resp_text = resp['text']
+                                            healed_selector = resp.get('healed_selector')
                                         except Exception as e:
                                             logger.error(f"FATAL: Playwright Init Error: {str(e)}")
                                             resp_status = 500
@@ -315,9 +318,13 @@ class FlowExecutorService:
                                         
                                         headers_json_str = json.dumps(headers_raw)
                                         headers = json.loads(FlowExecutorService.replace_vars(headers_json_str, current_path_vars))
-                                        if not isinstance(headers, dict): headers = {}
                                         headers = {str(k): str(v) for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
-
+                                        
+                                        headers_lower = {k.lower(): v for k, v in headers.items()}
+                                        if "accept" not in headers_lower:
+                                            headers["Accept"] = "*/*"
+                                        if "user-agent" not in headers_lower:
+                                            headers["User-Agent"] = "Flow-QA-Runner/1.0"
                                         # --- 2. Params Reconstruction (Query String) ---
                                         params_raw = step_data.get('params', {})
                                         if isinstance(params_raw, list):
@@ -488,6 +495,7 @@ class FlowExecutorService:
                                 environment_id=env_id,
                                 error_message=final_error_message,
                                 assertions=assertion_results,
+                                healed_selector=healed_selector,
                                 execution_type=actual_exec_type
                             )
                             

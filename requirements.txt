@@ -25,3 +25,5 @@ fastapi-mail
 Appium-Python-Client
 mcp[sse]
 sse-starlette
+celery
+redis
