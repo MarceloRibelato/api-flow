@@ -1,5 +1,4 @@
 import time
-import uuid
 import logging
 import concurrent.futures
 from datetime import datetime, timezone
@@ -216,8 +215,7 @@ class PerformanceService:
                                         resp_text = cached_run.response_body or ""
                                         
                                         try:
-                                            import json as _json
-                                            resp_json = _json.loads(resp_text) if resp_text else None
+                                            resp_json = json.loads(resp_text) if resp_text else None
                                         except:
                                             resp_json = None
                                             
