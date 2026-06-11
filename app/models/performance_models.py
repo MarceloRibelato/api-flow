@@ -41,6 +41,7 @@ class PerformanceTestResult(Base):
 
     # Detailed final stats per API (JSON)
     api_stats = Column(JSON, nullable=True)
+    failed_requests_detail = Column(JSON, nullable=True)
 
     started_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)

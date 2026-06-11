@@ -60,33 +60,35 @@ async def lifespan(app: FastAPI):
             
             # CRITICAL: Dispose engine to release connections before Alembic takes over
             # This prevents deadlocks in standard PostgreSQL/SQLAlchemy pooling.
-            engine.dispose()
-            logger.debug("SQLAlchemy Engine disposed before Alembic upgrade")
-            
-            # Step 2: Run Alembic migrations via Subprocess (Avoids deadlocks/logging clashes)
-            try:
-                import subprocess
-                logger.info("Iniciando Alembic upgrade head via subprocess...")
+            # Skip this and Alembic migration if running with SQLite (tests) to preserve the in-memory database.
+            if "sqlite" not in str(engine.url):
+                engine.dispose()
+                logger.debug("SQLAlchemy Engine disposed before Alembic upgrade")
                 
-                # Get path to alembic.ini
-                ini_path = os.path.join(os.path.dirname(__file__), '..', 'alembic.ini')
-                
-                result = subprocess.run(
-                    ["alembic", "-c", ini_path, "upgrade", "head"],
-                    capture_output=True,
-                    text=True,
-                    env=os.environ.copy()
-                )
-                
-                if result.returncode == 0:
-                    logger.info(f"Alembic migrations executadas com sucesso")
-                    if result.stdout:
-                        logger.debug(f"Alembic stdout: {result.stdout}")
-                else:
-                    logger.warning(f"Alembic migration failed with return code {result.returncode}")
-                    logger.warning(f"Alembic stderr: {result.stderr}")
-            except Exception as alembic_err:
-                logger.warning(f"Alembic migration via subprocess failed: {alembic_err}")
+                # Step 2: Run Alembic migrations via Subprocess (Avoids deadlocks/logging clashes)
+                try:
+                    import subprocess
+                    logger.info("Iniciando Alembic upgrade head via subprocess...")
+                    
+                    # Get path to alembic.ini
+                    ini_path = os.path.join(os.path.dirname(__file__), '..', 'alembic.ini')
+                    
+                    result = subprocess.run(
+                        ["alembic", "-c", ini_path, "upgrade", "head"],
+                        capture_output=True,
+                        text=True,
+                        env=os.environ.copy()
+                    )
+                    
+                    if result.returncode == 0:
+                        logger.info(f"Alembic migrations executadas com sucesso")
+                        if result.stdout:
+                            logger.debug(f"Alembic stdout: {result.stdout}")
+                    else:
+                        logger.warning(f"Alembic migration failed with return code {result.returncode}")
+                        logger.warning(f"Alembic stderr: {result.stderr}")
+                except Exception as alembic_err:
+                    logger.warning(f"Alembic migration via subprocess failed: {alembic_err}")
             
             break
         except Exception as e:
@@ -195,6 +197,10 @@ app.include_router(front_recording_router)
 # Performance Testing Router
 from app.routes.performance_routes import router as performance_router
 app.include_router(performance_router)
+
+# Integration Router
+from app.routes.integration_routes import router as integration_router
+app.include_router(integration_router)
 
 # Mount Videos Static Directory
 from fastapi.staticfiles import StaticFiles

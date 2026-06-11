@@ -51,7 +51,7 @@ def test_sanitize_url_for_docker_rule_b():
 
     url2 = "http://localhost:8000/api"
     result2 = FlowExecutorService.sanitize_url_for_docker(url2)
-    assert result2 == "http://internal-gw:8000/api"
+    assert result2 == "http://127.0.0.1:8000/api"
 
 @patch("app.services.variable_service.VariableService.get_all")
 @patch("app.services.environment_service.EnvironmentService.get_by_project")

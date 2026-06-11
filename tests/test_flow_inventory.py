@@ -33,7 +33,9 @@ def test_get_cards_inventory(client):
     # 3. Fetch inventory
     response = client.get("/flow/cards/inventory", headers=headers)
     assert response.status_code == 200
-    inventory = response.json()
+    res_data = response.json()
+    assert "cards" in res_data
+    inventory = res_data["cards"]
     
     # 4. Verify card is in inventory
     assert len(inventory) >= 1

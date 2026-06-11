@@ -59,7 +59,7 @@ def test_register_duplicate_username(client):
     client.post("/auth/create", json=user_data)
 
     response = client.post("/auth/create", json=user_data)
-    assert response.status_code == 400
+    assert response.status_code == 409
     assert "Username já existe" in response.json()["detail"]
 
 
@@ -73,7 +73,7 @@ def test_register_duplicate_email(client):
         "/auth/create",
         json={"username": "u2", "password": "Password123!", "email": "shared@example.com", "accepted_terms": True},
     )
-    assert response.status_code == 400
+    assert response.status_code == 409
     assert "Email já existe" in response.json()["detail"]
 
 

@@ -21,6 +21,7 @@ class HealerRequest(BaseModel):
     error_message: str
 
 @router.get("/settings", response_model=AgentSettingsResponse)
+@router.get("/settings/", response_model=AgentSettingsResponse)
 def get_agent_settings(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
@@ -61,7 +62,8 @@ async def run_healer(
         logger.error(f"Error in Healer route: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.put("/", response_model=AgentSettingsResponse)
+@router.put("/settings", response_model=AgentSettingsResponse)
+@router.put("/settings/", response_model=AgentSettingsResponse)
 def update_agent_settings(
     settings_update: AgentSettingsUpdate,
     db: Session = Depends(get_db),

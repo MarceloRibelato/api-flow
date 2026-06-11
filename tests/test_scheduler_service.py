@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from app.services.scheduler_service import execute_job, SchedulerService, purge_history_job
+from app.services.scheduler_service import execute_job, execute_job_logic, SchedulerService, purge_history_job
 from app.models.schedule_models import ScheduleModel
 from app.models.product_models import ProductModel
 from app.models.feature_models import FeatureModel
@@ -61,7 +61,7 @@ def test_execute_job_feature(mock_execute_feature, mock_session_local, db_sessio
     db_session.add(schedule)
     db_session.commit()
     
-    execute_job(schedule.id)
+    execute_job_logic(schedule.id)
     
     # Refresh schedule
     db_session.refresh(schedule)
@@ -84,7 +84,7 @@ def test_execute_job_flow(mock_execute_flow, mock_session_local, db_session):
     db_session.add(schedule)
     db_session.commit()
     
-    execute_job(schedule.id)
+    execute_job_logic(schedule.id)
     
     db_session.refresh(schedule)
     assert schedule.last_run_status == "failure"
@@ -104,7 +104,7 @@ def test_execute_job_feature_e2e(mock_execute_feature, mock_session_local, db_se
     db_session.add(schedule)
     db_session.commit()
 
-    execute_job(schedule.id)
+    execute_job_logic(schedule.id)
 
     db_session.refresh(schedule)
     assert schedule.last_run_status == "success"
@@ -134,7 +134,7 @@ def test_execute_job_suite_and_webhook(mock_post, mock_requests_session, mock_ex
     db_session.add(schedule)
     db_session.commit()
     
-    execute_job(schedule.id)
+    execute_job_logic(schedule.id)
     
     db_session.refresh(schedule)
     assert schedule.last_run_status == "success"

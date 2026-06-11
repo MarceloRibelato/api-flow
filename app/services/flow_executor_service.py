@@ -51,6 +51,15 @@ class FlowExecutorService:
     def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False):
         # (imports now at top of file)
 
+        # Resolve fallback env if none provided
+        if not env_id and product_id:
+            from app.services.environment_service import EnvironmentService
+            envs = EnvironmentService.get_by_project(db, product_id)
+            if envs:
+                fallback_env = envs[0]
+                env_id = fallback_env.id
+                logger.info(f"      ℹ️ Resolved null env_id in execute_flow_logic to fallback environment ID: {env_id}")
+
         base_batch_id = f"sched_{uuid.uuid4().hex}"
         history_buffer = []
         flow_success_count = 0
@@ -690,6 +699,15 @@ class FlowExecutorService:
             logger.error(f"Feature {feature_id} not found")
             return 0, 0
 
+        # Resolve fallback env if none provided
+        if not env_id:
+            from app.services.environment_service import EnvironmentService
+            envs = EnvironmentService.get_by_project(db, feature.product_id)
+            if envs:
+                fallback_env = envs[0]
+                env_id = fallback_env.id
+                logger.info(f"    ⚠️ No Environment selected for Feature. Fallback to First Env: {fallback_env.name} (ID: {fallback_env.id})")
+
         # list_by_project actually returns flows for a "feature" (project in old naming)
         flows = FlowService.list_by_project(db, feature.id, company_id)
         variables = FlowExecutorService.get_merged_variables(db, feature.product_id, env_id)
@@ -756,6 +774,15 @@ class FlowExecutorService:
             logger.warning(f"Product ID not found for flow {flow_id}, using 0 for variables lookup")
             product_id = 0
 
+        # Resolve fallback env if none provided
+        if not env_id and product_id:
+            from app.services.environment_service import EnvironmentService
+            envs = EnvironmentService.get_by_project(db, product_id)
+            if envs:
+                fallback_env = envs[0]
+                env_id = fallback_env.id
+                logger.info(f"    ⚠️ No Environment selected for Flow. Fallback to First Env: {fallback_env.name} (ID: {fallback_env.id})")
+
         logger.info(f"🚀 Executing Single Flow: {flow_meta['name']} (ID: {flow.id}) in Feature {feature_name}")
 
         # 4. Prepare Variables
@@ -776,7 +803,14 @@ class FlowExecutorService:
             logger.warning(f"No features found for product {product_id}")
             return 0, 0
 
-
+        # Resolve fallback env if none provided
+        if not env_id:
+            from app.services.environment_service import EnvironmentService
+            envs = EnvironmentService.get_by_project(db, product_id)
+            if envs:
+                fallback_env = envs[0]
+                env_id = fallback_env.id
+                logger.info(f"    ⚠️ No Environment selected for Suite. Fallback to First Env: {fallback_env.name} (ID: {fallback_env.id})")
 
         # RAW VARIABLES (Objects)
         raw_variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)

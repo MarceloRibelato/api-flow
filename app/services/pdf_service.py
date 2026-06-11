@@ -216,8 +216,11 @@ class PDFService:
                      print_section("Erro:", item.error_message)
                 
                 pdf.ln(4)
-               
-        return pdf.output(dest='S').encode('latin-1', 'replace')
+                
+        result = pdf.output(dest='S')
+        if isinstance(result, str):
+            return result.encode('latin-1', 'replace')
+        return result
 
     @staticmethod
     def _extract_screenshot_path(text: str) -> str | None:

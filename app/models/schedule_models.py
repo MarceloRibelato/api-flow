@@ -28,6 +28,12 @@ class ScheduleModel(Base):
     capture_video = Column(Boolean, default=False) # Whether to capture E2E execution video
     capture_screenshot = Column(Boolean, default=False) # Whether to capture E2E per-step screenshots
     visible_execution = Column(Boolean, default=False) # Run Playwright locally with visible UI (headless=False)
+    
+    # Performance testing parameters
+    virtual_users = Column(Integer, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    ramp_up_seconds = Column(Integer, nullable=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Multi-tenancy

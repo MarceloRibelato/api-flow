@@ -21,7 +21,9 @@ async def proxy_request(req: ProxyRequest, request: Request):
         target_url = req.url
         
         # Shortcut: Bypass Nginx if targeting our own API (backend)
-        if "/api/" in target_url and any(h in target_url for h in ["localhost", "127.0.0.1", "flow-frontend"]):
+        if "localhost:8000" in target_url or "127.0.0.1:8000" in target_url:
+            target_url = target_url.replace("localhost:8000", "backend:8000").replace("127.0.0.1:8000", "backend:8000")
+        elif "/api/" in target_url and any(h in target_url for h in ["localhost", "127.0.0.1", "flow-frontend"]):
             # Preserve the rest of the path after /api/
             api_match = re.search(r'/api/(.*)', target_url)
             if api_match:

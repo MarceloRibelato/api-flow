@@ -30,7 +30,8 @@ class PerformanceService:
         ramp_up_seconds: int,
         company_id: int, 
         user_id: int,
-        test_name: str = None
+        test_name: str = None,
+        environment_id: int = None
     ):
         """
         Executes a load test for a list of API endpoints sequentially per virtual user.
@@ -68,6 +69,8 @@ class PerformanceService:
         import threading
         api_cache = {}
         api_cache_lock = threading.Lock()
+        failed_calls = []
+        failed_calls_lock = threading.Lock()
 
         parsed_apis = []
         for api in api_list:
@@ -165,6 +168,7 @@ class PerformanceService:
                 vu_variables = {}
                 while time.time() < stop_time and active_tests.get(job_id, False):
                     # Iterate sequentially over the flow
+                    executed_any = False
                     for api in parsed_apis:
                         if time.time() >= stop_time or not active_tests.get(job_id, False):
                             break
@@ -175,12 +179,65 @@ class PerformanceService:
                         extracted_delta = {}
                         
                         if api["cache_ttl_minutes"] > 0:
+                            logger.info(f"   🔍 Cache check active for {api['name']} (ID: {api['id']}) with TTL: {api['cache_ttl_minutes']} minutes. Env ID: {environment_id}")
+                            # 1. Check local in-memory cache first
                             with api_cache_lock:
                                 entry = api_cache.get(cache_key)
                                 if entry and (time.time() - entry["timestamp"]) <= (api["cache_ttl_minutes"] * 60):
                                     use_cache = True
                                     extracted_delta = entry["extracted_vars"]
-                        
+                                    logger.info(f"   ⚡ Memory Cache Hit for {api['name']}")
+                                    
+                            # 2. Check Postgres DB history (ApiExecutionHistory) if not found in memory
+                            if not use_cache:
+                                from app.database import SessionLocal
+                                from app.models.api_test_history_models import ApiExecutionHistory
+                                from sqlalchemy import desc, func
+                                from datetime import timedelta
+                                
+                                thread_db = SessionLocal()
+                                try:
+                                    time_threshold = func.now() - timedelta(minutes=api["cache_ttl_minutes"])
+                                    logger.info(f"   🕒 DB Cache check time threshold: {time_threshold}")
+                                    query = thread_db.query(ApiExecutionHistory).filter(
+                                        ApiExecutionHistory.api_id == str(api["id"]),
+                                        ApiExecutionHistory.error_message == None,
+                                        ApiExecutionHistory.status_text != 'OK (Cached)',
+                                        ApiExecutionHistory.created_at >= time_threshold
+                                    )
+                                    if environment_id:
+                                        query = query.filter(ApiExecutionHistory.environment_id == environment_id)
+                                        
+                                    cached_run = query.order_by(desc(ApiExecutionHistory.created_at)).first()
+                                    if cached_run:
+                                        logger.info(f"   💾 DB Cache Hit for {api['name']} (Record ID: {cached_run.id}, Created: {cached_run.created_at})")
+                                        use_cache = True
+                                        resp_headers = cached_run.response_headers or {}
+                                        resp_text = cached_run.response_body or ""
+                                        
+                                        try:
+                                            import json as _json
+                                            resp_json = _json.loads(resp_text) if resp_text else None
+                                        except:
+                                            resp_json = None
+                                            
+                                        cached_vars = {}
+                                        if api["extractions"]:
+                                            process_extractions(api["extractions"], resp_headers, resp_json, cached_vars)
+                                            
+                                        with api_cache_lock:
+                                            api_cache[cache_key] = {
+                                                "timestamp": time.time(),
+                                                "extracted_vars": cached_vars
+                                            }
+                                        extracted_delta = cached_vars
+                                    else:
+                                        logger.info(f"   ❌ DB Cache Miss for {api['name']} (ID: {api['id']})")
+                                except Exception as e_cache:
+                                    logger.warning(f"      ⚠️ Failed to query performance cache from DB: {e_cache}")
+                                finally:
+                                    thread_db.close()
+                         
                         if use_cache:
                             # Apply cached variables
                             vu_variables.update(extracted_delta)
@@ -189,6 +246,7 @@ class PerformanceService:
                             # This means we should skip it entirely in the metrics.
                             continue # Skip the real HTTP request and metric counting
 
+                        executed_any = True
                         start_t = time.time()
                         
                         # Resolve variables for this step
@@ -253,6 +311,18 @@ class PerformanceService:
                             else:
                                 stats["failed"] += 1
                                 stats_per_api[api["id"]]["failed"] += 1
+                                error_msg = resp.text[:150] or resp.reason or "Non-success status code"
+                                with failed_calls_lock:
+                                    if len(failed_calls) < 200:
+                                        failed_calls.append({
+                                            "timestamp": datetime.now().isoformat(),
+                                            "api_id": api["id"],
+                                            "api_name": api.get("name", "Unknown API"),
+                                            "method": api["method"],
+                                            "url": current_url,
+                                            "status_code": resp.status_code,
+                                            "reason": f"Status {resp.status_code}: {error_msg}"
+                                        })
                                 log_queue.put([
                                     datetime.now().isoformat(),
                                     api["id"],
@@ -272,6 +342,17 @@ class PerformanceService:
                             stats_per_api[api["id"]]["total"] += 1
                             stats_per_api[api["id"]]["failed"] += 1
                             stats_per_api[api["id"]]["latencies"].append(latency)
+                            with failed_calls_lock:
+                                if len(failed_calls) < 200:
+                                    failed_calls.append({
+                                        "timestamp": datetime.now().isoformat(),
+                                        "api_id": api["id"],
+                                        "api_name": api.get("name", "Unknown API"),
+                                        "method": api["method"],
+                                        "url": current_url,
+                                        "status_code": 0,
+                                        "reason": str(e)
+                                    })
                             log_queue.put([
                                 datetime.now().isoformat(),
                                 api["id"],
@@ -285,6 +366,10 @@ class PerformanceService:
                                 logger.error(f"Load test request exception: {e}")
                             # Sleep briefly on error to prevent CPU spin
                             time.sleep(0.1)
+
+                    if not executed_any:
+                        # Sleep briefly to prevent tight CPU spin when all requests are cached
+                        time.sleep(1.0)
 
         logger.info(f"Starting Load Test {job_id} with {virtual_users} VUs for {duration_seconds}s")
         start_exec_time = time.time()
@@ -383,6 +468,7 @@ class PerformanceService:
                 result.total_requests = stats["total"]
                 result.success_requests = stats["success"]
                 result.failed_requests = stats["failed"]
+                result.failed_requests_detail = failed_calls
                 try:
                     db.commit()
                 except Exception as e:
@@ -442,6 +528,7 @@ class PerformanceService:
             }
             
         result.api_stats = final_api_stats
+        result.failed_requests_detail = failed_calls
         
         result.total_requests = stats["total"]
         result.success_requests = stats["success"]
@@ -465,8 +552,7 @@ class PerformanceService:
         return result
 
     @staticmethod
-    def stop_load_test(job_id: str):
-        from app.database import SessionLocal
+    def stop_load_test(db: Session, job_id: str):
         from app.models.performance_models import PerformanceTestResult
         
         # 1. Fallback for local thread (if not using Celery)
@@ -474,7 +560,6 @@ class PerformanceService:
             active_tests[job_id] = False
             
         # 2. Global state for Celery Worker (update DB)
-        db = SessionLocal()
         try:
             result = db.query(PerformanceTestResult).filter(PerformanceTestResult.id == job_id).first()
             if result and result.status == "running":
@@ -482,8 +567,9 @@ class PerformanceService:
                 db.commit()
                 return True
             return False
-        finally:
-            db.close()
+        except Exception as e:
+            logger.error(f"Error stopping load test: {e}")
+            return False
 
     @staticmethod
     def delete_test_result(db: Session, job_id: str, company_id: int):

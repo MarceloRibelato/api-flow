@@ -25,6 +25,7 @@ class LoadTestRequest(BaseModel):
     duration_seconds: int = 30
     ramp_up_seconds: int = 0
     test_name: Optional[str] = None
+    environment_id: Optional[int] = None
 
 @router.post("/start")
 def start_performance_test(
@@ -64,7 +65,8 @@ def start_performance_test(
         ramp_up_seconds=req.ramp_up_seconds,
         company_id=current_user.company_id,
         user_id=current_user.id,
-        test_name=req.test_name
+        test_name=req.test_name,
+        environment_id=req.environment_id
     )
     
     return {"message": "Performance test started", "job_id": job_id}
@@ -131,6 +133,7 @@ def get_performance_stats(
         "requests_per_second": result.requests_per_second,
         "time_series_data": result.time_series_data,
         "api_stats": result.api_stats,
+        "failed_requests_detail": result.failed_requests_detail,
         "started_at": result.started_at,
         "completed_at": result.completed_at
     }
@@ -196,6 +199,7 @@ async def stream_performance_stats(
                     "requests_per_second": result.requests_per_second,
                     "time_series_data": result.time_series_data,
                     "api_stats": result.api_stats,
+                    "failed_requests_detail": result.failed_requests_detail,
                     "started_at": result.started_at.isoformat() if result.started_at else None,
                     "completed_at": result.completed_at.isoformat() if result.completed_at else None
                 }
@@ -222,7 +226,7 @@ def stop_performance_test(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
-    stopped = PerformanceService.stop_load_test(job_id)
+    stopped = PerformanceService.stop_load_test(db, job_id)
     if not stopped:
         # It might have already finished or not started yet
         return {"message": "Test not active or already finished."}

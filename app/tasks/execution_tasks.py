@@ -33,7 +33,8 @@ def celery_run_load_test(
     ramp_up_seconds: int,
     company_id: int, 
     user_id: int,
-    test_name: str = None
+    test_name: str = None,
+    environment_id: int = None
 ):
     """
     Celery task that executes a performance load test.
@@ -53,7 +54,8 @@ def celery_run_load_test(
             ramp_up_seconds=ramp_up_seconds,
             company_id=company_id,
             user_id=user_id,
-            test_name=test_name
+            test_name=test_name,
+            environment_id=environment_id
         )
     except Exception as e:
         logger.error(f"Celery Task celery_run_load_test failed for job {job_id}: {e}")

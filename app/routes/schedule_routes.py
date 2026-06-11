@@ -16,13 +16,18 @@ router = APIRouter(tags=["Schedules"])
 class ScheduleCreate(BaseModel):
     name: Optional[str] = None
     type: str # 'suite' or 'feature'
-    flow_type: Optional[str] = 'api' # 'api' or 'e2e'
+    flow_type: Optional[str] = 'api' # 'api', 'e2e', or 'performance'
     target_id: int
     environment_id: Optional[int] = None
     cron_expression: Optional[str] = None
     run_at: Optional[datetime] = None
     notification_urls: Optional[str] = None
     notifications_enabled: bool = True
+    
+    # Performance testing parameters
+    virtual_users: Optional[int] = None
+    duration_seconds: Optional[int] = None
+    ramp_up_seconds: Optional[int] = None
 
 class ScheduleOut(BaseModel):
     id: int
@@ -41,6 +46,9 @@ class ScheduleOut(BaseModel):
     last_run_status: Optional[str] = None
     next_run: Optional[datetime]
     created_at: datetime
+    virtual_users: Optional[int] = None
+    duration_seconds: Optional[int] = None
+    ramp_up_seconds: Optional[int] = None
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,7 +72,10 @@ def create_schedule(schedule_in: ScheduleCreate, db: Session = Depends(get_db), 
         notifications_enabled=schedule_in.notifications_enabled,
         status="active",
         user_id=current_user.id,
-        company_id=current_user.company_id # Assign Company
+        company_id=current_user.company_id, # Assign Company
+        virtual_users=schedule_in.virtual_users,
+        duration_seconds=schedule_in.duration_seconds,
+        ramp_up_seconds=schedule_in.ramp_up_seconds
     )
     db.add(db_schedule)
     db.commit()

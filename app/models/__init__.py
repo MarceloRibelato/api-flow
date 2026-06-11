@@ -11,6 +11,7 @@ from app.models.schedule_models import ScheduleModel
 from app.models.auth_models import BlacklistedToken
 from app.models.service_token_models import ServiceTokenDB
 from app.models.performance_models import PerformanceTestResult
+from app.models.integration_models import ProjectIntegrationDB
 
 __all__ = [
     "UserDB",
@@ -25,4 +26,5 @@ __all__ = [
     "BlacklistedToken",
     "ServiceTokenDB",
     "PerformanceTestResult",
+    "ProjectIntegrationDB",
 ]

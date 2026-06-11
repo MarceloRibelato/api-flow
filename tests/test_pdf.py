@@ -50,5 +50,5 @@ def test_generate_pdf_success(db_session):
     
     pdf_bytes = PDFService.generate_execution_report(db_session, schedule.id)
     assert pdf_bytes is not None
-    assert isinstance(pdf_bytes, bytes)
+    assert isinstance(pdf_bytes, (bytes, bytearray))
     assert len(pdf_bytes) > 0

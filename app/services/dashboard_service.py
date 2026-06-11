@@ -3,13 +3,18 @@ from sqlalchemy import func, desc
 from app.models.api_test_history_models import ApiExecutionHistory
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
+import io
+import csv
 
 class DashboardService:
     @staticmethod
-    def _apply_filters(query, project_id: Optional[int] = None, flow_id: Optional[int] = None, 
+    def _apply_filters(db: Session, query, project_id: Optional[int] = None, flow_id: Optional[int] = None, 
                        environment_id: Optional[int] = None,
                        start_date: Optional[datetime] = None, end_date: Optional[datetime] = None,
-                       execution_type: Optional[str] = None):
+                       execution_type: Optional[str] = None,
+                       search_term: Optional[str] = None,
+                       status_code: Optional[str] = None,
+                       last_execution_only: bool = False):
         if project_id:
             query = query.filter(ApiExecutionHistory.project_id == project_id)
         if flow_id:
@@ -18,6 +23,10 @@ class DashboardService:
             query = query.filter(ApiExecutionHistory.environment_id == environment_id)
         if execution_type:
             query = query.filter(ApiExecutionHistory.execution_type == execution_type)
+        if search_term:
+            query = query.filter(ApiExecutionHistory.api_name.ilike(f"%{search_term}%"))
+        if status_code:
+            query = query.filter(ApiExecutionHistory.status_code == int(status_code))
         
         # Ensure dates are timezone-aware (UTC) if they are naive
         if start_date and start_date.tzinfo is None:
@@ -29,6 +38,21 @@ class DashboardService:
             query = query.filter(ApiExecutionHistory.created_at >= start_date)
         if end_date:
             query = query.filter(ApiExecutionHistory.created_at <= end_date)
+
+        if last_execution_only:
+            # Find the most recent batch_id for the given project/flow
+            latest_batch_subq = db.query(ApiExecutionHistory.batch_id).filter(ApiExecutionHistory.batch_id.isnot(None))
+            if project_id:
+                latest_batch_subq = latest_batch_subq.filter(ApiExecutionHistory.project_id == project_id)
+            if flow_id:
+                latest_batch_subq = latest_batch_subq.filter(ApiExecutionHistory.flow_id == flow_id)
+            latest_batch = latest_batch_subq.order_by(desc(ApiExecutionHistory.created_at)).first()
+            
+            if latest_batch and latest_batch[0]:
+                query = query.filter(ApiExecutionHistory.batch_id == latest_batch[0])
+            else:
+                # If no batch_id, maybe just limit to the very last execution record time
+                pass
             
         return query
 
@@ -36,19 +60,15 @@ class DashboardService:
     def get_summary_stats(db: Session, days: int = 7, project_id: int = None, flow_id: int = None, 
                           environment_id: int = None,
                           start_date: datetime = None, end_date: datetime = None,
-                          execution_type: str = None) -> Dict[str, Any]:
-        """
-        Returns summary metrics for the period/filters.
-        """
-        # Determine start_date if not specific range provided
+                          execution_type: str = None,
+                          search_term: str = None, status_code: str = None, last_execution_only: bool = False) -> Dict[str, Any]:
         if not start_date and not end_date:
             start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
         base_query = db.query(ApiExecutionHistory)
-        base_query = DashboardService._apply_filters(base_query, project_id, flow_id, environment_id, start_date, end_date, execution_type)
+        base_query = DashboardService._apply_filters(db, base_query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only)
         
         total_executions = base_query.count()
-        
         failures = base_query.filter(ApiExecutionHistory.error_message != None).count()
         
         success_rate = 0.0
@@ -69,12 +89,12 @@ class DashboardService:
     def get_recent_failures(db: Session, limit: int = 5, project_id: int = None, flow_id: int = None,
                             environment_id: int = None,
                             start_date: datetime = None, end_date: datetime = None,
-                            execution_type: str = None) -> List[Dict[str, Any]]:
+                            execution_type: str = None,
+                            search_term: str = None, status_code: str = None, last_execution_only: bool = False) -> List[Dict[str, Any]]:
         query = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.error_message != None)
-        query = DashboardService._apply_filters(query, project_id, flow_id, environment_id, start_date, end_date, execution_type)
+        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only)
         
         failures = query.order_by(desc(ApiExecutionHistory.created_at)).limit(limit).all()
-            
         return [
             {
                 "id": f.id,
@@ -89,15 +109,39 @@ class DashboardService:
         ]
 
     @staticmethod
+    def get_recent_executions(db: Session, limit: int = 5, project_id: int = None, flow_id: int = None,
+                              environment_id: int = None,
+                              start_date: datetime = None, end_date: datetime = None,
+                              execution_type: str = None,
+                              search_term: str = None, status_code: str = None, last_execution_only: bool = False) -> List[Dict[str, Any]]:
+        query = db.query(ApiExecutionHistory)
+        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only)
+        
+        executions = query.order_by(desc(ApiExecutionHistory.created_at)).limit(limit).all()
+        return [
+            {
+                "id": e.id,
+                "api_name": e.api_name or "Unknown API",
+                "flow_id": e.flow_id,
+                "created_at": e.created_at,
+                "status_code": e.status_code,
+                "response_time": e.response_time,
+                "error_message": e.error_message,
+                "environment_name": e.environment_name
+            }
+            for e in executions
+        ]
+
+    @staticmethod
     def get_slowest_executions(db: Session, limit: int = 5, project_id: int = None, flow_id: int = None,
                                environment_id: int = None,
                                start_date: datetime = None, end_date: datetime = None,
-                               execution_type: str = None) -> List[Dict[str, Any]]:
+                               execution_type: str = None,
+                               search_term: str = None, status_code: str = None, last_execution_only: bool = False) -> List[Dict[str, Any]]:
         query = db.query(ApiExecutionHistory)
-        query = DashboardService._apply_filters(query, project_id, flow_id, environment_id, start_date, end_date, execution_type)
+        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only)
         
         slowest = query.order_by(desc(ApiExecutionHistory.response_time)).limit(limit).all()
-            
         return [
             {
                 "id": f.id,
@@ -115,17 +159,13 @@ class DashboardService:
     def get_daily_stats(db: Session, days: int = 7, project_id: int = None, flow_id: int = None,
                         environment_id: int = None,
                         start_date: datetime = None, end_date: datetime = None,
-                        execution_type: str = None) -> List[Dict[str, Any]]:
-        """
-        Returns execution counts (success/failure) grouped by day.
-        Aggregation is done in Python.
-        """
+                        execution_type: str = None,
+                        search_term: str = None, status_code: str = None, last_execution_only: bool = False) -> List[Dict[str, Any]]:
         if not start_date and not end_date:
             start_date_query = datetime.now(timezone.utc) - timedelta(days=days)
         else:
             start_date_query = start_date
 
-        # Ensure start_date_query is aware
         if start_date_query and start_date_query.tzinfo is None:
             start_date_query = start_date_query.replace(tzinfo=timezone.utc)
 
@@ -135,53 +175,16 @@ class DashboardService:
             ApiExecutionHistory.error_message
         )
         
-        # Apply filters (Note: start_date handling matches the logic above)
-        if project_id:
-            query = query.filter(ApiExecutionHistory.project_id == project_id)
-        if flow_id:
-            query = query.filter(ApiExecutionHistory.flow_id == flow_id)
-        if environment_id:
-            query = query.filter(ApiExecutionHistory.environment_id == environment_id)
-        
-        if execution_type:
-            query = query.filter(ApiExecutionHistory.execution_type == execution_type)
-            
-        if start_date_query:
-            query = query.filter(ApiExecutionHistory.created_at >= start_date_query)
-        if end_date:
-            query = query.filter(ApiExecutionHistory.created_at <= end_date)
+        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date_query, end_date, execution_type, search_term, status_code, last_execution_only)
 
         raw_data = query.all()
-        
-        # Aggregate in Python
         stats_map = {}
-        
-        # Determine date range for pre-filling 0s
-        # If using 'days', simple range. If custom range, iterate between start/end.
-        # Simplification: Just iterate based on input 'days' if start/end not custom, 
-        # or calculate delta if custom.
-        
-        iteration_days = days
-        current = datetime.now(timezone.utc)
-        if start_date and end_date:
-            # Calculate days between
-            delta = end_date - start_date
-            iteration_days = delta.days + 1
-            current = end_date
-
-        # Initialize last N days with 0 (approximate for custom range, logic can be refined)
-        # For simplicity in this iteration, we trust the raw data dates for custom ranges 
-        # but ensure at least 7 days default structure.
-        
-        # Better approach: Just use raw data grouping, and maybe fill gaps later?
-        # Let's stick to the previous reliable loop for default case, and dynamic for custom.
         
         if not start_date or not end_date:
              for i in range(days):
                 day_str = (datetime.now(timezone.utc) - timedelta(days=i)).strftime('%Y-%m-%d')
                 stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
         else:
-             # Pre-fill for custom range
              delta = (end_date - start_date).days
              for i in range(delta + 1):
                  day_str = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
@@ -189,7 +192,6 @@ class DashboardService:
 
         for row in raw_data:
             day_str = row.created_at.strftime('%Y-%m-%d')
-            # Initialize if not exists (should be covered by above but safe fallback)
             if day_str not in stats_map:
                  stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
             
@@ -208,14 +210,14 @@ class DashboardService:
         
         stats_list = list(stats_map.values())
         stats_list.sort(key=lambda x: x['date'])
-        
         return stats_list
 
     @staticmethod
     def get_top_failing_apis(db: Session, limit: int = 5, project_id: int = None, flow_id: int = None,
                              environment_id: int = None,
                              start_date: datetime = None, end_date: datetime = None,
-                             execution_type: str = None) -> List[Dict[str, Any]]:
+                             execution_type: str = None,
+                             search_term: str = None, status_code: str = None, last_execution_only: bool = False) -> List[Dict[str, Any]]:
         query = db.query(
             ApiExecutionHistory.api_name,
             func.count(ApiExecutionHistory.id).label('failure_count')
@@ -223,7 +225,7 @@ class DashboardService:
              (ApiExecutionHistory.status_code >= 400) | (ApiExecutionHistory.error_message != None)
         )
         
-        query = DashboardService._apply_filters(query, project_id, flow_id, environment_id, start_date, end_date, execution_type)
+        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only)
         
         top_failures = query.group_by(
             ApiExecutionHistory.api_name
@@ -238,3 +240,33 @@ class DashboardService:
             }
             for tf in top_failures
         ]
+
+    @staticmethod
+    def export_data_csv(db: Session, days: int = 7, project_id: int = None, flow_id: int = None,
+                        environment_id: int = None, start_date: datetime = None, end_date: datetime = None,
+                        execution_type: str = None, search_term: str = None, status_code: str = None, last_execution_only: bool = False) -> str:
+        
+        if not start_date and not end_date:
+            start_date = datetime.now(timezone.utc) - timedelta(days=days)
+
+        query = db.query(ApiExecutionHistory)
+        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only)
+        
+        executions = query.order_by(desc(ApiExecutionHistory.created_at)).all()
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['ID', 'API Name', 'Status Code', 'Response Time (ms)', 'Environment', 'Created At', 'Error Message'])
+
+        for e in executions:
+            writer.writerow([
+                e.id,
+                e.api_name,
+                e.status_code,
+                e.response_time,
+                e.environment_name,
+                e.created_at.strftime('%Y-%m-%d %H:%M:%S') if e.created_at else '',
+                e.error_message or ''
+            ])
+
+        return output.getvalue()

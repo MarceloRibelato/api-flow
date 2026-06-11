@@ -37,7 +37,12 @@ class ExecutionRequestCICD(BaseModel):
     feature_name: Optional[str] = 'all'
     environment_name: str
     execution_name: Optional[str] = None
-    flow_type: Optional[str] = 'api' # 'api' or 'e2e'
+    flow_type: Optional[str] = 'api' # 'api', 'e2e', or 'performance'
+    
+    # Performance parameters (only used if flow_type == 'performance')
+    virtual_users: Optional[int] = 10
+    duration_seconds: Optional[int] = 30
+    ramp_up_seconds: Optional[int] = 0
 
 # --- Token Management ---
 @router.get("/tokens", response_model=List[TokenRead])
@@ -155,7 +160,10 @@ def execute_cicd(
         status='active',
         company_id=current_user.company_id,
         user_id=current_user.id,
-        flow_type=req.flow_type or 'api'
+        flow_type=req.flow_type or 'api',
+        virtual_users=req.virtual_users if req.flow_type == 'performance' else None,
+        duration_seconds=req.duration_seconds if req.flow_type == 'performance' else None,
+        ramp_up_seconds=req.ramp_up_seconds if req.flow_type == 'performance' else None
     )
     db.add(new_schedule)
     db.commit()

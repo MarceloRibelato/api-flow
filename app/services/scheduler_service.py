@@ -35,6 +35,11 @@ def execute_job_logic(schedule_id: int):
     """
     logger.info(f"Executing scheduled job logic: {schedule_id}")
     db = SessionLocal()
+    
+    success_count = 0
+    fail_count = 0
+    schedule = None
+    
     try:
         schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
         if not schedule:
@@ -50,8 +55,8 @@ def execute_job_logic(schedule_id: int):
              # Job is gone from scheduler (one-time job finished)
              schedule.next_run = None
              if not schedule.cron_expression:
-                 schedule.status = 'running'
-                 logger.info(f"Marking one-time schedule {schedule_id} as running")
+                  schedule.status = 'running'
+                  logger.info(f"Marking one-time schedule {schedule_id} as running")
         
         db.commit()
 
@@ -72,13 +77,123 @@ def execute_job_logic(schedule_id: int):
         # CRITICAL FIX: Disable proxy detection (can cause 1-2s delay on Windows)
         session.trust_env = False
 
-
-
         # --- EXECUTION LOGIC ---
-        success_count = 0
-        fail_count = 0
+        if getattr(schedule, 'flow_type', 'api') == 'performance':
+            logger.info(f"🚀 Running Scheduled PERFORMANCE Test for {schedule.type} {schedule.target_id}")
+            from app.services.performance_service import PerformanceService
+            import uuid
+            
+            job_id = f"perf_{uuid.uuid4().hex}"
+            
+            # Helper to extract API list from a flow
+            def extract_apis_from_flow(flow_id, proj_id):
+                flow_data = FlowService.load(db, proj_id, schedule.company_id, flow_id)
+                cards = flow_data.get('cardData', {})
+                nodes = flow_data.get('nodes', [])
+                
+                # Simple extraction, respecting node order might be complex, 
+                # but for load testing we often just want the list. 
+                # Let's sort by x position roughly.
+                nodes.sort(key=lambda n: n.get('position', {}).get('x', 0))
+                
+                api_list = []
+                for n in nodes:
+                    c = cards.get(n['id'])
+                    if c and c.get('apiCalls'):
+                        for api in c['apiCalls']:
+                            api_list.append(api)
+                return api_list
 
-        if schedule.type == 'feature':
+            final_api_list = []
+            
+            if schedule.type == 'flow':
+                from app.models.flow_models import FlowDB
+                f_db = db.query(FlowDB).filter(FlowDB.id == schedule.target_id).first()
+                if f_db and getattr(f_db, 'flow_type', 'api') == 'api':
+                    final_api_list = extract_apis_from_flow(f_db.id, f_db.project_id)
+            elif schedule.type == 'feature':
+                # Get the first API flow of the feature to load test
+                flows = FlowService.list_by_project(db, schedule.target_id, schedule.company_id)
+                api_flows = [f for f in flows if f.get('flow_type') == 'api']
+                if api_flows:
+                    final_api_list = extract_apis_from_flow(api_flows[0]['id'], schedule.target_id)
+            elif schedule.type == 'suite':
+                # Extract APIs from all API flows under all features of this product (target_id is product_id)
+                from app.models.feature_models import FeatureModel
+                features = db.query(FeatureModel).filter(FeatureModel.product_id == schedule.target_id).all()
+                for feat in features:
+                    flows = FlowService.list_by_project(db, feat.id, schedule.company_id)
+                    for flow_obj in flows:
+                        if flow_obj.get('flow_type') == 'api':
+                            final_api_list.extend(extract_apis_from_flow(flow_obj['id'], feat.id))
+            
+            if final_api_list:
+                from app.models.performance_models import PerformanceTestResult
+                
+                target_url = final_api_list[0].get("url", "unknown_url") if len(final_api_list) == 1 else "Multiple APIs (Flow)"
+                
+                # Resolve environment ID fallback if not set
+                env_id = schedule.environment_id
+                if not env_id:
+                    product_id = None
+                    if schedule.type == 'suite':
+                        product_id = schedule.target_id
+                    elif schedule.type == 'feature':
+                        from app.models.feature_models import FeatureModel
+                        feat = db.query(FeatureModel).filter(FeatureModel.id == schedule.target_id).first()
+                        if feat:
+                            product_id = feat.product_id
+                    elif schedule.type == 'flow':
+                        from app.models.flow_models import FlowDB
+                        from app.models.feature_models import FeatureModel
+                        f_db = db.query(FlowDB).filter(FlowDB.id == schedule.target_id).first()
+                        if f_db:
+                            feat = db.query(FeatureModel).filter(FeatureModel.id == f_db.project_id).first()
+                            if feat:
+                                product_id = feat.product_id
+                    
+                    if product_id:
+                        from app.services.environment_service import EnvironmentService
+                        envs = EnvironmentService.get_by_project(db, product_id)
+                        if envs:
+                            env_id = envs[0].id
+                            logger.info(f"Resolved fallback environment ID {env_id} for scheduled performance test {schedule.id}")
+
+                # Create result record
+                perf_result = PerformanceTestResult(
+                    id=job_id,
+                    company_id=schedule.company_id,
+                    user_id=schedule.user_id or 1,
+                    status="pending",
+                    virtual_users=schedule.virtual_users or 10,
+                    duration_seconds=schedule.duration_seconds or 30,
+                    ramp_up_seconds=schedule.ramp_up_seconds or 0,
+                    test_name=f"Schedule {schedule.id}: {schedule.name}" if schedule.name else f"Scheduled Perf Test {schedule.id}",
+                    target_url=target_url
+                )
+                db.add(perf_result)
+                db.commit()
+                
+                from app.tasks.execution_tasks import celery_run_load_test
+                celery_run_load_test.delay(
+                    job_id=job_id,
+                    api_list=final_api_list,
+                    virtual_users=schedule.virtual_users or 10,
+                    duration_seconds=schedule.duration_seconds or 30,
+                    ramp_up_seconds=schedule.ramp_up_seconds or 0,
+                    company_id=schedule.company_id,
+                    user_id=schedule.user_id or 1,
+                    test_name=perf_result.test_name,
+                    environment_id=env_id
+                )
+                schedule.last_run_status = 'success' # Indicates it was triggered successfully
+                db.commit()
+            else:
+                logger.error(f"Failed to extract APIs for performance test schedule {schedule.id}")
+                schedule.last_run_status = 'failure'
+                db.commit()
+
+        elif schedule.type == 'feature':
             feature_id = schedule.target_id
             env_id = schedule.environment_id
             logger.info(f"🚀 Running Scheduled Feature {feature_id} in Env {env_id}")
@@ -97,7 +212,6 @@ def execute_job_logic(schedule_id: int):
             # Determine overall status
             schedule.last_run_status = 'failure' if fail_count > 0 else 'success'
             db.commit()
-
 
         elif schedule.type == 'flow':
             flow_id = schedule.target_id
@@ -148,144 +262,156 @@ def execute_job_logic(schedule_id: int):
             schedule.status = 'completed'
             db.commit()
 
-        # --- 4. Send Webhook Notification ---
-        # Logic: Use Schedule URL > Fallback to Product URL
-        
-        target_urls = schedule.notification_urls
-        
-        if not target_urls:
-            # Fallback logic based on type
+    except Exception as e:
+        logger.error(f"Error executing job logic {schedule_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        if schedule:
             try:
-                from app.models.product_models import ProductModel
-                from app.models.feature_models import FeatureModel
-                
-                product_id_for_url = None
-                
-                if schedule.type == 'suite':
-                    product_id_for_url = schedule.target_id
-                elif schedule.type == 'feature':
-                    # Need to get product_id from feature
-                    feat = db.query(FeatureModel).filter(FeatureModel.id == schedule.target_id).first()
-                    if feat:
-                        product_id_for_url = feat.product_id
-                elif schedule.type == 'flow':
-                    # Need to get product_id from flow -> feature -> product
-                    from app.models.flow_models import FlowDB
-                    flow_obj = db.query(FlowDB).filter(FlowDB.id == schedule.target_id).first()
-                    if flow_obj:
-                         feat = db.query(FeatureModel).filter(FeatureModel.id == flow_obj.project_id).first()
-                         if feat:
-                            product_id_for_url = feat.product_id
-                
-                if product_id_for_url:
-                    prod = db.query(ProductModel).filter(ProductModel.id == product_id_for_url).first()
-                    if prod and prod.notification_urls:
-                        target_urls = prod.notification_urls
-                        logger.info(f"Using Product-level webhook for Schedule {schedule.id}")
+                schedule.last_run_status = 'failure'
+                # Essential: Mark one-time schedule as failed so frontend stops polling
+                if not getattr(schedule, 'cron_expression', None):
+                    schedule.status = 'failure'
+                db.commit()
+            except Exception as db_err:
+                logger.error(f"Failed to set failure status in DB: {db_err}")
+                db.rollback()
 
-            except Exception as e:
-                logger.error(f"Error fetching product webhook: {e}")
-
-        if target_urls:
-            # CHECK NOTIFICATION TOGGLE
-            if hasattr(schedule, 'notifications_enabled') and schedule.notifications_enabled is False:
-                 logger.info(f"Skipping webhook notification for Schedule {schedule.id} (notifications disabled)")
-                 # We still want to log or do other things? Probably just skip.
-            else:
-                logger.info(f"Target URLs for webhook: {target_urls}")
-                try:
-                    # Helper function defined inline or use a service method if reusable
-                    # Using simple requests here for immediate execution
-                    urls = [u.strip() for u in target_urls.split(',') if u.strip()]
-                    logger.info(f"Parsed URLs: {urls}")
-                    
-                    # Use UTC-3 for execution time in notifications
-                    from datetime import timedelta
-                    tz_adjust = timedelta(hours=3)
-                    exec_time_dt = schedule.last_run if schedule.last_run else datetime.now(timezone.utc)
-                    br_time = (exec_time_dt - tz_adjust).strftime("%d/%m/%Y, %H:%M:%S")
-
-                    payload = {
-                        "schedule_id": schedule.id,
-                        "schedule_name": schedule.name,
-                        "type": schedule.type,
-                        "target_id": schedule.target_id,
-                        "status": schedule.last_run_status,
-                        "execution_time": br_time,
-                        "success_count": success_count,
-                        "fail_count": fail_count
-                    }
-                
-                    for url in urls:
-                        logger.info(f"Sending webhook to: {url}")
-                        
-                        try:
-                            final_payload = payload
-                            headers = {'Content-Type': 'application/json'}
-
-                            # --- SLACK FORMATTING ---
-                            if 'hooks.slack.com' in url:
-                                color = "#36a64f" if payload['status'] == 'success' else "#d72b3f"
-                                final_payload = {
-                                    "text": f"Execution Report: {payload['schedule_name']}",
-                                    "attachments": [
-                                        {
-                                            "color": color,
-                                            "fields": [
-                                                {"title": "Status", "value": payload['status'].upper(), "short": True},
-                                                {"title": "Success", "value": str(payload['success_count']), "short": True},
-                                                {"title": "Failed", "value": str(payload['fail_count']), "short": True},
-                                                {"title": "Target", "value": f"{payload['type'].title()} #{payload['target_id']}", "short": True}
-                                            ],
-                                            "footer": "API Flow Scheduler",
-                                            "ts": int(time.time())
-                                        }
-                                    ]
-                                }
-                            
-                            # --- TEAMS FORMATTING (Adaptive Card or MessageCard) ---
-                            elif 'webhook.office.com' in url or 'outlook.office.com' in url:
-                                theme_color = "00FF00" if payload['status'] == 'success' else "FF0000"
-                                final_payload = {
-                                    "@type": "MessageCard",
-                                    "@context": "http://schema.org/extensions",
-                                    "themeColor": theme_color,
-                                    "summary": f"Execution: {payload['schedule_name']}",
-                                    "sections": [{
-                                        "activityTitle": f"📢 Execution Completed: {payload['schedule_name']}",
-                                        "activitySubtitle": f"Status: {payload['status'].upper()}",
-                                        "facts": [
-                                        {"name": "Success", "value": str(payload['success_count'])},
-                                        {"name": "Failed", "value": str(payload['fail_count'])},
-                                        {"name": "Time", "value": payload['execution_time']}
-                                    ],
-                                    "markdown": True
-                                }]
-                            }
-
-                            wh_resp = requests.post(url, json=final_payload, headers=headers, timeout=5)
-                            logger.info(f"Webhook response: {wh_resp.status_code}")
-                        except Exception as wh_err:
-                            logger.error(f"Failed to send webhook to {url}: {wh_err}")
-
-                except Exception as notify_err:
-                    logger.error(f"Error processing webhooks: {notify_err}")
-
-    except Exception as outer_e:
-        logger.error(f"Critical error in execute_job {schedule_id}: {outer_e}")
-        # Try to set status to failure if DB session is still viable
-        try:
-             schedule.last_run_status = 'failure'
-             # Essential: Mark one-time schedule as failed so frontend stops polling
-             if not getattr(schedule, 'cron_expression', None):
-                 schedule.status = 'failure'
-             db.commit()
-        except: pass
     finally:
         # Close the session to free resources
         if 'session' in locals():
-            session.close()
-        db.close()
+            try:
+                session.close()
+            except:
+                pass
+
+    # --- 4. Send Webhook Notification ---
+    # Logic: Use Schedule URL > Fallback to Product URL
+    if schedule:
+        try:
+            target_urls = schedule.notification_urls
+            
+            if not target_urls:
+                # Fallback logic based on type
+                try:
+                    from app.models.product_models import ProductModel
+                    from app.models.feature_models import FeatureModel
+                    
+                    product_id_for_url = None
+                    
+                    if schedule.type == 'suite':
+                        product_id_for_url = schedule.target_id
+                    elif schedule.type == 'feature':
+                        # Need to get product_id from feature
+                        feat = db.query(FeatureModel).filter(FeatureModel.id == schedule.target_id).first()
+                        if feat:
+                            product_id_for_url = feat.product_id
+                    elif schedule.type == 'flow':
+                        # Need to get product_id from flow -> feature -> product
+                        from app.models.flow_models import FlowDB
+                        flow_obj = db.query(FlowDB).filter(FlowDB.id == schedule.target_id).first()
+                        if flow_obj:
+                             feat = db.query(FeatureModel).filter(FeatureModel.id == flow_obj.project_id).first()
+                             if feat:
+                                product_id_for_url = feat.product_id
+                    
+                    if product_id_for_url:
+                        prod = db.query(ProductModel).filter(ProductModel.id == product_id_for_url).first()
+                        if prod and prod.notification_urls:
+                            target_urls = prod.notification_urls
+                            logger.info(f"Using Product-level webhook for Schedule {schedule.id}")
+
+                except Exception as e:
+                    logger.error(f"Error fetching product webhook: {e}")
+
+            if target_urls:
+                # CHECK NOTIFICATION TOGGLE
+                if hasattr(schedule, 'notifications_enabled') and schedule.notifications_enabled is False:
+                     logger.info(f"Skipping webhook notification for Schedule {schedule.id} (notifications disabled)")
+                else:
+                    logger.info(f"Target URLs for webhook: {target_urls}")
+                    try:
+                        # Helper function defined inline or use a service method if reusable
+                        # Using simple requests here for immediate execution
+                        urls = [u.strip() for u in target_urls.split(',') if u.strip()]
+                        logger.info(f"Parsed URLs: {urls}")
+                        
+                        # Use UTC-3 for execution time in notifications
+                        from datetime import timedelta
+                        tz_adjust = timedelta(hours=3)
+                        exec_time_dt = schedule.last_run if schedule.last_run else datetime.now(timezone.utc)
+                        br_time = (exec_time_dt - tz_adjust).strftime("%d/%m/%Y, %H:%M:%S")
+
+                        payload = {
+                            "schedule_id": schedule.id,
+                            "schedule_name": schedule.name,
+                            "type": schedule.type,
+                            "target_id": schedule.target_id,
+                            "status": schedule.last_run_status,
+                            "execution_time": br_time,
+                            "success_count": success_count,
+                            "fail_count": fail_count
+                        }
+                    
+                        for url in urls:
+                            logger.info(f"Sending webhook to: {url}")
+                            
+                            try:
+                                final_payload = payload
+                                headers = {'Content-Type': 'application/json'}
+
+                                # --- SLACK FORMATTING ---
+                                if 'hooks.slack.com' in url:
+                                    color = "#36a64f" if payload['status'] == 'success' else "#d72b3f"
+                                    final_payload = {
+                                        "text": f"Execution Report: {payload['schedule_name']}",
+                                        "attachments": [
+                                            {
+                                                "color": color,
+                                                "fields": [
+                                                    {"title": "Status", "value": payload['status'].upper(), "short": True},
+                                                    {"title": "Success", "value": str(payload['success_count']), "short": True},
+                                                    {"title": "Failed", "value": str(payload['fail_count']), "short": True},
+                                                    {"title": "Target", "value": f"{payload['type'].title()} #{payload['target_id']}", "short": True}
+                                                ],
+                                                "footer": "API Flow Scheduler",
+                                                "ts": int(time.time())
+                                            }
+                                        ]
+                                    }
+                                
+                                # --- TEAMS FORMATTING (Adaptive Card or MessageCard) ---
+                                elif 'webhook.office.com' in url or 'outlook.office.com' in url:
+                                    theme_color = "00FF00" if payload['status'] == 'success' else "FF0000"
+                                    final_payload = {
+                                        "@type": "MessageCard",
+                                        "@context": "http://schema.org/extensions",
+                                        "themeColor": theme_color,
+                                        "summary": f"Execution: {payload['schedule_name']}",
+                                        "sections": [{
+                                            "activityTitle": f"📢 Execution Completed: {payload['schedule_name']}",
+                                            "activitySubtitle": f"Status: {payload['status'].upper()}",
+                                            "facts": [
+                                            {"name": "Success", "value": str(payload['success_count'])},
+                                            {"name": "Failed", "value": str(payload['fail_count'])},
+                                            {"name": "Time", "value": payload['execution_time']}
+                                        ],
+                                        "markdown": True
+                                    }]
+                                }
+
+                                import requests
+                                wh_resp = requests.post(url, json=final_payload, headers=headers, timeout=5)
+                                logger.info(f"Webhook response: {wh_resp.status_code}")
+                            except Exception as wh_err:
+                                logger.error(f"Failed to send webhook to {url}: {wh_err}")
+
+                    except Exception as notify_err:
+                        logger.error(f"Error processing webhooks: {notify_err}")
+        except Exception as notify_outer_err:
+            logger.error(f"Outer error in notifications dispatch: {notify_outer_err}")
+        finally:
+            db.close()
 
 def execute_job(schedule_id: int):
     """

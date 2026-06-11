@@ -81,8 +81,8 @@ def process_extractions(rules: list, resp_headers: dict, resp_json: Any,
                 extracted[var_name] = var_value
                 logger.info(f"      ✅ Extracted [{var_name}] = '{var_value}'")
 
-                # Persist to DB if context is available
-                if db and product_id and env_id:
+                # Persist to DB if context is available (env_id can be None for global variables)
+                if db is not None and product_id is not None:
                     try:
                         from app.services.variable_service import VariableService
                         from app.schemas.variable_schemas import VariableCreate
