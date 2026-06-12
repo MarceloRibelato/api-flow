@@ -37,6 +37,19 @@ class IntegrationService:
         return integration.config
 
     @staticmethod
+    def delete_project_integration(db: Session, product_id: int, provider: str):
+        integration = db.query(ProjectIntegrationDB).filter(
+            ProjectIntegrationDB.product_id == product_id,
+            ProjectIntegrationDB.provider == provider
+        ).first()
+        
+        if integration:
+            db.delete(integration)
+            db.commit()
+            return True
+        return False
+
+    @staticmethod
     async def create_issue(db: Session, product_id: int, provider: str, payload: Dict[str, Any]):
         config = IntegrationService.get_project_integration(db, product_id, provider)
         if not config:

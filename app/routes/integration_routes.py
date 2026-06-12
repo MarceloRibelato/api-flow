@@ -32,6 +32,11 @@ def save_project_integration_config(product_id: int, provider: str, config: Dict
     saved_config = IntegrationService.save_project_integration(db, product_id, provider, config)
     return {"message": "Configuração salva com sucesso", "provider": provider}
 
+@router.delete("/project/{product_id}/{provider}/config")
+def delete_project_integration_config(product_id: int, provider: str, db: Session = Depends(get_db)):
+    IntegrationService.delete_project_integration(db, product_id, provider)
+    return {"message": "Configuração removida com sucesso"}
+
 @router.post("/project/{product_id}/{provider}/issue")
 async def create_issue(product_id: int, provider: str, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db)):
     try:

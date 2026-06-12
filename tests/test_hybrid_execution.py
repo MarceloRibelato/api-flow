@@ -115,17 +115,27 @@ def test_hybrid_parallel_execution_grouping(db_session: Session):
             res4.text = '{"ok": true}'
             res4.headers = {}
 
-            mock_session.request.side_effect = [res1, res2, res3, res4]
+            def mock_request(method, url, **kwargs):
+                if url == 'http://mock.com/1': return res1
+                if 'http://mock.com/2' in url: return res2
+                if url == 'http://mock.com/3': return res3
+                if 'http://mock.com/4' in url: return res4
+                return MagicMock(status_code=404)
+
+            mock_session.request.side_effect = mock_request
             
             variables = {}
             
-            # Execute
-            success, fail = FlowExecutorService.execute_flow_logic(
-                db_session, flow_meta, proj.product_id, None, 1, variables
-            )
-            
-            assert success == 4
-            assert fail == 0
+            # Mock VariableService.create to avoid DB thread issues
+            with patch('app.services.variable_service.VariableService.create') as mock_var_save:
+                
+                # Execute
+                success, fail = FlowExecutorService.execute_flow_logic(
+                    db_session, flow_meta, proj.product_id, None, 1, variables
+                )
+                
+                assert success == 4
+                assert fail == 0
             
             # Verify variable propagation
             assert variables.get('VAR1') == 'v1'
@@ -135,18 +145,16 @@ def test_hybrid_parallel_execution_grouping(db_session: Session):
             calls = mock_session.request.call_args_list
             assert len(calls) == 4
             
-            # API 1: /1
-            assert calls[0].args[1] == 'http://mock.com/1'
+            urls_called = [call.args[1] for call in calls]
             
-            # API 2: /2/v1 (Uses VAR1 from API 1)
-            # Parallel block starts here
-            assert calls[1].args[1] == 'http://mock.com/2/v1'
+            # API 1 should be first
+            assert urls_called[0] == 'http://mock.com/1'
             
-            # API 3: /3
-            assert calls[2].args[1] == 'http://mock.com/3'
+            # API 2 and 3 can be in any order, but must exist
+            assert 'http://mock.com/2/v1' in urls_called[1:3]
+            assert 'http://mock.com/3' in urls_called[1:3]
             
-            # API 4: /4/v2/v3 (Uses VAR2 and VAR3 from parallel block)
-            # Sequential resumes here
-            assert calls[3].args[1] == 'http://mock.com/4/v2/v3'
+            # API 4 should be last
+            assert urls_called[3] == 'http://mock.com/4/v2/v3'
             
             print("\n✅ Hybrid Parallel Execution Test Passed!")
