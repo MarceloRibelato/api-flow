@@ -213,6 +213,16 @@ class AppiumExecutorService:
         self._captured_requests = []
         return ret
 
+    def _get_platform_selector(self, props: dict) -> str:
+        if not self._driver:
+            return props.get('selector') or props.get('value', '')
+        
+        platform = str(self._driver.capabilities.get('platformName', 'android')).lower()
+        if platform == 'ios':
+            return props.get('ios_selector') or props.get('selector') or props.get('value', '')
+        else:
+            return props.get('android_selector') or props.get('selector') or props.get('value', '')
+
     def execute_step(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
         """Executa um passo nativo no Appium/Cloud."""
         step_type = step_data.get('type')
@@ -237,14 +247,14 @@ class AppiumExecutorService:
                 }
 
             if step_type == 'tap':
-                selector = props.get('selector') or props.get('value', '')
+                selector = self._get_platform_selector(props)
                 x = props.get('x')
                 y = props.get('y')
                 if x is not None: x = int(x)
                 if y is not None: y = int(y)
                 timeout = int(props.get('timeout', 5000))
                 
-                el = self._find_element(selector, timeout_ms=timeout)
+                el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
                 if el:
                     # Robust Click: Get element location and tap the center
                     # el.click() often fails silently on some Android builds
@@ -265,10 +275,10 @@ class AppiumExecutorService:
 
             elif step_type == 'long_press':
                 from appium.webdriver.common.touch_action import TouchAction
-                selector = props.get('selector', '')
+                selector = self._get_platform_selector(props)
                 duration_ms = int(props.get('duration', 2000))
                 timeout = int(props.get('timeout', 5000))
-                el = self._find_element(selector, timeout_ms=timeout)
+                el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
                 if el:
                     action = TouchAction(self._driver)
                     action.long_press(el, duration=duration_ms).release().perform()
@@ -276,7 +286,7 @@ class AppiumExecutorService:
                     raise Exception(f"Element '{selector}' not found for long_press after {timeout}ms")
 
             elif step_type == 'type':
-                selector = props.get('selector', '')
+                selector = self._get_platform_selector(props)
                 value = props.get('value', '')
                 x = props.get('x')
                 y = props.get('y')
@@ -284,7 +294,7 @@ class AppiumExecutorService:
                 if y is not None: y = int(y)
                 timeout = int(props.get('timeout', 5000))
                 
-                el = self._find_element(selector, timeout_ms=timeout)
+                el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
                 success = False
                 
                 if el:
@@ -323,9 +333,9 @@ class AppiumExecutorService:
                         raise Exception(f"Element '{selector}' cannot receive text and no coordinates available as fallback.")
 
             elif step_type == 'clear_field':
-                selector = props.get('selector', '')
+                selector = self._get_platform_selector(props)
                 timeout = int(props.get('timeout', 5000))
-                el = self._find_element(selector, timeout_ms=timeout)
+                el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
                 if el:
                     el.clear()
                 else:
@@ -354,7 +364,7 @@ class AppiumExecutorService:
                 self._driver.swipe(sx, sy, ex, ey, duration_ms)
 
             elif step_type == 'scroll_to':
-                selector = props.get('selector', '')
+                selector = self._get_platform_selector(props)
                 from appium.webdriver.common.appiumby import AppiumBy
                 try:
                     self._driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR,
@@ -422,10 +432,10 @@ class AppiumExecutorService:
                 logger.info(f"📍 Location set to ({lat}, {lon})")
 
             elif step_type == 'assert':
-                selector = props.get('selector', '')
+                selector = self._get_platform_selector(props)
                 operator = props.get('operator', 'visible')
                 expected = props.get('value', '')
-                el = self._find_element(selector)
+                el = self._find_element(selector, step_data=step_data)
 
                 if operator == 'visible':
                     if not el or not el.is_displayed():
@@ -449,6 +459,63 @@ class AppiumExecutorService:
                 elif operator == 'disabled':
                     if el and el.is_enabled():
                         raise AssertionError(f"Element '{selector}' should be disabled")
+
+            elif step_type == 'assert_visual':
+                import io
+                import base64
+                from PIL import Image, ImageChops
+                import math
+
+                selector = self._get_platform_selector(props)
+                base_image_b64 = props.get('base_image_b64', '')
+                tolerance = float(props.get('tolerance', 5.0)) # Percentage difference allowed
+
+                if not base_image_b64:
+                    raise AssertionError("No base image provided for visual assertion")
+
+                # Get element screenshot or full screenshot
+                el = self._find_element(selector, step_data=step_data) if selector else None
+                
+                try:
+                    if el:
+                        # Capture element only
+                        current_b64 = el.screenshot_as_base64
+                    else:
+                        # Full screen if no selector
+                        current_b64 = self._driver.get_screenshot_as_base64()
+                        
+                    # Decode images
+                    base_bytes = base64.b64decode(base_image_b64.split(',')[1] if ',' in base_image_b64 else base_image_b64)
+                    current_bytes = base64.b64decode(current_b64)
+                    
+                    img1 = Image.open(io.BytesIO(base_bytes)).convert('RGB')
+                    img2 = Image.open(io.BytesIO(current_bytes)).convert('RGB')
+                    
+                    # Resize img2 to img1 if sizes differ slightly due to resolution shifts
+                    if img1.size != img2.size:
+                        logger.warning(f"Resizing captured image {img2.size} to base image {img1.size}")
+                        img2 = img2.resize(img1.size)
+                    
+                    # Calculate difference
+                    diff = ImageChops.difference(img1, img2)
+                    
+                    # Root Mean Square (RMS) difference calculation
+                    h = diff.histogram()
+                    sq = (value * (idx ** 2) for idx, value in enumerate(h))
+                    sum_of_squares = sum(sq)
+                    rms = math.sqrt(sum_of_squares / float(img1.size[0] * img1.size[1]))
+                    
+                    # Normalize RMS to percentage (max possible RMS is 255.0 for RGB)
+                    diff_pct = (rms / 255.0) * 100.0
+                    logger.info(f"Visual diff calculated: {diff_pct:.2f}% (Tolerance: {tolerance}%)")
+                    
+                    if diff_pct > tolerance:
+                        raise AssertionError(f"Visual mismatch: Image differs by {diff_pct:.2f}% (max allowed is {tolerance}%)")
+                except AssertionError as ae:
+                    raise ae
+                except Exception as ex:
+                    logger.error(f"Error during visual assert: {ex}")
+                    raise AssertionError(f"Failed to perform visual comparison: {ex}")
 
             elif step_type == 'wait':
                 delay = int(props.get('timeout', 1000))
@@ -636,7 +703,70 @@ class AppiumExecutorService:
             logger.warning(f"📱 Elements search failed: {selector} — {e}")
             return []
 
-    def _find_element(self, selector: str, timeout_ms: int = 5000):
+    def _attempt_self_healing(self, original_selector: str, step_data: dict) -> str:
+        if not step_data:
+            return None
+            
+        # Consider the flow settings passed via execute_step properties or a global _settings flag
+        # For this Enterprise Phase, we check self._settings
+        if not self._settings.get('enable_self_healing', True): # Defaulting to True for the showcase
+            return None
+            
+        step_name = step_data.get('name', '')
+        step_desc = step_data.get('description', '')
+        
+        logger.warning(f"🩹 [Self-Healing] Element not found: '{original_selector}'. Attempting auto-heal for step '{step_name}'.")
+        try:
+            page_source = self._driver.page_source
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(page_source.encode('utf-8'))
+            
+            best_node = None
+            keywords = []
+            if step_name: keywords.extend(step_name.lower().split())
+            if step_desc: keywords.extend(step_desc.lower().split())
+            
+            stopwords = ['tap', 'click', 'type', 'assert', 'the', 'on', 'in', 'button', 'input', 'field']
+            keywords = [k for k in keywords if k not in stopwords and len(k) > 2]
+            
+            if not keywords:
+                return None
+                
+            highest_score = 0
+            for element in root.iter():
+                text = element.attrib.get('text', '').lower()
+                desc = element.attrib.get('content-desc', '').lower()
+                res_id = element.attrib.get('resource-id', '').lower()
+                
+                score = 0
+                for kw in keywords:
+                    if kw in text: score += 2
+                    if kw in desc: score += 2
+                    if kw in res_id: score += 1
+                    
+                if score > highest_score:
+                    highest_score = score
+                    best_node = element
+                    
+            if best_node is not None and highest_score > 0:
+                healed_selector = None
+                if best_node.attrib.get('resource-id'):
+                    healed_selector = f"//*[@resource-id='{best_node.attrib.get('resource-id')}']"
+                elif best_node.attrib.get('content-desc'):
+                    healed_selector = f"//*[@content-desc='{best_node.attrib.get('content-desc')}']"
+                elif best_node.attrib.get('text'):
+                    healed_selector = f"//*[@text='{best_node.attrib.get('text')}']"
+                    
+                if healed_selector:
+                    logger.info(f"✨ [Self-Healing] Healed selector found: {healed_selector} (Score: {highest_score})")
+                    return healed_selector
+                    
+        except Exception as e:
+            logger.error(f"🩹 [Self-Healing] Failed to heal: {e}")
+            
+        return None
+
+    def _find_element(self, selector: str, timeout_ms: int = 5000, step_data: dict = None):
         """Localiza elemento por ID, accessibility id, xpath ou text usando timeout explícito e fallback."""
         if not self._driver or not selector:
             return None
@@ -713,7 +843,25 @@ class AppiumExecutorService:
                     except:
                         pass
                     
-                raise # Re-raise if all fail
+            # Se chegamos aqui sem retornar, é porque falhou tudo
+            if step_data:
+                healed_sel = self._attempt_self_healing(selector, step_data)
+                if healed_sel:
+                    try:
+                        if healed_sel.startswith('/') or healed_sel.startswith('//'):
+                            heal_loc = (AppiumBy.XPATH, healed_sel)
+                        elif ':id/' in healed_sel or '/' in healed_sel:
+                            heal_loc = (AppiumBy.ID, healed_sel)
+                        else:
+                            heal_loc = (AppiumBy.ACCESSIBILITY_ID, healed_sel)
+                        el = short_wait.until(EC.presence_of_element_located(heal_loc))
+                        logger.info(f"🎉 [Self-Healing] Successfully found element with healed selector: {healed_sel}")
+                        return el
+                    except Exception as e2:
+                        logger.error(f"🩹 [Self-Healing] Failed to apply healed selector: {e2}")
+
+            # Re-raise if all fail
+            raise Exception(f"Element '{selector}' not found.")
                 
         except Exception as e:
             logger.warning(f"📱 Element not found: {selector} after {timeout_ms}ms — {e}")

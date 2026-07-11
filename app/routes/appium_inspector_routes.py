@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import uuid
 import logging
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
 
 from app.database import get_db
 from app.services.appium_inspector_service import AppiumInspectorService
@@ -10,15 +12,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+class SessionStartPayload(BaseModel):
+    steps: Optional[List[Dict[str, Any]]] = None
+
 @router.post("/session/start")
-def start_inspector_session(product_id: int, db: Session = Depends(get_db)):
+def start_inspector_session(product_id: int, payload: SessionStartPayload = None, db: Session = Depends(get_db)):
     """
     Start an interactive Appium Inspector session.
     Returns: { "session_id": "...", "image_b64": "...", "tree": [...] }
     """
     session_id = str(uuid.uuid4())
     try:
-        snapshot = AppiumInspectorService.start_session(session_id, db, product_id)
+        steps = payload.steps if payload else None
+        snapshot = AppiumInspectorService.start_session(session_id, db, product_id, steps=steps)
         return {"session_id": session_id, **snapshot}
     except Exception as e:
         logger.error(f"Failed to start inspector session: {e}", exc_info=True)
@@ -71,3 +77,21 @@ def refresh_snapshot(session_id: str):
     except Exception as e:
         logger.error(f"Refresh failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/session/{session_id}/generate-selectors")
+def generate_selectors(session_id: str, payload: dict):
+    """
+    Finds an element by text or lwsId and generates selectors for it (AutoCorrection).
+    """
+    try:
+        text = payload.get("text")
+        lws_id = payload.get("lwsId")
+        
+        if not text and not lws_id:
+            raise HTTPException(status_code=400, detail="Forneça o text ou lwsId do elemento.")
+            
+        result = AppiumInspectorService.generate_selectors_for_element(session_id, lws_id=lws_id, text=text)
+        return result
+    except Exception as e:
+        logger.error(f"Generate selectors failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}

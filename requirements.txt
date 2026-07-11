@@ -27,3 +27,4 @@ mcp[sse]
 sse-starlette
 celery
 redis
+faker

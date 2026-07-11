@@ -210,7 +210,8 @@ class FlowExecutorService:
                                     'body': props.get('body', ''),
                                     'assertions': assertions_val,
                                     'parallel': False,
-                                    'extracts': extracts_val
+                                    'extracts': extracts_val,
+                                    'delay': props.get('delay', 0)
                                 }
                                 all_steps.append({'data': api_data, 'type': 'api'})
                             else:

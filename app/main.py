@@ -135,6 +135,7 @@ app = FastAPI(
 
 # Configuração Middlewares
 allowed_origins = settings.ALLOWED_ORIGINS.split(",") if settings.ALLOWED_ORIGINS else ["*"]
+allowed_origins.append("http://localhost:8080")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -201,6 +202,10 @@ app.include_router(performance_router)
 # Integration Router
 from app.routes.integration_routes import router as integration_router
 app.include_router(integration_router)
+
+# Landing Routes
+from app.routes.landing_routes import router as landing_router
+app.include_router(landing_router, tags=["Landing Page"])
 
 # Mount Videos Static Directory
 from fastapi.staticfiles import StaticFiles

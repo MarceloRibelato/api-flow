@@ -25,7 +25,7 @@ class AppiumInspectorService:
         pass
 
     @classmethod
-    def start_session(cls, session_id: str, db, product_id: int) -> dict:
+    def start_session(cls, session_id: str, db, product_id: int, steps: List[Dict[str, Any]] = None) -> dict:
         """Starts a persistent driver session if one does not exist."""
         with _session_lock:
             if session_id in _active_sessions:
@@ -37,9 +37,30 @@ class AppiumInspectorService:
             try:
                 executor.start(db=db, product_id=product_id)
                 _active_sessions[session_id] = executor
+                # If we have steps, try to replay them
+                failed_step_index = None
+                failed_step_error = None
                 
-                # Fetch first snapshot
-                return cls.get_snapshot(session_id)
+                if steps:
+                    for idx, step in enumerate(steps):
+                        try:
+                            logger.info(f"🔍 [Inspector] Replaying step {idx}: {step}")
+                            result = executor.execute_step(step, db=db)
+                            if result.get("status", 500) >= 400:
+                                raise Exception(result.get("text", "Unknown Appium Execution Error"))
+                            time.sleep(1.0)
+                        except Exception as e:
+                            logger.error(f"🔍 [Inspector] Replay failed at step {idx}: {e}")
+                            failed_step_index = idx
+                            failed_step_error = str(e)
+                            break
+                            
+                snapshot = cls.get_snapshot(session_id)
+                if failed_step_index is not None:
+                    snapshot["failed_step_index"] = failed_step_index
+                    snapshot["failed_step_error"] = failed_step_error
+                
+                return snapshot
             except Exception as e:
                 logger.error(f"🔍 [Inspector] Failed to start session: {e}")
                 # Ensure we clean up if start fails
@@ -219,3 +240,39 @@ class AppiumInspectorService:
         except Exception as e:
             logger.error(f"🔍 [Inspector] XML Parse failed: {e}")
             return []
+
+    @classmethod
+    def generate_selectors_for_element(cls, session_id: str, lws_id: str = None, text: str = None) -> dict:
+        """
+        Mock AI logic for mobile selector generation using basic attributes.
+        In a real scenario, this would use LLM like WebInspectorService does.
+        """
+        snapshot = cls.get_snapshot(session_id)
+        tree = snapshot.get("tree", [])
+        
+        target_node = None
+        
+        # Approximate matching to find the node
+        if lws_id:
+            target_node = next((n for n in tree if str(id(n)) == str(lws_id) or (n.get("bounds") and f"{n['bounds']['x']}_{n['bounds']['y']}" == lws_id)), None)
+            
+        if not target_node and text:
+            candidates = [n for n in tree if text.lower() in (n.get("text") or "").lower() or text.lower() in (n.get("content_desc") or "").lower()]
+            if candidates:
+                target_node = candidates[0]
+                
+        if not target_node:
+            return {"success": False, "error": "Element not found on current screen."}
+            
+        selectors = []
+        if target_node.get("resource_id"):
+            selectors.append({"value": f"//*[@resource-id='{target_node['resource_id']}']", "count": 1})
+        if target_node.get("content_desc"):
+            selectors.append({"value": f"//*[@content-desc='{target_node['content_desc']}']", "count": 1})
+        if target_node.get("text"):
+            selectors.append({"value": f"//*[@text='{target_node['text']}']", "count": 1})
+            
+        if not selectors:
+            selectors.append({"value": f"//{target_node.get('class', '*')}", "count": 1})
+            
+        return {"success": True, "selectors": selectors}

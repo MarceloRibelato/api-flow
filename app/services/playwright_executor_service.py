@@ -308,11 +308,20 @@ class PlaywrightExecutorService:
                         try:
                             import time
                             t1 = time.time()
-                            el.fill(value, timeout=timeout, force=True, no_wait_after=True)
+                            try:
+                                el.wait_for(state="attached", timeout=timeout)
+                                tag = el.evaluate("e => e.tagName.toLowerCase()")
+                            except:
+                                tag = ""
+                                
+                            if tag == 'select':
+                                el.select_option(value=value, timeout=timeout)
+                            else:
+                                el.fill(value, timeout=timeout, force=True, no_wait_after=True)
                             t2 = time.time()
-                            logger.info(f"⏱️ Type timing: fill_exec={round((t2-t1)*1000)}ms")
+                            logger.info(f"⏱️ Type/Select timing: exec={round((t2-t1)*1000)}ms")
                         except Exception as type_err:
-                            logger.warning(f"Forced fill failed, error: {type_err}")
+                            logger.warning(f"Forced fill/select failed, error: {type_err}")
                             raise type_err
                         # Minimal wait for state
                         self._page.wait_for_timeout(50)

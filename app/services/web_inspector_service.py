@@ -90,9 +90,14 @@ class WebInspectorService:
                 except Exception as stealth_e:
                     logger.warning(f"🌐 [WebInspector] Stealth application warning (non-fatal): {stealth_e}")
 
-                # If we have pre-existing steps to replay, skip the bare initial_url navigation
+                # If we have pre-existing steps to replay, we normally skip the bare initial_url navigation
                 # because the steps list itself will contain a 'browser' step to do it.
-                if initial_url and not steps:
+                # HOWEVER, if steps are provided but NONE of them is a navigate step, we MUST navigate first.
+                has_nav_step = False
+                if steps:
+                    has_nav_step = any(s.get("type") in ("navigate", "browser") for s in steps)
+                
+                if initial_url and (not steps or not has_nav_step):
                     if not initial_url.startswith('http'):
                         initial_url = f"https://{initial_url}"
                     logger.info(f"🌐 [WebInspector] Navigating to {initial_url}...")
