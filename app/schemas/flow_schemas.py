@@ -89,6 +89,7 @@ class CardDataSchema(BaseModel):
 class FlowSaveSchema(BaseModel):
     projectId: int = Field(..., description="ID do projeto (Feature)")
     flowId: Optional[int] = Field(None, description="ID do fluxo no banco de dados")
+    name: Optional[str] = Field(None, description="Nome do fluxo")
     flow_type: str = Field("api", description="Tipo de fluxo: api ou e2e")
     nodes: List[NodeSchema]
     edges: List[EdgeSchema]

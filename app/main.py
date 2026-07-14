@@ -113,6 +113,27 @@ async def lifespan(app: FastAPI):
     app.state.http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True, verify=settings.VERIFY_SSL)
     logger.info("Global HTTP Client initialized")
 
+    # License check
+    if settings.LICENSE_MANAGER_URL and settings.QA_FLOW_LICENSE_KEY:
+        logger.info("=== VERIFICANDO LICENÇA DO QA-FLOW ===")
+        try:
+            import httpx as sync_httpx
+            with sync_httpx.Client(timeout=10.0) as client:
+                resp = client.post(
+                    f"{settings.LICENSE_MANAGER_URL.rstrip('/')}/api/licenses/validate",
+                    json={"license_key": settings.QA_FLOW_LICENSE_KEY}
+                )
+                if resp.status_code == 200:
+                    lic_info = resp.json()
+                    if lic_info.get("valid"):
+                        logger.info(f"✅ Licença Válida! Registrada para: {lic_info.get('client_name')}. Expira em: {lic_info.get('expires_at')}")
+                    else:
+                        logger.warning(f"❌ Licença Inválida ou Expirada! Mensagem: {lic_info.get('message')}")
+                else:
+                    logger.warning(f"⚠️ Falha ao validar licença no servidor: HTTP {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ Não foi possível conectar ao Gerenciador de Licenças: {e}")
+
     yield
     
     # Shutdown
@@ -130,6 +151,7 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    root_path="/api" if "db" in settings.DATABASE_URL or os.path.exists("/.dockerenv") else "",
     lifespan=lifespan
 )
 
@@ -156,6 +178,12 @@ async def log_exceptions_middleware(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+    if isinstance(exc, StarletteHTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
     # This catches any unhandled exceptions and returns a clean 500 JSON response
     # instead of crashing the server or returning raw HTML errors.
     return JSONResponse(

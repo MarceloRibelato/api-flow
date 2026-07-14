@@ -19,6 +19,7 @@ class AnalysisService:
         if not settings or (not settings.ai_api_key and settings.ai_provider != "ollama"):
             return None
 
+        resp = None
         try:
             if settings.ai_provider == "openai":
                 headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
@@ -52,16 +53,48 @@ class AnalysisService:
                     return resp.json()["choices"][0]["message"]["content"]
 
             elif settings.ai_provider == "ollama":
-                default_url = "http://host.docker.internal:11434/v1"
-                base_url = settings.ai_base_url if settings.ai_base_url else default_url
-                if not base_url.endswith("/"): base_url += "/"
-                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-                headers = {"Content-Type": "application/json"}
-                if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
-                resp = requests.post(url, headers=headers, json=data, timeout=60)
-                if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
+                from app.config import settings as app_settings
+                
+                # Check if UI configured fields are a QA-Flow license
+                license_url = settings.ai_base_url or app_settings.LICENSE_MANAGER_URL
+                license_key = settings.ai_api_key
+                
+                if not (license_key and license_key.startswith("QAFLOW-")):
+                    license_url = app_settings.LICENSE_MANAGER_URL
+                    license_key = app_settings.QA_FLOW_LICENSE_KEY
+                    
+                if license_url and license_key:
+                    url = f"{license_url.rstrip('/')}/api/ai/chat"
+                    user_ident = "unknown"
+                    try:
+                        if settings.user:
+                            user_ident = settings.user.email or settings.user.username or f"user_{settings.user_id}"
+                        else:
+                            user_ident = f"user_{settings.user_id}"
+                    except Exception as ue:
+                        logger.warning(f"Could not retrieve user info: {ue}")
+                    headers = {
+                        "Content-Type": "application/json",
+                        "X-License-Key": license_key,
+                        "X-User-Identifier": user_ident
+                    }
+                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    resp = requests.post(url, headers=headers, json=data, timeout=300)
+                    if resp.status_code == 200:
+                        return resp.json()["choices"][0]["message"]["content"]
+                    else:
+                        logger.error(f"License Manager returned error: {resp.status_code} - {resp.text}")
+                else:
+                    default_url = "http://host.docker.internal:11434/v1"
+                    base_url = settings.ai_base_url if settings.ai_base_url else default_url
+                    if not base_url.endswith("/"): base_url += "/"
+                    url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                    headers = {"Content-Type": "application/json"}
+                    if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
+                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    resp = requests.post(url, headers=headers, json=data, timeout=300)
+                    if resp.status_code == 200:
+                        return resp.json()["choices"][0]["message"]["content"]
 
         except Exception as e:
             logger.error(f"Error calling LLM {settings.ai_provider}: {e}")
@@ -84,6 +117,8 @@ class AnalysisService:
         Nodes:
         {context_str}
         
+        Important: When checking for redundant or duplicated API calls, ONLY flag them if they occur within the same logical path (sequentially). If they are in separate alternative paths (e.g., parallel branches or unhappy paths), they are NOT redundant.
+
         Return a JSON response with a list of suggestions. Format:
         [
           {{ "type": "optimization|security|logic", "severity": "low|medium|high", "message": "Short title", "details": "Detailed explanation" }}
@@ -159,6 +194,7 @@ class AnalysisService:
     @staticmethod
     def implement_test_scenario(db: Session, flow_id: int, user_id: int, scenario_title: str, company_id: int = 1):
         """Creates a NEW flow (and Feature) based on a scenario suggestion with fully populated nodes and edges."""
+        import json
         flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
         if not flow: return None
 
@@ -179,80 +215,216 @@ class AnalysisService:
             logger.error(f"Failed to load original flow for AI: {e}")
             return None
 
-        # Minimal serialization to avoid token explosion
-        min_nodes = [{"id": n.get("id"), "type": n.get("type"), "position": n.get("position")} for n in original_flow_data.get("nodes", [])]
+        # Minimal serialization to avoid token explosion, but keep required validation fields
+        min_nodes = []
+        for n in original_flow_data.get("nodes", []):
+            min_nodes.append({
+                "id": n.get("id"),
+                "type": n.get("type"),
+                "position": n.get("position"),
+                "data": n.get("data") or {"name": "Node", "color": "#10b981", "childCount": 0, "isCollapsed": False}
+            })
+
         min_edges = [{"id": e.get("id"), "source": e.get("source"), "target": e.get("target")} for e in original_flow_data.get("edges", [])]
+        
         min_card_data = {}
         for k, v in original_flow_data.get("cardData", {}).items():
             min_card_data[k] = {
                 "name": v.get("name"),
-                "apiCalls": [{"method": a.get("method"), "url": a.get("url"), "body": a.get("body")} for a in v.get("apiCalls", [])]
+                "apiCalls": [{
+                    "id": a.get("id") or f"step-{idx}",
+                    "method": a.get("method"),
+                    "url": a.get("url"),
+                    "body": a.get("body")
+                } for idx, a in enumerate(v.get("apiCalls", []))]
             }
 
         prompt = f"""
-        You are an expert QA automation engineer. Modify the following Flow to implement the test scenario: "{scenario_title}".
+        You are an expert QA automation engineer. The user has an existing API test flow.
+        You must create a NEW test scenario branch that implements: "{scenario_title}".
         
-        Original Flow Data (JSON):
+        Original Flow Data (JSON for context, DO NOT include in your response):
         nodes: {json.dumps(min_nodes)}
         edges: {json.dumps(min_edges)}
         cardData: {json.dumps(min_card_data)}
         
         Task: 
-        1. Keep the core logic but inject a fault, change parameters, or add/remove nodes to match the scenario perfectly.
-        2. Ensure node IDs and edges remain consistent where possible.
-        3. Return a complete, valid JSON containing the new flow structure.
+        1. Create a NEW set of nodes and edges that represent the alternative test scenario.
+        2. DO NOT create fake or non-existent API calls. Modify parameters, bodies, or headers of the existing API calls to inject the fault (e.g., duplicate an existing node but change its properties).
+        3. The first node of your new branch MUST connect from the 'start' node. So create an edge with source="start" and target="your_first_new_node_id".
+        4. RETURN ONLY THE NEW NODES, EDGES, AND CARD DATA. Do NOT return the original nodes.
         
         Format exactly like this JSON:
         {{
-           "name": "{orig_feat.name} - AI: {scenario_title}",
-           "flow_type": "{flow.flow_type}",
            "nodes": [ ... ],
            "edges": [ ... ],
-           "cardData": {{ "node_id": {{ ... }} }}
+           "cardData": {{ "your_node_id": {{ ... }} }}
         }}
         
         Respond ONLY with raw JSON. No markdown backticks.
         """
         
         content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.1)
-        if not content: return None
+        if not content:
+            raise ValueError("O assistente de IA retornou uma resposta vazia ou ocorreu um timeout na chamada.")
         
         content = content.replace("```json", "").replace("```", "").strip()
+        
+        # Remove any conversational text before or after the JSON block
+        if "{" in content and "}" in content:
+            content = content[content.find("{"):content.rfind("}")+1]
+
         try:
             suggested_data = json.loads(content)
             
-            # Create new Feature container
-            new_feature_schema = FeatureCreate(
-                name=f"[{scenario_title[:30]}] {orig_feat.name}",
-                description=f"AI Generated Test Case: {scenario_title}",
-                product_id=orig_feat.product_id
-            )
-            new_feat = FeatureService.create(db, new_feature_schema, company_id)
-            if not new_feat:
-                raise ValueError("Failed to create Feature container")
+            # Merge with original first, avoiding duplicate node IDs
+            merged_nodes_dict = {n.get("id"): n for n in original_flow_data.get("nodes", [])}
+            
+            for ai_node in suggested_data.get("nodes", []):
+                nid = ai_node.get("id")
+                if nid in merged_nodes_dict:
+                    # Update existing if provided
+                    merged_nodes_dict[nid].update(ai_node)
+                else:
+                    merged_nodes_dict[nid] = ai_node
+                    
+            merged_nodes = list(merged_nodes_dict.values())
+            
+            # Ensure required Pydantic fields (position, data) exist
+            for idx, n in enumerate(merged_nodes):
+                if "position" not in n:
+                    n["position"] = {"x": idx * 150, "y": 150}
+                if "data" not in n:
+                    n["data"] = {"name": n.get("id", "Node"), "color": "#10b981", "childCount": 0, "isCollapsed": False}
+                    
+            merged_edges = original_flow_data.get("edges", []) + suggested_data.get("edges", [])
+            
+            # Normalize edges for Pydantic EdgeSchema
+            import uuid
+            for e in merged_edges:
+                if "source" not in e and "from_node" in e:
+                    e["source"] = e.pop("from_node")
+                if "target" not in e and "to_node" in e:
+                    e["target"] = e.pop("to_node")
+                if "id" not in e:
+                    e["id"] = f"reactflow__edge-{e.get('source')}-{e.get('target')}-{uuid.uuid4().hex[:6]}"
+                    
+            merged_card_data = original_flow_data.get("cardData", {})
+            merged_card_data.update(suggested_data.get("cardData", {}))
+            
+            # Normalize AI generated headers/params and legacy DB data to match Pydantic ApiCallSchema (List of Dicts)
+            for card_id, card_data in merged_card_data.items():
+                
+                # Gather all apiCalls lists to normalize (top-level + envData)
+                all_api_calls_lists = []
+                
+                if "apiCalls" in card_data:
+                    # If AI returned apiCalls as a stringified JSON array, parse it first
+                    if isinstance(card_data["apiCalls"], str):
+                        try:
+                            card_data["apiCalls"] = json.loads(card_data["apiCalls"])
+                        except:
+                            card_data["apiCalls"] = []
+                    # If AI returned apiCalls as a dict, we convert its values to a list
+                    if isinstance(card_data["apiCalls"], dict):
+                        card_data["apiCalls"] = list(card_data["apiCalls"].values())
+                    
+                    all_api_calls_lists.append(card_data.get("apiCalls", []))
+                    
+                env_data = card_data.get("envData", {})
+                for env_name, env_details in env_data.items():
+                    if isinstance(env_details, dict) and "apiCalls" in env_details:
+                        if isinstance(env_details["apiCalls"], str):
+                            try:
+                                env_details["apiCalls"] = json.loads(env_details["apiCalls"])
+                            except:
+                                env_details["apiCalls"] = []
+                        if isinstance(env_details["apiCalls"], dict):
+                            env_details["apiCalls"] = list(env_details["apiCalls"].values())
+                        
+                        all_api_calls_lists.append(env_details.get("apiCalls", []))
+                
+                for api_calls_list in all_api_calls_lists:
+                    if not isinstance(api_calls_list, list):
+                        continue
+                    for idx, api_call in enumerate(api_calls_list):
+                        if not isinstance(api_call, dict):
+                            continue
+                            
+                        # Ensure required Pydantic ApiCallSchema fields are present
+                        if "id" not in api_call: api_call["id"] = f"ai-step-{idx}"
+                        if "method" not in api_call: api_call["method"] = "GET"
+                        if "url" not in api_call: api_call["url"] = "http://localhost"
+                        
+                        for field in ["headers", "params"]:
+                            if field in api_call:
+                                val = api_call[field]
+                                new_val = []
+                                if isinstance(val, dict):
+                                    new_val = [{"key": str(k), "value": str(v)} for k, v in val.items()]
+                                elif isinstance(val, list):
+                                    for item in val:
+                                        if isinstance(item, dict):
+                                            if "key" in item and "value" in item:
+                                                new_val.append({"key": str(item["key"]), "value": str(item["value"])})
+                                            else:
+                                                for k, v in item.items():
+                                                    new_val.append({"key": str(k), "value": str(v)})
+                                elif isinstance(val, str):
+                                    try:
+                                        parsed = json.loads(val)
+                                        if isinstance(parsed, dict):
+                                            new_val = [{"key": str(k), "value": str(v)} for k, v in parsed.items()]
+                                        elif isinstance(parsed, list):
+                                            for item in parsed:
+                                                if isinstance(item, dict):
+                                                    if "key" in item and "value" in item:
+                                                        new_val.append({"key": str(item["key"]), "value": str(item["value"])})
+                                                    else:
+                                                        for k, v in item.items():
+                                                            new_val.append({"key": str(k), "value": str(v)})
+                                    except:
+                                        pass
+                                api_call[field] = new_val
+            
+            # Check if start node exists, if not inject it
+            start_node_exists = any(n.get("id") == "start" for n in merged_nodes)
+            if not start_node_exists:
+                merged_nodes.append({
+                    "id": "start",
+                    "type": "startNode",
+                    "position": {"x": 0, "y": 150},
+                    "data": {"name": "Start", "color": "#10b981", "childCount": 0, "isCollapsed": False}
+                })
+            
+            # Prepare payload for saving
+            save_payload = {
+                "projectId": flow.project_id,
+                "name": flow.name,
+                "flow_type": flow.flow_type,
+                "nodes": merged_nodes,
+                "edges": merged_edges,
+                "cardData": merged_card_data
+            }
 
-            # Emulate incoming payload
-            suggested_data["projectId"] = new_feat.id
-            if "name" not in suggested_data:
-                suggested_data["name"] = new_feature_schema.name
-            if "flow_type" not in suggested_data:
-                suggested_data["flow_type"] = flow.flow_type
-
-            # Save full flow structurally
-            save_schema = FlowSaveSchema(**suggested_data)
+            # Save full flow structurally (updates the existing flow)
+            save_schema = FlowSaveSchema(**save_payload)
             result = FlowService.save(db, save_schema, company_id, user_id)
 
             return {
                 "id": result.get("id"),
-                "project_id": new_feat.id,
-                "name": new_feature_schema.name,
+                "project_id": flow.project_id,
+                "name": flow.name,
                 "status": "generated",
-                "message": "Test scenario flow generated successfully"
+                "message": "Test scenario flow updated successfully"
             }
             
+        except json.decoder.JSONDecodeError as e:
+            logger.error(f"JSON Decode Error in AI response: {e}\nContent: {content}")
+            raise ValueError("O assistente de IA gerou uma resposta em formato inválido. Por favor, tente novamente.")
         except Exception as e:
             logger.error(f"Failed to implement test scenario: {e}")
-            return None
+            raise ValueError(f"Falha ao implementar cenário de teste: {str(e)}")
 
     @staticmethod
     def heal_selector(db: Session, user_id: int, broken_selector: str, action_value: str, step_type: str, html_snippet: str) -> str:
@@ -328,23 +500,56 @@ class AnalysisService:
                      return resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
             
             elif settings.ai_provider == "ollama":
-                # Inside Docker, 'localhost' points to the container. Ollama is usually on the host.
-                default_url = "http://host.docker.internal:11434/v1"
-                base_url = settings.ai_base_url if settings.ai_base_url else default_url
-                if not base_url.endswith("/"): base_url += "/"
-                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-                headers = {"Content-Type": "application/json"}
-                if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                from app.config import settings as app_settings
                 
-                logger.info(f"📡 [Auto-Heal] Ollama Req: {url}")
-                resp = requests.post(url, headers=headers, json=data, timeout=30)
-                if resp.status_code == 200:
-                    selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
-                    logger.info(f"✨ [Auto-Heal] Ollama Returned: {selector}")
-                    return selector
+                # Check if UI configured fields are a QA-Flow license
+                license_url = settings.ai_base_url or app_settings.LICENSE_MANAGER_URL
+                license_key = settings.ai_api_key
+                
+                if not (license_key and license_key.startswith("QAFLOW-")):
+                    license_url = app_settings.LICENSE_MANAGER_URL
+                    license_key = app_settings.QA_FLOW_LICENSE_KEY
+                    
+                if license_url and license_key:
+                    url = f"{license_url.rstrip('/')}/api/ai/chat"
+                    user_ident = "unknown"
+                    try:
+                        if settings.user:
+                            user_ident = settings.user.email or settings.user.username or f"user_{settings.user_id}"
+                        else:
+                            user_ident = f"user_{settings.user_id}"
+                    except Exception as ue:
+                        logger.warning(f"Could not retrieve user info: {ue}")
+                    headers = {
+                        "Content-Type": "application/json",
+                        "X-License-Key": license_key,
+                        "X-User-Identifier": user_ident
+                    }
+                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    resp = requests.post(url, headers=headers, json=data, timeout=30)
+                    if resp.status_code == 200:
+                        selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
+                        return selector
+                    else:
+                        logger.error(f"License Manager returned error: {resp.status_code} - {resp.text}")
                 else:
-                    logger.error(f"❌ [Auto-Heal] Ollama Error: {resp.status_code} - {resp.text}")
+                    # Inside Docker, 'localhost' points to the container. Ollama is usually on the host.
+                    default_url = "http://host.docker.internal:11434/v1"
+                    base_url = settings.ai_base_url if settings.ai_base_url else default_url
+                    if not base_url.endswith("/"): base_url += "/"
+                    url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                    headers = {"Content-Type": "application/json"}
+                    if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
+                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    
+                    logger.info(f"📡 [Auto-Heal] Ollama Req: {url}")
+                    resp = requests.post(url, headers=headers, json=data, timeout=30)
+                    if resp.status_code == 200:
+                        selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
+                        logger.info(f"✨ [Auto-Heal] Ollama Returned: {selector}")
+                        return selector
+                    else:
+                        logger.error(f"❌ [Auto-Heal] Ollama Error: {resp.status_code} - {resp.text}")
             else:
                 logger.warning(f"❌ [Auto-Heal] Unrecognized Provider: {settings.ai_provider}")
 
@@ -533,7 +738,7 @@ class AnalysisService:
     @staticmethod
     def analyze_flow_redundancy(db: Session, flow_id: int, user_id: int = None):
         """
-        Identifies duplicate API calls within a specific Flow.
+        Identifies duplicate API calls within a specific Flow by tracing paths.
         Returns a list of suggestions.
         """
         ai_suggestions = []
@@ -544,72 +749,98 @@ class AnalysisService:
                 print(f"AI Analysis failed: {e}")
 
         cards = db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow_id).all()
+        from app.models.flow_models import FlowEdgeDB
+        edges = db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == flow_id).all()
         
-        call_signatures = {}
+        from collections import defaultdict
+        adj = defaultdict(list)
+        in_degree = defaultdict(int)
+        nodes = {str(card.node_id): card for card in cards}
+        
+        for e in edges:
+            src = str(e.source)
+            tgt = str(e.target)
+            adj[src].append(tgt)
+            in_degree[tgt] += 1
+            
+        roots = [nid for nid in nodes.keys() if in_degree[nid] == 0]
+        if not roots and nodes:
+            roots = list(nodes.keys()) # Fallback if cyclic or missing edges
+            
+        paths = []
+        def dfs(current_node, current_path, visited):
+            current_path.append(current_node)
+            visited.add(current_node)
+            
+            if not adj[current_node]:
+                paths.append(list(current_path))
+            else:
+                for neighbor in adj[current_node]:
+                    if neighbor not in visited:
+                        dfs(neighbor, current_path, set(visited))
+                    else:
+                        paths.append(list(current_path)) # Stop at cycle
+            current_path.pop()
+            
+        for r in roots:
+            dfs(r, [], set())
+            
         suggestions = []
+        redundant_signatures_found = set()
 
-        for card in cards:
-            if not card.api_calls:
-                continue
-            
-            # flow_card_data.api_calls is a dict or list. We need to handle both.
-            api_data_raw = card.api_calls
-            
-            # Debug Log
-            print(f"DEBUG Analysis: Card {card.name} (ID: {card.node_id}) Raw Data: {type(api_data_raw)}")
-
-            if not api_data_raw:
-                continue
-
-            # Parse if string
-            if isinstance(api_data_raw, str):
-                try:
-                    api_data_raw = json.loads(api_data_raw)
-                except:
-                    continue
-            
-            # Normalize to list of calls
-            calls = []
-            if isinstance(api_data_raw, list):
-                calls = api_data_raw
-            elif isinstance(api_data_raw, dict):
-                # Check if it's a single call structure or a dict of calls
-                if "url" in api_data_raw and "method" in api_data_raw:
-                    calls = [api_data_raw]
-                else:
-                    calls = list(api_data_raw.values())
-
-            for api_data in calls:
-                method = api_data.get("method", "").upper()
-                url = api_data.get("url", "")
+        for path in paths:
+            call_signatures = {}
+            for node_id in path:
+                if node_id not in nodes: continue
+                card = nodes[node_id]
                 
-                if not method or not url:
-                    continue
-
-                # Create a signature for deduplication
-                signature = f"{method}:{url}"
+                if not card.api_calls: continue
+                api_data_raw = card.api_calls
                 
-                if signature not in call_signatures:
-                    call_signatures[signature] = []
+                if not api_data_raw: continue
+                if isinstance(api_data_raw, str):
+                    try:
+                        api_data_raw = json.loads(api_data_raw)
+                    except:
+                        continue
                 
-                call_signatures[signature].append({
-                    "node_name": card.name,
-                    "node_id": card.node_id
-                })
+                calls = []
+                if isinstance(api_data_raw, list):
+                    calls = api_data_raw
+                elif isinstance(api_data_raw, dict):
+                    if "url" in api_data_raw and "method" in api_data_raw:
+                        calls = [api_data_raw]
+                    else:
+                        calls = list(api_data_raw.values())
 
-        # Generate Algorithmic Suggestions
-        for signature, usage in call_signatures.items():
-            if len(usage) > 1:
-                names = [u["node_name"] for u in usage]
-                suggestions.append({
-                    "type": "redundancy",
-                    "severity": "warning",
-                    "message": f"Duplicate request detected: {signature}",
-                    "details": f"This request appears in {len(usage)} nodes: {', '.join(names)}. Consider extracting to a variable or deduplicating.",
-                    "nodes": usage
-                })
+                for api_data in calls:
+                    method = api_data.get("method", "").upper()
+                    url = api_data.get("url", "")
+                    if not method or not url: continue
+
+                    signature = f"{method}:{url}"
+                    if signature not in call_signatures:
+                        call_signatures[signature] = []
+                    call_signatures[signature].append({
+                        "node_name": card.name,
+                        "node_id": card.node_id
+                    })
+
+            for signature, usage in call_signatures.items():
+                if len(usage) > 1:
+                    usage_ids = tuple(sorted([u["node_id"] for u in usage]))
+                    red_key = f"{signature}|{usage_ids}"
+                    if red_key not in redundant_signatures_found:
+                        redundant_signatures_found.add(red_key)
+                        names = [u["node_name"] for u in usage]
+                        suggestions.append({
+                            "type": "redundancy",
+                            "severity": "warning",
+                            "message": f"Duplicate request detected in same path: {signature}",
+                            "details": f"This request appears {len(usage)} times in the same execution path across nodes: {', '.join(names)}. Consider extracting to a variable.",
+                            "nodes": usage
+                        })
         
-        # Merge with AI Suggestions
         if 'ai_suggestions' in locals() and ai_suggestions:
             suggestions.extend(ai_suggestions)
 

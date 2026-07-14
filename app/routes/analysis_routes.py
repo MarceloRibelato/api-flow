@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.analysis_service import AnalysisService
@@ -67,7 +67,26 @@ def implement_test(
     """
     Generates and returns the implementation for a suggested test scenario.
     """
-    return AnalysisService.implement_test_scenario(db, flow_id, current_user.id, scenario_title, current_user.company_id)
+    try:
+        result = AnalysisService.implement_test_scenario(db, flow_id, current_user.id, scenario_title, current_user.company_id)
+        if not result:
+            raise HTTPException(status_code=400, detail="Failed to implement test scenario: LLM returned empty response or invalid format.")
+        return result
+    except ValueError as e:
+        import traceback
+        try:
+            with open("/app/error_new.log", "a") as f:
+                f.write(f"ValueError in implement_test: {e}\n{traceback.format_exc()}\n")
+        except: pass
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            with open("/app/error_new.log", "a") as f:
+                f.write(f"Error in implement_test: {e}\n{tb}\n")
+        except: pass
+        raise HTTPException(status_code=500, detail=f"Erro interno: {e}\nTraceback: {tb}")
 
 @router.post("/assertions")
 def generate_assertions(

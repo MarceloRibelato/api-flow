@@ -69,9 +69,10 @@ class FlowService:
         ).first()
         
         if not flow:
+            flow_name = data.name if data.name else f"Flow {str(data.flow_type).upper()}"
             flow = FlowDB(
                 project_id=data.projectId,
-                name=f"Flow {str(data.flow_type).upper()}",
+                name=flow_name,
                 flow_type=data.flow_type,
                 company_id=company_id,
                 user_id=user_id

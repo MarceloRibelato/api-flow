@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from app.services.analysis_service import AnalysisService
@@ -9,6 +10,12 @@ from app.models.agent_models import AgentSettingsDB
 from app.services.flow_service import FlowService
 
 logger = logging.getLogger(__name__)
+
+def _robust_json_parse(text: str) -> Any:
+    """Parses JSON safely by stripping trailing commas that LLMs often hallucinate."""
+    text = text.strip()
+    text = re.sub(r',\s*([\]}])', r'\1', text)
+    return json.loads(text)
 
 class SkillService:
     SKILLS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills")
@@ -76,7 +83,7 @@ class SkillService:
         mapping_result_raw = SkillService.execute_skill(db, user_id, "mapping_flow_skill", mapping_context)
         
         try:
-            blueprint = json.loads(mapping_result_raw)
+            blueprint = _robust_json_parse(mapping_result_raw)
         except Exception as e:
             logger.error(f"Failed to parse blueprint from mapping skill: {e}")
             blueprint = {"logic_summary": mapping_result_raw} # Fallback to raw text
@@ -93,7 +100,7 @@ class SkillService:
         alternatives_raw = SkillService.execute_skill(db, user_id, "generate_alternatives_skill", generation_context)
         
         try:
-            alternatives = json.loads(alternatives_raw)
+            alternatives = _robust_json_parse(alternatives_raw)
             # Ensure it's a list
             if isinstance(alternatives, dict) and "alternatives" in alternatives:
                 alternatives = alternatives["alternatives"]
