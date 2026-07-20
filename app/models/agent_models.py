@@ -17,3 +17,16 @@ class AgentSettingsDB(Base):
     
     # Relationship with User
     user = relationship("UserDB", backref="agent_settings")
+
+from datetime import datetime
+from sqlalchemy import DateTime
+
+class AgentMemoryDB(Base):
+    __tablename__ = "agent_memory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    flow_id = Column(Integer, ForeignKey("flow_data.id"), nullable=False)
+    role = Column(String, nullable=False) # "user" or "assistant"
+    content = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)

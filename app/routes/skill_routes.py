@@ -1,13 +1,138 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from typing import Dict, Any
 from app.database import get_db
 from app.services.skill_service import SkillService
+from app.services.analysis_service import AnalysisService
 import uuid
 import json
 import random
 
 router = APIRouter(prefix="/analysis/skills", tags=["Analysis Skills"])
+
+@router.get("/debug_settings")
+def debug_settings(db: Session = Depends(get_db)):
+    from app.models.agent_models import AgentSettingsDB
+    settings = db.query(AgentSettingsDB).first()
+    if not settings:
+        return {"error": "No settings found"}
+    return {
+        "user_id": settings.user_id,
+        "provider": settings.ai_provider,
+        "model": settings.ai_model,
+        "key": settings.ai_api_key,
+        "url": settings.ai_base_url
+    }
+
+@router.get("/dump-flow")
+def dump_flow(db: Session = Depends(get_db)):
+    from app.models.flow_models import FlowDB, FlowEdgeDB
+    import uuid
+    flow = db.query(FlowDB).order_by(FlowDB.updated_at.desc()).first()
+    if not flow: return {"error": "no flow"}
+    
+    existing_edges = [(e.source, e.target) for e in flow.flow_edges]
+    fixed_nodes = []
+    new_edges = []
+    
+    connected_targets = {target for source, target in existing_edges}
+    
+    for i, n in enumerate(flow.flow_nodes):
+        if n.client_id != "start" and n.client_id not in connected_targets:
+            fixed_nodes.append(n.client_id)
+            
+            # Find previous node to connect to
+            if i == 0 or flow.flow_nodes[i-1].client_id == "start":
+                source_id = "start"
+            else:
+                source_id = flow.flow_nodes[i-1].client_id
+                
+            new_edges.append(FlowEdgeDB(
+                flow_id=flow.id,
+                client_id=f"edge_fixed_{uuid.uuid4().hex[:6]}",
+                source=source_id,
+                target=n.client_id,
+                type="buttonedge",
+                animated=True
+            ))
+            connected_targets.add(n.client_id)
+            
+    if new_edges:
+        db.add_all(new_edges)
+        db.commit()
+        return {"status": "fixed", "nodes_fixed": fixed_nodes}
+    
+    return {"status": "all_connected"}
+
+@router.get("/clean-ghosts")
+def clean_ghosts(db: Session = Depends(get_db)):
+    from app.models.flow_models import FlowDB, FlowNodeDB, FlowCardDataDB, FlowE2EStepDB
+    from sqlalchemy import desc
+    
+    # 1. Encontra cards órfãos (que não tem um Node correspondente no fluxo)
+    all_cards = db.query(FlowCardDataDB).all()
+    ghost_cards_count = 0
+    for card in all_cards:
+        node = db.query(FlowNodeDB).filter(
+            FlowNodeDB.flow_id == card.flow_id,
+            FlowNodeDB.client_id == card.node_id
+        ).first()
+        
+        if not node:
+            db.query(FlowE2EStepDB).filter(FlowE2EStepDB.card_db_id == card.db_id).delete()
+            db.delete(card)
+            ghost_cards_count += 1
+            
+    # 2. Encontra e deleta fluxos duplicados antigos (mantendo apenas o mais recente)
+    # Isso resolve o bug onde o Card Inventory soma cards de fluxos antigos que não aparecem mais no canvas
+    flows = db.query(FlowDB).order_by(desc(FlowDB.updated_at)).all()
+    seen_flows = set()
+    deleted_flows_count = 0
+    
+    for f in flows:
+        key = f"{f.project_id}_{f.flow_type}"
+        if key in seen_flows:
+            # Fluxo duplicado mais antigo! Deletar tudo dele.
+            db.query(FlowE2EStepDB).filter(
+                FlowE2EStepDB.card_db_id.in_(
+                    db.query(FlowCardDataDB.db_id).filter(FlowCardDataDB.flow_id == f.id)
+                )
+            ).delete(synchronize_session=False)
+            
+            db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == f.id).delete(synchronize_session=False)
+            db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == f.id).delete(synchronize_session=False)
+            db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == f.id).delete(synchronize_session=False)
+            db.delete(f)
+            deleted_flows_count += 1
+        else:
+            seen_flows.add(key)
+            
+    db.commit()
+    return {
+        "status": "cleanup_complete", 
+        "deleted_ghost_cards": ghost_cards_count,
+        "deleted_duplicate_flows": deleted_flows_count
+    }
+@router.get("/debug-db")
+def debug_db(db: Session = Depends(get_db)):
+    from app.models.flow_models import FlowDB, FlowNodeDB, FlowCardDataDB
+    from sqlalchemy import func
+    
+    # Get all flows
+    flows = db.query(FlowDB).all()
+    result = []
+    for f in flows:
+        node_count = db.query(func.count(FlowNodeDB.client_id)).filter(FlowNodeDB.flow_id == f.id).scalar()
+        card_count = db.query(func.count(FlowCardDataDB.db_id)).filter(FlowCardDataDB.flow_id == f.id).scalar()
+        result.append({
+            "flow_id": f.id,
+            "project_id": f.project_id,
+            "name": f.name,
+            "flow_type": f.flow_type,
+            "node_count": node_count,
+            "card_count": card_count
+        })
+    return {"flows": result}
 
 @router.get("/list")
 def list_skills(
@@ -15,10 +140,12 @@ def list_skills(
 ):
     """Returns the list of available specialist skills."""
     return [
+        { "id": "qa_specialist_api", "name": "Especialista em API", "description": "Automação e testes de Backend/API." },
+        { "id": "qa_specialist_web", "name": "Especialista em Web", "description": "Automação e testes de Frontend Web." },
+        { "id": "qa_specialist_mobile", "name": "Especialista em Mobile", "description": "Automação e testes Mobile (Appium)." },
         { "id": "generate_alternatives_skill", "name": "Geração de Alternativas", "description": "Cria variações de teste." },
         { "id": "security_skill", "name": "Especialista em Segurança", "description": "Analisa vulnerabilidades." },
-        { "id": "performance_skill", "name": "Especialista em Performance", "description": "Avalia gargalos e carga." },
-        { "id": "exploratory_skill", "name": "Exploratório (Monkey Testing)", "description": "Gera testes de borda e caos." }
+        { "id": "performance_skill", "name": "Especialista em Performance", "description": "Avalia gargalos e carga." }
     ]
 
 @router.post("/flow/{flow_id}/execute/{skill_id}")
@@ -45,6 +172,65 @@ def execute_skill(
         
         result = SkillService.execute_skill(db, user_id, skill_id, generation_context)
         return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+
+class ChatRequestSchema(BaseModel):
+    message: str
+    history: Optional[List[Dict[str, str]]] = None
+    live_context: Optional[Dict[str, Any]] = None
+
+@router.post("/flow/{flow_id}/chat/{skill_id}")
+def chat_with_skill(
+    flow_id: int,
+    skill_id: str,
+    req: ChatRequestSchema,
+    user_id: int = Query(...),
+    company_id: int = Query(1),
+    db: Session = Depends(get_db)
+):
+    """Executes a chat message within a skill context, with memory."""
+    try:
+        from app.services.flow_service import FlowService
+        
+        # Use live context from frontend if available, else load from DB
+        if req.live_context and "nodes" in req.live_context:
+            nodes = req.live_context.get("nodes", [])
+            cardData = req.live_context.get("cardData", {})
+        else:
+            flow = FlowService.load(db, None, company_id, flow_id, "api")
+            if not flow or not flow.get("nodes"):
+                flow = FlowService.load(db, None, company_id, flow_id, "e2e")
+            nodes = flow.get("nodes", [])
+            cardData = flow.get("cardData", {})
+            
+        # Limit the size of context to prevent context window overflow
+        if len(nodes) > 10:
+            nodes = nodes[:10]
+            
+        mapping_payload = {"nodes": nodes, "cardData": cardData}
+        if req.live_context and "execution_results" in req.live_context:
+            mapping_payload["execution_results"] = req.live_context["execution_results"]
+
+        generation_context = {
+            "mapping_context": json.dumps(mapping_payload),
+            "user_message": req.message
+        }
+        
+        # We pass flow_id=None to disable the automatic database memory injection,
+        # because we are passing the explicit `history` from the frontend session.
+        result = SkillService.execute_skill(
+            db, 
+            user_id, 
+            skill_id, 
+            generation_context, 
+            flow_id=None, 
+            chat_history=req.history
+        )
+        return {"response": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -227,18 +413,33 @@ def save_generated_flow(
                     
                 ai_custom_nodes = [n for n in new_nodes if n.get("type", "custom") != "startNode" and n.get("id") != "start"]
                 
-                # Check if the AI hallucinated and forgot to connect the flow to the Start node
-                has_start_edge = any(e.get("source") == "start" for e in new_edges)
-                if not has_start_edge and ai_custom_nodes:
-                    new_edges.append({
-                        "id": f"edge_auto_start_{uuid.uuid4().hex[:6]}",
-                        "source": "start",
-                        "target": ai_custom_nodes[0]["id"],
-                        "type": "buttonedge",
-                        "animated": True,
-                        "markerEnd": {"type": "arrowclosed"}
-                    })
+                # Combine edges first
+                payload["edges"] = orig_edges_list + new_edges
                 
+                # Fallback para IAs preguiçosas que omitem as arestas (edges):
+                # Se um nó não tiver aresta de entrada, conecte-o ao nó anterior da lista.
+                # Se for o primeiro nó, conecte-o ao START.
+                connected_targets = {e.get("target") for e in payload["edges"]}
+                for i, n in enumerate(new_nodes):
+                    nid = n.get("id")
+                    if n.get("type", "custom") != "startNode" and nid != "start":
+                        if nid not in connected_targets:
+                            # Se for o primeiro nó, ou o nó anterior for startNode, liga no start
+                            if i == 0 or new_nodes[i-1].get("id") == "start":
+                                source_id = "start"
+                            else:
+                                source_id = new_nodes[i-1]["id"]
+                                
+                            payload["edges"].append({
+                                "id": f"edge_auto_{uuid.uuid4().hex[:6]}",
+                                "source": source_id,
+                                "target": nid,
+                                "type": "buttonedge",
+                                "animated": True,
+                                "markerEnd": {"type": "arrowclosed"}
+                            })
+                            connected_targets.add(nid)
+
                 new_card_data = {}
                 ai_card_keys = list(payload.get("cardData", {}).keys())
                 
@@ -270,11 +471,9 @@ def save_generated_flow(
                 for n in new_nodes:
                     if n["id"] in new_card_data and "name" in new_card_data[n["id"]]:
                         n["data"]["name"] = new_card_data[n["id"]]["name"]
-                        n["data"]["name"] = new_card_data[n["id"]]["name"]
                 
-                # Combine
+                # Combine nodes
                 payload["nodes"] = orig_nodes_list + new_nodes
-                payload["edges"] = orig_edges_list + new_edges
                 orig_card_data.update(new_card_data)
                 payload["cardData"] = orig_card_data
              
@@ -290,3 +489,42 @@ def save_generated_flow(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to save generated flow: {str(e)}")
+
+from pydantic import BaseModel
+class FeedbackSchema(BaseModel):
+    suggestion_name: str
+    reason: str
+
+@router.post("/flow/{flow_id}/feedback")
+def submit_ai_feedback(flow_id: int, payload: FeedbackSchema, user_id: int = Query(...)):
+    import os
+    import json
+    from app.services.skill_service import SkillService
+    
+    memory_dir = os.path.join(SkillService.SKILLS_DIR, "memory")
+    os.makedirs(memory_dir, exist_ok=True)
+    
+    feedback_file = os.path.join(memory_dir, f"feedback_flow_{flow_id}.json")
+    
+    feedbacks = []
+    if os.path.exists(feedback_file):
+        try:
+            with open(feedback_file, "r", encoding="utf-8") as f:
+                feedbacks = json.load(f)
+        except:
+            feedbacks = []
+            
+    feedbacks.append({
+        "suggestion_name": payload.suggestion_name,
+        "reason": payload.reason,
+        "timestamp": __import__("datetime").datetime.utcnow().isoformat()
+    })
+    
+    # Keep only the last 20 feedbacks to avoid prompt overflow
+    if len(feedbacks) > 20:
+        feedbacks = feedbacks[-20:]
+        
+    with open(feedback_file, "w", encoding="utf-8") as f:
+        json.dump(feedbacks, f, indent=4)
+        
+    return {"status": "success", "message": "Feedback saved."}

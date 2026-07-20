@@ -1,0 +1,37 @@
+[
+    {
+        "suggestion_name": "User Logout - Session Expired",
+        "reason": "Minha Api de logout retorna 200 mesmo se o token n\u00e3o existir ou estiver inativo",
+        "timestamp": "2026-07-14T19:20:04.390968"
+    },
+    {
+        "suggestion_name": "Logout - No Active Session",
+        "reason": "minha api de logout n\u00e3o s\u00f3 inativa o token valido se n\u00e3o existir ou for expirado ela retorna 200 com sucesso ",
+        "timestamp": "2026-07-14T19:31:45.051613"
+    },
+    {
+        "suggestion_name": "Login - User with Expired Token Attempts Logout",
+        "reason": "A request de Login \u00e9 justamente quem gera o token",
+        "timestamp": "2026-07-14T20:17:58.982732"
+    },
+    {
+        "suggestion_name": "Login - Missing Password Field",
+        "reason": "Este Cenario j\u00e1 esta na lista ",
+        "timestamp": "2026-07-14T21:02:56.683248"
+    },
+    {
+        "suggestion_name": "Login - Double User Login",
+        "reason": "Se se aplica a este tipo de aplica\u00e7\u00e3o web ",
+        "timestamp": "2026-07-14T21:03:26.750413"
+    },
+    {
+        "suggestion_name": "Invalid Token for Logout",
+        "reason": "Se n\u00e3o existir um token o logout retorna 200 como se tivesse inativado com sucesso",
+        "timestamp": "2026-07-14T21:04:48.246112"
+    },
+    {
+        "suggestion_name": "Login - Incorrect Email Format",
+        "reason": "Este Cenario j\u00e1 existe na lista de salvos.",
+        "timestamp": "2026-07-14T21:05:29.314873"
+    }
+]

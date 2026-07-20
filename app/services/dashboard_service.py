@@ -198,8 +198,6 @@ class DashboardService:
             stats_map[day_str]["total"] += 1
             
             is_failure = False
-            if row.status_code and row.status_code >= 400:
-                is_failure = True
             if row.error_message:
                 is_failure = True
             
@@ -222,7 +220,7 @@ class DashboardService:
             ApiExecutionHistory.api_name,
             func.count(ApiExecutionHistory.id).label('failure_count')
         ).filter(
-             (ApiExecutionHistory.status_code >= 400) | (ApiExecutionHistory.error_message != None)
+             ApiExecutionHistory.error_message != None
         )
         
         query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only)

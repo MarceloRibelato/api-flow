@@ -132,7 +132,12 @@ class FlowService:
 
         # 5. Add CardData
         e2e_steps_list_db = []
+        valid_node_ids = {str(n.id) for n in (data.nodes or [])}
+        
         for nid, c in (data.cardData or {}).items():
+            if str(nid) not in valid_node_ids:
+                continue # Ignora dados de cards órfãos (que foram deletados do frontend mas ficaram no cardData)
+                
             # Ensure complex fields are converted to dict/list for JSON storage
             api_calls = []
             if c.apiCalls:

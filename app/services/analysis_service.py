@@ -13,44 +13,94 @@ logger = logging.getLogger(__name__)
 class AnalysisService:
 
     @staticmethod
-    def _call_llm(db: Session, user_id: int, prompt: str, temperature: float = 0.2) -> str:
-        """Helper to call the configured LLM for a user."""
+    def _call_llm(db: Session, user_id: int, prompt: str, temperature: float = 0.2, flow_id: int = None, chat_history: list = None) -> str:
+        """Helper to call the configured LLM for a user, with memory context."""
+        from app.models.agent_models import AgentMemoryDB
+        
         settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
         if not settings or (not settings.ai_api_key and settings.ai_provider != "ollama"):
             return None
+
+        # Build messages array with history if flow_id is provided
+        messages = []
+        if chat_history is not None:
+            messages.extend(chat_history)
+        elif flow_id:
+            # Fetch last 10 messages for this flow and user to prevent context overflow
+            history = db.query(AgentMemoryDB).filter(
+                AgentMemoryDB.user_id == user_id, 
+                AgentMemoryDB.flow_id == flow_id
+            ).order_by(AgentMemoryDB.timestamp.asc()).limit(10).all()
+            
+            for msg in history:
+                messages.append({"role": msg.role, "content": msg.content})
+                
+        # Append current prompt
+        messages.append({"role": "user", "content": prompt})
 
         resp = None
         try:
             if settings.ai_provider == "openai":
                 headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
-                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature}
+                data = {"model": settings.ai_model, "messages": messages, "temperature": temperature}
                 base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
                 if not base_url.endswith("/"): base_url += "/"
                 url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
                 resp = requests.post(url, headers=headers, json=data, timeout=60)
                 if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
+                    result_text = resp.json()["choices"][0]["message"]["content"]
+                    if flow_id:
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                        db.commit()
+                    return result_text
+                else:
+                    raise Exception(f"OpenAI Error: {resp.status_code} - {resp.text}")
 
             elif settings.ai_provider == "anthropic":
                 headers = {"x-api-key": settings.ai_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
-                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 4096}
+                data = {"model": settings.ai_model, "messages": messages, "max_tokens": 4096}
                 resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=60)
                 if resp.status_code == 200:
-                    return resp.json()["content"][0]["text"]
+                    result_text = resp.json()["content"][0]["text"]
+                    if flow_id:
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                        db.commit()
+                    return result_text
+                else:
+                    raise Exception(f"Anthropic Error: {resp.status_code} - {resp.text}")
 
             elif settings.ai_provider == "gemini":
+                # Convert standard messages to Gemini format
+                gemini_contents = []
+                for m in messages:
+                    gemini_contents.append({"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]})
+                
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
-                data = {"contents": [{"parts": [{"text": prompt}]}]}
+                data = {"contents": gemini_contents}
                 resp = requests.post(url, json=data, timeout=60)
                 if resp.status_code == 200:
-                    return resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                    result_text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                    if flow_id:
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                        db.commit()
+                    return result_text
+                else:
+                    raise Exception(f"Gemini Error: {resp.status_code} - {resp.text}")
 
             elif settings.ai_provider == "deepseek":
                 headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
-                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": 4096}
+                data = {"model": settings.ai_model, "messages": messages, "temperature": temperature, "max_tokens": 4096}
                 resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=60)
                 if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
+                    result_text = resp.json()["choices"][0]["message"]["content"]
+                    if flow_id:
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                        db.commit()
+                    return result_text
 
             elif settings.ai_provider == "ollama":
                 from app.config import settings as app_settings
@@ -78,12 +128,22 @@ class AnalysisService:
                         "X-License-Key": license_key,
                         "X-User-Identifier": user_ident
                     }
-                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    data = {"messages": messages, "stream": False}
+                    # Only send model if it's not the default gpt-4o or legacy flow-ia
+                    if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia"):
+                        data["model"] = settings.ai_model
+                        
                     resp = requests.post(url, headers=headers, json=data, timeout=300)
                     if resp.status_code == 200:
-                        return resp.json()["choices"][0]["message"]["content"]
+                        result_text = resp.json()["choices"][0]["message"]["content"]
+                        if flow_id:
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                            db.commit()
+                        return result_text
                     else:
                         logger.error(f"License Manager returned error: {resp.status_code} - {resp.text}")
+                        raise Exception(f"License Manager Error: {resp.status_code} - {resp.text}")
                 else:
                     default_url = "http://host.docker.internal:11434/v1"
                     base_url = settings.ai_base_url if settings.ai_base_url else default_url
@@ -91,16 +151,31 @@ class AnalysisService:
                     url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
                     headers = {"Content-Type": "application/json"}
                     if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    
+                    data = {"messages": messages, "stream": False}
+                    if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia"):
+                        data["model"] = settings.ai_model
+                    else:
+                        data["model"] = "llama3" # local default
+                        
                     resp = requests.post(url, headers=headers, json=data, timeout=300)
                     if resp.status_code == 200:
-                        return resp.json()["choices"][0]["message"]["content"]
+                        result_text = resp.json()["choices"][0]["message"]["content"]
+                        if flow_id:
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                            db.commit()
+                        return result_text
+                    else:
+                        raise Exception(f"Local Ollama Error: {resp.status_code} - {resp.text}")
+                        
+            raise Exception(f"Unsupported AI Provider: {settings.ai_provider}")
 
         except Exception as e:
             logger.error(f"Error calling LLM {settings.ai_provider}: {e}")
             if resp is not None:
                 logger.error(f"LLM Response Error: {resp.status_code} - {resp.text}")
-        return None
+            raise Exception(f"LLM Call Failed: {str(e)}")
 
     @staticmethod
     def analyze_with_ai(db: Session, flow_id: int, user_id: int):
@@ -646,7 +721,7 @@ class AnalysisService:
              # Status
              st = api_data.get('status')
              if st:
-                 sim.append({ "source": "status", "property": "", "operator": "equals", "target": st })
+                 sim.append({ "source": "statusCode", "property": "", "operator": "equals", "target": st })
                  
              # Content-Type
              headers = api_data.get('headers', {})
@@ -674,66 +749,36 @@ class AnalysisService:
 
         # Construct Prompt
         prompt = f"""
-        Analyze this API Response and suggest a list of assertions to validate it.
+        Analyze this API Response and suggest a list of robust assertions to validate it.
+        Make sure to validate important fields inside the JSON body if it exists.
         
         Status: {api_data.get('status')}
         Headers: {json.dumps(api_data.get('headers', {}), indent=2)}
         Body (Truncated): {json.dumps(api_data.get('body', {}), indent=2)[:3000]}
         
         Return a JSON list of objects with the following schema:
-        {{ "source": "status|header|body", "property": "field_path", "operator": "equals|contains|exists|>", "target": "expected_value" }}
+        {{ "source": "statusCode|header|body|responseTime", "property": "field_path", "operator": "equals|contains|exists|>", "target": "expected_value" }}
         
         Example:
         [
-          {{ "source": "status", "property": "", "operator": "equals", "target": 200 }},
+          {{ "source": "statusCode", "property": "", "operator": "equals", "target": 200 }},
           {{ "source": "header", "property": "content-type", "operator": "contains", "target": "application/json" }},
-          {{ "source": "body", "property": "data.id", "operator": "exists", "target": null }}
+          {{ "source": "body", "property": "data.id", "operator": "exists", "target": null }},
+          {{ "source": "body", "property": "success", "operator": "equals", "target": true }}
         ]
         
         Return ONLY valid JSON.
         """
 
-        # We reuse the logic from analyze_with_ai, but for brevity (and separate concerns), 
-        # let's abstract the "Call LLM" part or copy it for now to ensure autonomy.
-        # Refactoring to a private _call_llm would be better, but avoiding massive diffs.
-        
         try:
-             # QUICK IMPLEMENTATION: Re-using the logic pattern
-             # For production, we should extract `_call_llm(settings, prompt, json_mode=True)`
-             
-            if settings.ai_provider == "openai":
-                headers = { "Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json" }
-                data = {
-                    "model": settings.ai_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2
-                }
-                base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
-                if not base_url.endswith("/"): base_url += "/"
-                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-
-                resp = requests.post(url, headers=headers, json=data, timeout=30)
-                if resp.status_code == 200:
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    content = content.replace("```json", "").replace("```", "").strip()
-                    return json.loads(content)
-            
-            elif settings.ai_provider == "gemini":
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
-                data = { "contents": [{ "parts": [{ "text": prompt }] }] }
-                resp = requests.post(url, json=data, timeout=30)
-                if resp.status_code == 200:
-                    text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                    text = text.replace("```json", "").replace("```", "").strip()
-                    return json.loads(text)
-
-            # ... supports others similarly ...
-            
+            content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.2)
+            if not content:
+                return []
+            content = content.replace("```json", "").replace("```", "").strip()
+            return json.loads(content)
         except Exception as e:
-            print(f"AI Assertion Gen Error: {e}")
+            logger.error(f"AI Assertion Gen Error: {e}")
             return []
-            
-        return []
 
     @staticmethod
     def analyze_flow_redundancy(db: Session, flow_id: int, user_id: int = None):

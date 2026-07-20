@@ -44,6 +44,7 @@ class NodeDataBasic(BaseModel):
     childCount: int = Field(0, description="Número de filhos diretos")
     isCollapsed: bool = Field(False, description="Estado de colapso visual")
     layoutDirection: Optional[str] = Field(None, description="Direção do layout (LR ou TB)")
+    isMainFlow: bool = Field(False, description="Indica se é o caminho principal (happy path)")
 
 class NodeDataFull(BaseModel):
     name: str = Field(..., description="Nome do nó")
@@ -51,6 +52,7 @@ class NodeDataFull(BaseModel):
     description: str = Field("", description="Descrição do objetivo do nó")
     childCount: int = Field(0, description="Número de filhos")
     isCollapsed: bool = Field(False, description="Estado de colapso")
+    isMainFlow: bool = Field(False, description="Indica se é o caminho principal (happy path)")
     bddScenarios: List[Dict[str, Any]] = Field([], description="Cenários BDD associados")
     apiCalls: List[ApiCallSchema] = Field([], description="Passos de API do card")
 
@@ -81,6 +83,7 @@ class CardDataSchema(BaseModel):
     name: str = Field(..., description="Nome do card")
     color: str = Field("#10b981", description="Cor do card")
     description: str = Field("", description="Descrição detalhada")
+    isMainFlow: bool = Field(False, description="Indica se é o caminho principal (happy path)")
     bddScenarios: List[Dict[str, Any]] = []
     apiCalls: List[ApiCallSchema] = []
     e2eSteps: List[Dict[str, Any]] = []
@@ -90,10 +93,18 @@ class FlowSaveSchema(BaseModel):
     projectId: int = Field(..., description="ID do projeto (Feature)")
     flowId: Optional[int] = Field(None, description="ID do fluxo no banco de dados")
     name: Optional[str] = Field(None, description="Nome do fluxo")
-    flow_type: str = Field("api", description="Tipo de fluxo: api ou e2e")
+    flow_type: str = Field("api", description="Tipo de fluxo: api, e2e ou mobile")
     nodes: List[NodeSchema]
     edges: List[EdgeSchema]
     cardData: Dict[str, CardDataSchema] = {}
+    
+    @field_validator('flow_type', mode='before')
+    @classmethod
+    def validate_flow_type(cls, v):
+        allowed_types = {"api", "e2e", "mobile"}
+        if not v or str(v).lower() not in allowed_types:
+            return "api" # Fallback robusto para previnir lixo no DB
+        return str(v).lower()
 
 class FlowCreateSchema(BaseModel):
     projectId: int = Field(..., description="ID do projeto")
