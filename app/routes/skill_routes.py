@@ -269,11 +269,12 @@ def _normalize_card_data(card_data: dict):
                 if "method" not in api_call: api_call["method"] = "GET"
                 if "url" not in api_call: api_call["url"] = "http://localhost"
                 
-                if "name" not in api_call or api_call.get("name") == "Nova Requisição":
+                name_val = api_call.get("name")
+                if "name" not in api_call or not name_val or str(name_val).strip() in ("", "None", "Nova Requisição", "Card Name"):
                     url_path = api_call["url"].split("?")[0]
                     endpoint = url_path.strip("/").split("/")[-1]
                     if not endpoint: endpoint = "API"
-                    api_call["name"] = f"{api_call['method']} {endpoint}"
+                    api_call["name"] = f"{api_call['method']} /{endpoint}"
                 
                 for field in ["headers", "params"]:
                     if field in api_call:

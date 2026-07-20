@@ -24,6 +24,7 @@ class ApiCallSchema(BaseModel):
     description: str = Field("", description="Descrição opcional do passo")
     timeout: int = Field(30000, description="Timeout em milissegundos")
     delay: int = Field(0, description="Atraso antes da execução em ms")
+    retries: int = Field(0, description="Número de retentativas se a requisição falhar")
     cacheTTL: int = Field(0, description="Tempo de vida do cache em minutos")
     parallel: bool = Field(False, description="Executar em paralelo com outras requisições do mesmo nível")
     assertions: List[AssertionRule] = Field([], description="Lista de validações esperadas")

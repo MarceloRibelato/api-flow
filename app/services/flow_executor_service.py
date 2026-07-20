@@ -413,65 +413,81 @@ class FlowExecutorService:
                                                 ApiExecutionHistory.created_at >= time_threshold
                                             ).order_by(desc(ApiExecutionHistory.created_at)).first()
                                             
-                                        if cached_run:
-                                            logger.info(f"      ♻️ CACHE HIT: Skipping HTTP request for API {step_data.get('name', step_data.get('id'))} (Valid for {cache_ttl_minutes}m)")
-                                            resp_status = cached_run.status_code
-                                            resp_reason = "OK (Cached)"
-                                            resp_headers = cached_run.response_headers or {}
-                                            resp_text = cached_run.response_body or ""
-                                            duration = cached_run.response_time or 0
+                                        max_retries = int(step_data.get('retries', 0))
+                                        for attempt in range(max_retries + 1):
+                                            final_error_message = None
                                             try:
-                                                import json as _json
-                                                resp_json = _json.loads(resp_text) if resp_text else None
-                                            except Exception:
-                                                resp_json = None
-                                                
-                                            # Adicionar uma anotação na variável step_data para que o histórico
-                                            # também reflita que foi do cache (se desejado).
-                                            step_data['_was_cached'] = True
-                                        else:
-                                            start_time = time.time()
-                                            resp = flow_session.request(method, url, headers=headers, data=body, params=params, timeout=30)
-                                            duration = int((time.time() - start_time) * 1000)
-                                            resp_status = resp.status_code
-                                            resp_reason = resp.reason
-                                            resp_headers = dict(resp.headers)
-                                            resp_text = resp.text
-                                            
-                                            try:
-                                                resp_json = resp.json()
-                                            except ValueError:
-                                                resp_json = None
+                                                if cached_run:
+                                                    logger.info(f"      ♻️ CACHE HIT: Skipping HTTP request for API {step_data.get('name', step_data.get('id'))} (Valid for {cache_ttl_minutes}m)")
+                                                    resp_status = cached_run.status_code
+                                                    resp_reason = "OK (Cached)"
+                                                    resp_headers = cached_run.response_headers or {}
+                                                    resp_text = cached_run.response_body or ""
+                                                    duration = cached_run.response_time or 0
+                                                    try:
+                                                        import json as _json
+                                                        resp_json = _json.loads(resp_text) if resp_text else None
+                                                    except Exception:
+                                                        resp_json = None
+                                                    step_data['_was_cached'] = True
+                                                else:
+                                                    start_time = time.time()
+                                                    resp = flow_session.request(method, url, headers=headers, data=body, params=params, timeout=30)
+                                                    duration = int((time.time() - start_time) * 1000)
+                                                    resp_status = resp.status_code
+                                                    resp_reason = resp.reason
+                                                    resp_headers = dict(resp.headers)
+                                                    resp_text = resp.text
+                                                    
+                                                    try:
+                                                        resp_json = resp.json()
+                                                    except ValueError:
+                                                        resp_json = None
 
-                                        # --- Assertions (delegated to assertion_engine) ---
-                                        assertions_raw = step_data.get('assertions', [])
-                                        if assertions_raw:
-                                            assertion_results, assertions_passed = evaluate_all_assertions(
-                                                assertions_raw, resp_status, resp_headers,
-                                                resp_json, resp_text, duration
-                                            )
+                                                # --- Assertions (delegated to assertion_engine) ---
+                                                assertions_raw = step_data.get('assertions', [])
+                                                if assertions_raw:
+                                                    assertion_results, assertions_passed = evaluate_all_assertions(
+                                                        assertions_raw, resp_status, resp_headers,
+                                                        resp_json, resp_text, duration
+                                                    )
+                                                else:
+                                                    assertions_passed = True
 
+                                                if step_data.get('assertions') and not assertions_passed:
+                                                    final_error_message = "Assertions Failed"
+                                                elif resp_status >= 400:
+                                                    final_error_message = f"HTTP Error {resp_status}"
+                                                elif resp_status == 0:
+                                                    final_error_message = "Step Timeout/Incomplete"
+
+                                                if not final_error_message:
+                                                    break # Success
+                                                else:
+                                                    if attempt < max_retries:
+                                                        logger.info(f"      🔄 Retrying API {step_data.get('name')} (Attempt {attempt+1}/{max_retries})")
+                                                        time.sleep(1) # simple backoff
+                                            except Exception as req_ex:
+                                                logger.error(f"Request failed: {req_ex}")
+                                                resp_status = 500
+                                                final_error_message = str(req_ex)
+                                                if attempt < max_retries:
+                                                    logger.info(f"      🔄 Retrying API {step_data.get('name')} due to exception (Attempt {attempt+1}/{max_retries})")
+                                                    time.sleep(1)
+                                                    
                                         # --- Extraction (delegated to extraction_engine) ---
                                         extracts = step_data.get('extracts', [])
-                                        if extracts:
+                                        if extracts and not final_error_message:
                                             extracted = process_extractions(
                                                 extracts, resp_headers, resp_json,
                                                 current_path_vars, lock=execution_lock,
                                                 db=db, product_id=product_id, env_id=env_id
                                             )
                                             final_variables.update(extracted)
-                            except Exception as req_ex:
-                                logger.error(f"Request failed: {req_ex}")
-                                resp_status = 500
-                                final_error_message = str(req_ex)
-
-                            if not final_error_message:
-                                if step_data.get('assertions') and not assertions_passed:
-                                    final_error_message = "Assertions Failed"
-                                elif resp_status >= 400:
-                                    final_error_message = f"HTTP Error {resp_status}"
-                                elif resp_status == 0:
-                                    final_error_message = "Step Timeout/Incomplete"
+                            except Exception as outer_ex:
+                                logger.error(f"Unhandled execution error: {outer_ex}")
+                                if not final_error_message:
+                                    final_error_message = str(outer_ex)
 
                             with execution_lock:
                                 if final_error_message: 
