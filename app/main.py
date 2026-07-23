@@ -33,6 +33,10 @@ from app.routes.cicd_routes import router as cicd_router
 from app.routes.skill_routes import router as skill_router
 from app.routes.appium_inspector_routes import router as appium_inspector_router
 from app.routes.web_inspector_routes import router as web_inspector_router
+from app.routes.hitl_routes import router as hitl_router
+
+# Ensure models are loaded for create_all
+import app.models.hitl_models
 
 # ===== CONFIGURAÇÃO DE LOGGING =====
 setup_logging()
@@ -57,6 +61,16 @@ async def lifespan(app: FastAPI):
             # Step 1: Create missing tables via SQL Alchemy
             Base.metadata.create_all(bind=engine)
             logger.info("Tabelas verificadas/criadas via metadata sqlalchemy")
+            
+            # Step 1.5: Adicionar colunas novas que não foram criadas via metadata
+            try:
+                from sqlalchemy import text
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS db_queries JSON DEFAULT '[]'::json;"))
+                    conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS message_queues JSON DEFAULT '[]'::json;"))
+                logger.info("Colunas db_queries e message_queues adicionadas/verificadas com sucesso.")
+            except Exception as e:
+                logger.info(f"Erro ao adicionar coluna db_queries (pode já existir): {e}")
             
             # CRITICAL: Dispose engine to release connections before Alembic takes over
             # This prevents deadlocks in standard PostgreSQL/SQLAlchemy pooling.
@@ -210,6 +224,7 @@ app.include_router(cicd_router)
 app.include_router(skill_router)
 app.include_router(appium_inspector_router, prefix="/mobile-inspector", tags=["Mobile Inspector"])
 app.include_router(web_inspector_router, prefix="/web-inspector", tags=["Web Studio"])
+app.include_router(hitl_router)
 
 # Dashboard Router
 from app.routes.dashboard_routes import router as dashboard_router

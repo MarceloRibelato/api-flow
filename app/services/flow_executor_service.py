@@ -57,8 +57,21 @@ class FlowExecutorService:
             envs = EnvironmentService.get_by_project(db, product_id)
             if envs:
                 fallback_env = envs[0]
-                env_id = fallback_env.id
                 logger.info(f"      ℹ️ Resolved null env_id in execute_flow_logic to fallback environment ID: {env_id}")
+        
+        global_timeout_ms = None
+        global_retry_actions = None
+        global_retry_test = 0
+        if schedule_id:
+            from app.models.schedule_models import ScheduleModel
+            schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
+            if schedule:
+                if schedule.duration_seconds:
+                    global_timeout_ms = schedule.duration_seconds
+                if schedule.virtual_users is not None:
+                    global_retry_actions = schedule.virtual_users
+                if schedule.ramp_up_seconds is not None:
+                    global_retry_test = schedule.ramp_up_seconds
 
         base_batch_id = f"sched_{uuid.uuid4().hex}"
         history_buffer = []
@@ -214,8 +227,18 @@ class FlowExecutorService:
                                     'delay': props.get('delay', 0)
                                 }
                                 all_steps.append({'data': api_data, 'type': 'api'})
+                            elif e.get('type') in ['db_query', 'database', 'sql_query']:
+                                all_steps.append({'data': e, 'type': 'db_query'})
                             else:
                                 all_steps.append({'data': e, 'type': 'e2e'})
+
+                        db_queries = card.get('dbQueries', []) or card.get('db_queries', []) or card.get('dbSteps', [])
+                        for db_q in db_queries:
+                            all_steps.append({'data': db_q, 'type': 'db_query'})
+                            
+                        message_queues = card.get('messageQueues', []) or card.get('message_queues', [])
+                        for mq in message_queues:
+                            all_steps.append({'data': mq, 'type': 'message_queue'})
                         
                         execution_lock = threading.Lock()
 
@@ -240,7 +263,56 @@ class FlowExecutorService:
                             method = ""
 
                             try:
-                                if step_type == 'e2e':
+                                if step_type in ['db_query', 'database']:
+                                    try:
+                                        from app.services.database_executor_service import DatabaseExecutorService
+                                        method = "SQL"
+                                        props = step_data.get('properties', {}) if isinstance(step_data.get('properties'), dict) else {}
+                                        raw_conn = step_data.get('connection_string') or step_data.get('connectionString') or props.get('connection_string') or props.get('connectionString') or ""
+                                        url_val = FlowExecutorService.replace_vars(raw_conn, current_path_vars) or ""
+                                        url = f"db://{url_val}" if url_val else "db://sql-database"
+                                        
+                                        db_res = DatabaseExecutorService.execute_db_step(step_data, current_path_vars)
+                                        resp_status = db_res['status']
+                                        resp_reason = db_res['reason']
+                                        resp_text = db_res['text']
+                                        duration = db_res['duration']
+                                        final_error_message = db_res['error']
+                                        assertion_results = db_res['assertions']
+                                        assertions_passed = db_res['assertions_passed']
+                                        if db_res.get('extracted'):
+                                            final_variables.update(db_res['extracted'])
+                                            current_path_vars.update(db_res['extracted'])
+                                    except Exception as db_err:
+                                        logger.error(f"FATAL: DB Execution Error: {str(db_err)}")
+                                        resp_status = 500
+                                        resp_reason = "DB Error"
+                                        resp_text = str(db_err)
+                                        final_error_message = str(db_err)
+                                elif step_type == 'message_queue':
+                                    try:
+                                        from app.services.queue_executor_service import QueueExecutorService
+                                        method = "MQ_" + str(step_data.get('broker', 'mq')).upper()
+                                        url = step_data.get('queueName', 'topic/queue')
+                                        
+                                        mq_res = QueueExecutorService.execute_queue_step(step_data, current_path_vars)
+                                        resp_status = mq_res['status']
+                                        resp_reason = "MQ Success" if resp_status == 200 else "MQ Error"
+                                        resp_text = str(mq_res.get('message') or mq_res.get('error') or '')
+                                        duration = mq_res['response_time']
+                                        final_error_message = mq_res.get('error')
+                                        assertion_results = mq_res.get('assertion_results', [])
+                                        assertions_passed = mq_res.get('assertions_passed', True)
+                                        if mq_res.get('extracted'):
+                                            final_variables.update(mq_res['extracted'])
+                                            current_path_vars.update(mq_res['extracted'])
+                                    except Exception as mq_err:
+                                        logger.error(f"FATAL: MQ Execution Error: {str(mq_err)}")
+                                        resp_status = 500
+                                        resp_reason = "MQ Error"
+                                        resp_text = str(mq_err)
+                                        final_error_message = str(mq_err)
+                                elif step_type == 'e2e':
                                     try:
                                         if not e2e_executor:
                                             if flow_type == 'mobile':
@@ -257,7 +329,20 @@ class FlowExecutorService:
                                                 e2e_executor.start(video_dir=video_dir if capture_video else None)
                                         # Resolve variables in E2E step data
                                         step_data_str = json.dumps(step_data)
-                                        step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, current_path_vars))
+                                        resolved_step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, current_path_vars))
+                                        
+                                        # Preserve original unresolved properties for healing
+                                        resolved_step_data['_original_properties'] = step_data.get('properties', {})
+                                        
+                                        step_data = resolved_step_data
+                                        
+                                        # Inject timeout and retries dynamically from Schedule Config (if present)
+                                        if global_timeout_ms is not None:
+                                            step_data.setdefault('properties', {})['timeout'] = global_timeout_ms
+                                        if global_retry_actions is not None:
+                                            step_data.setdefault('properties', {})['retries'] = global_retry_actions
+                                        if global_retry_test is not None:
+                                            step_data.setdefault('properties', {})['ramp_up'] = global_retry_test
 
                                         # Sanitize E2E URL for Docker (e.g. localhost -> flow-frontend)
                                         if step_data.get('type') == 'browser' and step_data.get('properties', {}).get('value'):
@@ -489,6 +574,11 @@ class FlowExecutorService:
                                 if not final_error_message:
                                     final_error_message = str(outer_ex)
 
+                            # --- Global Error Check ---
+                            # Guarantee that ANY step returning an error status is correctly flagged as a failure
+                            if not final_error_message and resp_status >= 400:
+                                final_error_message = resp_text if resp_text else f"Execution Failed with status {resp_status}: {resp_reason}"
+
                             with execution_lock:
                                 if final_error_message: 
                                     # Fail-Fast: Interrupt path on ANY primary step failure
@@ -507,7 +597,7 @@ class FlowExecutorService:
                                 batch_id=batch_id,
                                 api_id=str(step_data.get('id')),
                                 api_name=base_api_name,
-                                project_id=product_id,
+                                project_id=p_id, # Use Feature ID, not Product ID
                                 flow_id=flow_meta['id'],
                                 node_id=current_id,
                                 schedule_id=schedule_id,
@@ -697,9 +787,24 @@ class FlowExecutorService:
                 extra_vars = VariableService.get_all(db, product_id, environment_id=fallback_env.id)
                 env_vars.extend(extra_vars)
 
-        variables = {v.name: v for v in global_vars}
+        variables = {}
+        for v in global_vars:
+            variables[v.name] = {
+                "name": v.name,
+                "value": v.value,
+                "type": getattr(v, "type", "static"),
+                "faker_type": getattr(v, "faker_type", None),
+                "faker_options": getattr(v, "faker_options", {})
+            }
+            
         for v in env_vars:
-            variables[v.name] = v
+            variables[v.name] = {
+                "name": v.name,
+                "value": v.value,
+                "type": getattr(v, "type", "static"),
+                "faker_type": getattr(v, "faker_type", None),
+                "faker_options": getattr(v, "faker_options", {})
+            }
             
         logger.info(f"    ✅ Total Merged Variables: {len(variables)} keys: {list(variables.keys())}")
         return variables
@@ -829,17 +934,8 @@ class FlowExecutorService:
                 env_id = fallback_env.id
                 logger.info(f"    ⚠️ No Environment selected for Suite. Fallback to First Env: {fallback_env.name} (ID: {fallback_env.id})")
 
-        # RAW VARIABLES (Objects)
-        raw_variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
-        
-        # KEY FIX: Serialize to plain dict {name: value} to avoid SQLAlchemy Session threading issues
-        # and ensure each thread gets a clean, independent snapshot.
-        variables = {}
-        for k, v in raw_variables.items():
-            if hasattr(v, 'value'):
-               variables[k] = str(v.value)
-            else:
-               variables[k] = str(v)
+        # RAW VARIABLES (Objects converted to safe dicts)
+        variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
         
         total_success = 0
         total_fail = 0

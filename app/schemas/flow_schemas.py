@@ -22,7 +22,7 @@ class ApiCallSchema(BaseModel):
     body: Optional[Union[str, Dict[str, Any], List[Any]]] = Field(None, description="Corpo da requisição")
     params: List[Dict[str, str]] = Field([], description="Parâmetros de query string")
     description: str = Field("", description="Descrição opcional do passo")
-    timeout: int = Field(30000, description="Timeout em milissegundos")
+    timeout: int = Field(10000, description="Timeout em milissegundos")
     delay: int = Field(0, description="Atraso antes da execução em ms")
     retries: int = Field(0, description="Número de retentativas se a requisição falhar")
     cacheTTL: int = Field(0, description="Tempo de vida do cache em minutos")
@@ -39,6 +39,28 @@ class ApiCallSchema(BaseModel):
             return json.dumps(v)
         return str(v)
 
+class MessageQueueSchema(BaseModel):
+    id: str = Field(..., description="ID único do passo")
+    name: Optional[str] = Field("Nova Mensageria", description="Nome amigável")
+    broker: str = Field("rabbitmq", description="rabbitmq, sqs, service_bus")
+    action: str = Field("publish", description="publish ou consume")
+    connectionString: str = Field(..., description="Connection string ou credenciais")
+    queueName: str = Field(..., description="Nome da fila ou tópico")
+    payload: Optional[Union[str, Dict[str, Any]]] = Field(None, description="Mensagem a publicar")
+    headers: List[Dict[str, str]] = Field([], description="Propriedades/Headers da mensagem")
+    timeout: int = Field(10000, description="Tempo limite em ms")
+    assertions: List[AssertionRule] = Field([], description="Validações (para consume)")
+    extracts: List[ExtractionRule] = Field([], description="Extrações (para consume)")
+
+    @field_validator('payload')
+    @classmethod
+    def stringify_payload(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, (dict, list)):
+            return json.dumps(v)
+        return str(v)
+
 class NodeDataBasic(BaseModel):
     name: str = Field(..., description="Nome exibido no nó")
     color: str = Field("#10b981", description="Cor de destaque do nó")
@@ -46,6 +68,8 @@ class NodeDataBasic(BaseModel):
     isCollapsed: bool = Field(False, description="Estado de colapso visual")
     layoutDirection: Optional[str] = Field(None, description="Direção do layout (LR ou TB)")
     isMainFlow: bool = Field(False, description="Indica se é o caminho principal (happy path)")
+    dbQueries: Optional[List[Dict[str, Any]]] = []
+    messageQueues: Optional[List[MessageQueueSchema]] = []
 
 class NodeDataFull(BaseModel):
     name: str = Field(..., description="Nome do nó")
@@ -56,6 +80,8 @@ class NodeDataFull(BaseModel):
     isMainFlow: bool = Field(False, description="Indica se é o caminho principal (happy path)")
     bddScenarios: List[Dict[str, Any]] = Field([], description="Cenários BDD associados")
     apiCalls: List[ApiCallSchema] = Field([], description="Passos de API do card")
+    dbQueries: List[Dict[str, Any]] = Field([], description="Consultas de banco de dados do card")
+    messageQueues: List[MessageQueueSchema] = Field([], description="Ações de mensageria")
 
 class NodeSchema(BaseModel):
     id: str = Field(..., description="ID único do nó (React Flow)")
@@ -88,6 +114,8 @@ class CardDataSchema(BaseModel):
     bddScenarios: List[Dict[str, Any]] = []
     apiCalls: List[ApiCallSchema] = []
     e2eSteps: List[Dict[str, Any]] = []
+    dbQueries: List[Dict[str, Any]] = []
+    messageQueues: List[MessageQueueSchema] = []
     envData: Dict[str, EnvSpecificData] = {}
 
 class FlowSaveSchema(BaseModel):
@@ -110,6 +138,20 @@ class FlowSaveSchema(BaseModel):
 class FlowCreateSchema(BaseModel):
     projectId: int = Field(..., description="ID do projeto")
     name: str = Field(..., description="Nome do fluxo")
+
+class TestDbSchema(BaseModel):
+    connectionString: str = Field(..., description="Connection string")
+    query: str = Field(..., description="SQL Query")
+    environmentId: Optional[int] = Field(None, description="ID do ambiente para variáveis")
+    assertions: Optional[List[Dict[str, Any]]] = []
+    extracts: Optional[List[Dict[str, Any]]] = []
+
+class HealStepSchema(BaseModel):
+    project_id: int = Field(..., description="ID do Projeto (Feature)")
+    flow_id: int = Field(..., description="ID do Fluxo")
+    node_id: str = Field(..., description="ID do Nó E2E")
+    old_selector: str = Field(..., description="Seletor antigo que falhou")
+    new_selector: str = Field(..., description="Novo seletor curado pela IA")
 
 class FlowResponse(BaseModel):
     id: int

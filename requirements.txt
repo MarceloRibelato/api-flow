@@ -28,3 +28,8 @@ sse-starlette
 celery
 redis
 faker
+pymysql
+
+pika
+boto3
+azure-servicebus

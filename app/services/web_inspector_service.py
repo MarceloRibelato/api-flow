@@ -19,244 +19,8 @@ _active_sessions: Dict[str, Any] = {}
 _playwright_instance = None  # Persistent playwright instance
 _last_cleanup_time = 0
 
-class WebInspectorService:
-    """
-    A persistent session manager that uses Playwright for an 
-    interactive web inspection UI (recording and live view).
-    """
-
-    @classmethod
-    async def start_session(cls, session_id: str, initial_url: str = None, steps: list = None) -> dict:
-        """Starts a persistent playwright browser session."""
-        global _playwright_instance
-        async with _session_lock:
-            if session_id in _active_sessions:
-                logger.info(f"🌐 [WebInspector] Session {session_id} exists. Checking health...")
-                try:
-                    logger.info(f"🌐 [WebInspector] Session {session_id} healthy, returning snapshot.")
-                    return await cls.get_snapshot(session_id)
-                except Exception as e:
-                    logger.warning(f"🌐 [WebInspector] Session {session_id} unhealthy, recreating. Error: {e}")
-                    await cls.stop_session(session_id)
-
-            logger.info(f"🌐 [WebInspector] Starting fresh session {session_id}...")
-            
-            try:
-                if not _playwright_instance:
-                    _playwright_instance = await async_playwright().start()
-                
-                # Launch browser with stability, direct network, and zero-isolation flags
-                browser = await _playwright_instance.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox", 
-                        "--disable-setuid-sandbox", 
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--no-zygote",
-                        "--disable-ipv6",
-                        "--disable-features=IsolateOrigins,site-per-process,SubresourceIntegrity",
-                        "--disable-site-isolation-trials",
-                        "--window-position=0,0",
-                        "--ignore-certificate-errors",
-                        "--disable-subresource-integrity"
-                    ]
-                )
-                
-                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                
-                context = await browser.new_context(
-                    viewport={"width": 1280, "height": 720},
-                    user_agent=user_agent,
-                    extra_http_headers={
-                        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-                    },
-                    ignore_https_errors=True
-                )
-                
-                page = await context.new_page()
-                
-                # Failsafe stealth: Handle various library versions and module vs function ambiguity
-                try:
-                    # For async, we use stealth_async
-                    if hasattr(playwright_stealth, 'stealth_async'):
-                        await playwright_stealth.stealth_async(page)
-                    elif hasattr(playwright_stealth, 'stealth'):
-                        s = playwright_stealth.stealth
-                        if callable(s):
-                            # Try it, some versions auto-detect
-                            if asyncio.iscoroutinefunction(s): await s(page)
-                            else: s(page)
-                except Exception as stealth_e:
-                    logger.warning(f"🌐 [WebInspector] Stealth application warning (non-fatal): {stealth_e}")
-
-                # If we have pre-existing steps to replay, we normally skip the bare initial_url navigation
-                # because the steps list itself will contain a 'browser' step to do it.
-                # HOWEVER, if steps are provided but NONE of them is a navigate step, we MUST navigate first.
-                has_nav_step = False
-                if steps:
-                    has_nav_step = any(s.get("type") in ("navigate", "browser") for s in steps)
-                
-                if initial_url and (not steps or not has_nav_step):
-                    if not initial_url.startswith('http'):
-                        initial_url = f"https://{initial_url}"
-                    logger.info(f"🌐 [WebInspector] Navigating to {initial_url}...")
-                    try:
-                        await page.goto(initial_url, wait_until="commit", timeout=60000)
-                    except Exception as e:
-                        logger.warning(f"🌐 [WebInspector] Initial goto(commit) failed: {e}, retrying...")
-                        await asyncio.sleep(1)
-                        try:
-                            await page.goto(initial_url, wait_until="domcontentloaded", timeout=30000)
-                        except Exception:
-                            pass
-                    try:
-                        await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(2.5) # Reduced buffer for async
-
-                _active_sessions[session_id] = {
-                    "browser": browser,
-                    "context": context,
-                    "page": page,
-                    "requests": [],
-                    "created_at": time.time(),
-                    "last_accessed": time.time()
-                }
-
-                # Attach request listener
-                page.on("request", lambda request: asyncio.create_task(cls._handle_request(session_id, request)))
-                
-                # Run lazy cleanup on new session creation
-                asyncio.create_task(cls._cleanup_zombie_sessions())
-
-                if steps:
-                    logger.info(f"🌐 [WebInspector] Executing {len(steps)} pre-existing steps...")
-                    failed_step_index = None
-                    failed_step_error = None
-                    for i, step in enumerate(steps):
-                        try:
-                            # Use skip_tree=True and return_snapshot=False for intermediate steps to speed up execution
-                            is_last = (i == len(steps) - 1)
-                            # Intermediate steps use 0.5s settle time, last one uses 1.5s for full hydration
-                            await cls.interact(session_id, step, skip_tree=not is_last, settle_time=0.5 if not is_last else 1.5, return_snapshot=is_last)
-                        except Exception as step_err:
-                            failed_step_index = i
-                            failed_step_error = str(step_err).split('\n')[0]  # first line only
-                            logger.error(f"🌐 [WebInspector] Pre-existing step {i} ({step.get('type')}) failed: {step_err}")
-                            # Stop execution but do not crash the session so user can debug
-                            break
-                else:
-                    failed_step_index = None
-                    failed_step_error = None
-                
-                logger.info(f"🌐 [WebInspector] Session {session_id} oriented to return snapshot.")
-                result = await cls.get_snapshot(session_id)
-                # Inject replay metadata so the frontend can highlight the failing step
-                if failed_step_index is not None:
-                    result["failed_step_index"] = failed_step_index
-                    result["failed_step_error"] = failed_step_error
-                logger.info(f"🌐 [WebInspector] Snapshot captured for {session_id}, type: {type(result)}")
-                return result
-
-            except Exception as e:
-                logger.error(f"🌐 [WebInspector] FATAL failure in start_session: {e}")
-                traceback.print_exc(file=sys.stdout)
-                # Ensure cleanup of failed artifacts
-                try:
-                    if 'page' in locals(): await page.close()
-                    if 'context' in locals(): await context.close()
-                    if 'browser' in locals(): await browser.close()
-                except: pass
-                raise e
-
-    @classmethod
-    async def stop_session(cls, session_id: str):
-        """Cleans up the playwright session."""
-        async with _session_lock:
-            session = _active_sessions.pop(session_id, None)
-            if session:
-                logger.info(f"🌐 [WebInspector] Stopping session {session_id}.")
-                try:
-                    await session["page"].close()
-                    await session["context"].close()
-                    await session["browser"].close()
-                except Exception as e:
-                    logger.warning(f"🌐 [WebInspector] Error during cleanup: {e}")
-
-    @classmethod
-    async def _cleanup_zombie_sessions(cls):
-        """Kills sessions that have been idle for more than 15 minutes."""
-        global _last_cleanup_time
-        now = time.time()
-        # Only run cleanup at most once per minute
-        if now - _last_cleanup_time < 60:
-            return
-            
-        _last_cleanup_time = now
-        zombies = []
-        
-        async with _session_lock:
-            for sid, session in _active_sessions.items():
-                if now - session.get("last_accessed", now) > 900: # 15 minutes TTL
-                    zombies.append(sid)
-                    
-        for sid in zombies:
-            logger.info(f"🌐 [WebInspector] Session {sid} has been idle for >15m. Running zombie cleanup...")
-            await cls.stop_session(sid)
-
-    @classmethod
-    async def _handle_request(cls, session_id: str, request):
-        try:
-            if request.resource_type in ["fetch", "xhr"]:
-                session = _active_sessions.get(session_id)
-                if session:
-                    headers = request.headers
-                    post_data = request.post_data
-                    
-                    req_data = {
-                        "method": request.method,
-                        "url": request.url,
-                        "headers": headers,
-                        "body": post_data,
-                        "timestamp": int(time.time() * 1000)
-                    }
-                    session["requests"].append(req_data)
-        except Exception as e:
-            logger.warning(f"Error intercepting request: {e}")
-
-    @classmethod
-    async def get_snapshot(cls, session_id: str, skip_tree: bool = False) -> dict:
-        """Takes a screenshot and extracts the interactive DOM tree."""
-        session = _active_sessions.get(session_id)
-        if not session:
-            raise ValueError(f"Session {session_id} not found.")
-
-        session["last_accessed"] = time.time()
-        page: Page = session["page"]
-        try:
-            logger.info(f"🌐 [WebInspector] Taking snapshot for {session_id} (skip_tree={skip_tree})...")
-            # 1. Screenshot
-            try:
-                # Optimized image payload using JPEG instead of PNG for faster network transfer
-                screenshot_bytes = await page.screenshot(timeout=20000, full_page=False, type="jpeg", quality=60)
-                b64_image = base64.b64encode(screenshot_bytes).decode('utf-8')
-            except Exception as ss_err:
-                logger.warning(f"🌐 [WebInspector] Screenshot failed for {session_id}: {ss_err}")
-                b64_image = "" # Return empty image instead of crashing
-
-            if skip_tree:
-                return {
-                    "image_b64": b64_image,
-                    "url": page.url,
-                    "title": await page.title()
-                }
-
-            # 2. Extract Interactive Elements
-            logger.info(f"🌐 [WebInspector] Extracting DOM tree...")
-            eval_res = await page.evaluate("""() => {
-                const results = [];
+QA_FLOW_EXTRACTOR_SCRIPT = """window.__getQAFlowSnapshot = () => {
+const results = [];
                 // Function to collect all elements piercing Shadow DOM boundaries
                 const collectAllElements = (root, collected = []) => {
                     if (!root) return collected;
@@ -372,7 +136,287 @@ class WebInspectorService:
                 }
 
                 return { tree, caret };
-            }""")
+};"""
+
+class _WebInspectorServiceImpl:
+
+    @classmethod
+    async def register_frame_queue(cls, session_id: str, queue, loop):
+        session = _active_sessions.get(session_id)
+        if not session:
+            return False
+            
+        session["fastapi_queue"] = queue
+        session["fastapi_loop"] = loop
+        
+        if "cdp_client" not in session:
+            try:
+                page = session["page"]
+                client = await page.context.new_cdp_session(page)
+                session["cdp_client"] = client
+                
+                def on_frame(event):
+                    import base64
+                    import asyncio
+                    img_bytes = base64.b64decode(event["data"])
+                    # Send ACK so we keep getting frames
+                    try:
+                        asyncio.create_task(client.send("Page.screencastFrameAck", {"sessionId": event["sessionId"]}))
+                    except: pass
+                    
+                    # Push to FastAPI queue
+                    fastapi_q = session.get("fastapi_queue")
+                    fastapi_l = session.get("fastapi_loop")
+                    if fastapi_q and fastapi_l and not fastapi_l.is_closed():
+                        asyncio.run_coroutine_threadsafe(fastapi_q.put(img_bytes), fastapi_l)
+
+                client.on("Page.screencastFrame", on_frame)
+                await client.send("Page.startScreencast", {"format": "jpeg", "quality": 60})
+                logger.info(f"🟢 [WebInspector] CDP Screencast started for {session_id}")
+                return True
+            except Exception as e:
+                logger.error(f"🔴 [WebInspector] Failed to start screencast: {e}")
+                return False
+        return True
+    """
+    A persistent session manager that uses Playwright for an 
+    interactive web inspection UI (recording and live view).
+    """
+
+    @classmethod
+    async def start_session(cls, session_id: str, initial_url: str = None, steps: list = None) -> dict:
+        """Starts a persistent playwright browser session."""
+        global _playwright_instance
+        async with _session_lock:
+            if session_id in _active_sessions:
+                logger.info(f"🌐 [WebInspector] Session {session_id} exists. Checking health...")
+                try:
+                    logger.info(f"🌐 [WebInspector] Session {session_id} healthy, returning snapshot.")
+                    return await cls.get_snapshot(session_id)
+                except Exception as e:
+                    logger.warning(f"🌐 [WebInspector] Session {session_id} unhealthy, recreating. Error: {e}")
+                    await cls.stop_session(session_id)
+
+            logger.info(f"🌐 [WebInspector] Starting fresh session {session_id}...")
+            
+            try:
+                if not _playwright_instance:
+                    _playwright_instance = await async_playwright().start()
+                
+                # Launch browser with stability, direct network, and zero-isolation flags
+                browser = await _playwright_instance.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox", 
+                        "--disable-setuid-sandbox", 
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--no-zygote",
+                        "--disable-ipv6",
+                        "--disable-features=IsolateOrigins,site-per-process,SubresourceIntegrity",
+                        "--disable-site-isolation-trials",
+                        "--window-position=0,0",
+                        "--ignore-certificate-errors",
+                        "--disable-subresource-integrity"
+                    ]
+                )
+                
+                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 720},
+                    user_agent=user_agent,
+                    extra_http_headers={
+                        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                    },
+                    ignore_https_errors=True
+                )
+                await context.add_init_script(QA_FLOW_EXTRACTOR_SCRIPT)
+                
+                page = await context.new_page()
+                
+                # Failsafe stealth: Handle various library versions and module vs function ambiguity
+                try:
+                    # For async, we use stealth_async
+                    if hasattr(playwright_stealth, 'stealth_async'):
+                        await playwright_stealth.stealth_async(page)
+                    elif hasattr(playwright_stealth, 'stealth'):
+                        s = playwright_stealth.stealth
+                        if callable(s):
+                            # Try it, some versions auto-detect
+                            if asyncio.iscoroutinefunction(s): await s(page)
+                            else: s(page)
+                except Exception as stealth_e:
+                    logger.warning(f"🌐 [WebInspector] Stealth application warning (non-fatal): {stealth_e}")
+
+                # If we have pre-existing steps to replay, we normally skip the bare initial_url navigation
+                # because the steps list itself will contain a 'browser' step to do it.
+                # HOWEVER, if steps are provided but NONE of them is a navigate step, we MUST navigate first.
+                has_nav_step = False
+                if steps:
+                    has_nav_step = any(s.get("type") in ("navigate", "browser") for s in steps)
+                
+                if initial_url and (not steps or not has_nav_step):
+                    if not initial_url.startswith('http'):
+                        initial_url = f"https://{initial_url}"
+                    logger.info(f"🌐 [WebInspector] Navigating to {initial_url}...")
+                    try:
+                        await page.goto(initial_url, wait_until="commit", timeout=60000)
+                    except Exception as e:
+                        logger.warning(f"🌐 [WebInspector] Initial goto(commit) failed: {e}, retrying...")
+                        await asyncio.sleep(1)
+                        try:
+                            await page.goto(initial_url, wait_until="domcontentloaded", timeout=30000)
+                        except Exception:
+                            pass
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2.5) # Reduced buffer for async
+
+                _active_sessions[session_id] = {
+                    "browser": browser,
+                    "context": context,
+                    "page": page,
+                    "requests": [],
+                    "created_at": time.time(),
+                    "last_accessed": time.time()
+                }
+
+                # Attach request listener
+                page.on("request", lambda request: asyncio.create_task(cls._handle_request(session_id, request)))
+                
+                # Run lazy cleanup on new session creation
+                asyncio.create_task(cls._cleanup_zombie_sessions())
+
+                if steps:
+                    logger.info(f"🌐 [WebInspector] Executing {len(steps)} pre-existing steps...")
+                    failed_step_index = None
+                    failed_step_error = None
+                    for i, step in enumerate(steps):
+                        try:
+                            # Use skip_tree=True and return_snapshot=False for intermediate steps to speed up execution
+                            is_last = (i == len(steps) - 1)
+                            # Intermediate steps use 0.5s settle time, last one uses 1.5s for full hydration
+                            await cls.interact(session_id, step, skip_tree=not is_last, settle_time=0.5 if not is_last else 1.5, return_snapshot=is_last)
+                        except Exception as step_err:
+                            failed_step_index = i
+                            failed_step_error = str(step_err).split('\n')[0]  # first line only
+                            logger.error(f"🌐 [WebInspector] Pre-existing step {i} ({step.get('type')}) failed: {step_err}")
+                            # Stop execution but do not crash the session so user can debug
+                            break
+                else:
+                    failed_step_index = None
+                    failed_step_error = None
+                
+                logger.info(f"🌐 [WebInspector] Session {session_id} oriented to return snapshot.")
+                result, image_bytes = await cls.get_snapshot(session_id)
+                # Inject replay metadata so the frontend can highlight the failing step
+                if failed_step_index is not None:
+                    result["failed_step_index"] = failed_step_index
+                    result["failed_step_error"] = failed_step_error
+                logger.info(f"🌐 [WebInspector] Snapshot captured for {session_id}, type: {type(result)}")
+                return result, image_bytes
+
+            except Exception as e:
+                logger.error(f"🌐 [WebInspector] FATAL failure in start_session: {e}")
+                traceback.print_exc(file=sys.stdout)
+                # Ensure cleanup of failed artifacts
+                try:
+                    if 'page' in locals(): await page.close()
+                    if 'context' in locals(): await context.close()
+                    if 'browser' in locals(): await browser.close()
+                except: pass
+                raise e
+
+    @classmethod
+    async def stop_session(cls, session_id: str):
+        """Cleans up the playwright session."""
+        async with _session_lock:
+            session = _active_sessions.pop(session_id, None)
+            if session:
+                logger.info(f"🌐 [WebInspector] Stopping session {session_id}.")
+                try:
+                    await session["page"].close()
+                    await session["context"].close()
+                    await session["browser"].close()
+                except Exception as e:
+                    logger.warning(f"🌐 [WebInspector] Error during cleanup: {e}")
+
+    @classmethod
+    async def _cleanup_zombie_sessions(cls):
+        """Kills sessions that have been idle for more than 15 minutes."""
+        global _last_cleanup_time
+        now = time.time()
+        # Only run cleanup at most once per minute
+        if now - _last_cleanup_time < 60:
+            return
+            
+        _last_cleanup_time = now
+        zombies = []
+        
+        async with _session_lock:
+            for sid, session in _active_sessions.items():
+                if now - session.get("last_accessed", now) > 900: # 15 minutes TTL
+                    zombies.append(sid)
+                    
+        for sid in zombies:
+            logger.info(f"🌐 [WebInspector] Session {sid} has been idle for >15m. Running zombie cleanup...")
+            await cls.stop_session(sid)
+
+    @classmethod
+    async def _handle_request(cls, session_id: str, request):
+        try:
+            if request.resource_type in ["fetch", "xhr"]:
+                session = _active_sessions.get(session_id)
+                if session:
+                    headers = request.headers
+                    post_data = request.post_data
+                    
+                    req_data = {
+                        "method": request.method,
+                        "url": request.url,
+                        "headers": headers,
+                        "body": post_data,
+                        "timestamp": int(time.time() * 1000)
+                    }
+                    session["requests"].append(req_data)
+        except Exception as e:
+            logger.warning(f"Error intercepting request: {e}")
+
+    @classmethod
+    async def get_snapshot(cls, session_id: str, skip_tree: bool = False) -> dict:
+        """Takes a screenshot and extracts the interactive DOM tree."""
+        session = _active_sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found.")
+
+        session["last_accessed"] = time.time()
+        page: Page = session["page"]
+        try:
+            logger.info(f"🌐 [WebInspector] Taking snapshot for {session_id} (skip_tree={skip_tree})...")
+            # 1. Screenshot
+            try:
+                # Bypass manual screenshot if CDP Screencast is active
+                if "cdp_client" in session:
+                    screenshot_bytes = b""
+                else:
+                    screenshot_bytes = await page.screenshot(timeout=20000, full_page=False, type="jpeg", quality=60)
+            except Exception as ss_err:
+                logger.warning(f"🌐 [WebInspector] Screenshot failed for {session_id}: {ss_err}")
+                screenshot_bytes = b""
+
+            if skip_tree:
+                return {
+                    "has_binary_image": bool(screenshot_bytes),
+                    "url": page.url,
+                    "title": await page.title()
+                }, screenshot_bytes
+
+            # 2. Extract Interactive Elements
+            logger.info(f"🌐 [WebInspector] Extracting DOM tree...")
+            eval_res = await page.evaluate("window.__getQAFlowSnapshot()")
 
             # Extract and clear captured requests
             captured_requests = session.get("requests", []).copy()
@@ -380,13 +424,13 @@ class WebInspectorService:
 
             # Return unified result
             return {
-                "image_b64": b64_image,
+                "has_binary_image": bool(screenshot_bytes),
                 "tree": eval_res.get("tree", []),
                 "caret": eval_res.get("caret"),
                 "url": page.url,
                 "title": await page.title(),
                 "captured_requests": captured_requests
-            }
+            }, screenshot_bytes
         except Exception as e:
             logger.error(f"🌐 [WebInspector] Snapshot failed: {e}")
             raise e
@@ -463,11 +507,11 @@ class WebInspectorService:
                     
                     try:
                         # Standard click handles scrolling automatically
-                        await locator.click(button=button, timeout=30000)
+                        await locator.click(button=button, timeout=4000)
                     except Exception as click_err:
                         # Fallback for obscured elements
                         logger.info(f"🌐 [WebInspector] Click failed for {selector}, retrying with force=True: {click_err}")
-                        await locator.click(button=button, force=True, timeout=10000)
+                        await locator.click(button=button, force=True, timeout=2000)
                 else:
                     # Coordinate-based click: move first to trigger hover, then click
                     x, y = props.get("x"), props.get("y")
@@ -506,7 +550,7 @@ class WebInspectorService:
                 try:
                     # Standard fill() is usually the most reliable for state updates
                     try:
-                        await locator.fill(str(val), timeout=10000)
+                        await locator.fill(str(val), timeout=4000)
                     except Exception as fill_err:
                         logger.warning(f"🌐 [WebInspector] Standard fill failed for {selector}, trying press_sequentially: {fill_err}")
                         await locator.focus()
@@ -520,7 +564,7 @@ class WebInspectorService:
                 except Exception as type_err:
                     logger.warning(f"🌐 [WebInspector] Robust type failed for {selector}, falling back to native fill: {type_err}")
                     try:
-                        await locator.fill(str(val), timeout=3000)
+                        await locator.fill(str(val), timeout=2000)
                     except Exception:
                         # Final attempt: just try to type at the current focus
                         await page.keyboard.type(str(val))
@@ -539,14 +583,14 @@ class WebInspectorService:
 
             # Return fresh state
             if not return_snapshot:
-                return {"success": True}
+                return {"success": True}, b""
                 
-            res = await cls.get_snapshot(session_id, skip_tree=skip_tree)
+            res, image_bytes = await cls.get_snapshot(session_id, skip_tree=skip_tree)
             # Inject auto-synced selectors if available
             last_selectors = session.pop("last_selectors", None)
             if last_selectors:
                 res["auto_selectors"] = last_selectors
-            return res
+            return res, image_bytes
         except Exception as e:
             logger.error(f"🌐 [WebInspector] Interaction failed: {e}")
             raise e
@@ -786,47 +830,44 @@ class WebInspectorService:
             selectors_raw = jit_res.get("selectors", [])
             semantic_name = jit_res.get("semanticName", "Passo")
             
-            # Uniqueness check: Validate how many elements match each suggested selector
-            selectors_with_counts = []
-            for sel in selectors_raw:
+            # Uniqueness check: Validate how many elements match each suggested selector concurrently
+            async def validate_selector(sel):
                 try:
-                    # We use a brief timeout to avoid hanging on complex selectors
                     locator = page.locator(sel)
                     c = await locator.count()
-                    
                     if c == 1:
-                        selectors_with_counts.append({"value": sel, "count": 1})
+                        return [{"value": sel, "count": 1}]
                     elif c > 1:
-                        # Hardening: Find the exact index of the element we clicked among the multiple matches
-                        # This ensures that even for repeated elements, we provide a unique locator
                         all_matches = await locator.all()
-                        found_unique = False
+                        res = []
                         for i, match in enumerate(all_matches):
                             try:
-                                # We check both our injected data-lws-id and other identity attributes
                                 if await match.get_attribute("data-lws-id") == lws_id:
-                                    hardened_sel = f"{sel} >> nth={i}"
-                                    selectors_with_counts.append({"value": hardened_sel, "count": 1})
-                                    found_unique = True
+                                    res.append({"value": f"{sel} >> nth={i}", "count": 1})
                                     break
-                            except: 
-                                continue
-                        
-                        # Keep the non-unique one as an alternative
-                        selectors_with_counts.append({"value": sel, "count": c})
-                    else:
-                        selectors_with_counts.append({"value": sel, "count": 0})
+                            except: pass
+                        res.append({"value": sel, "count": c})
+                        return res
+                    return [{"value": sel, "count": 0}]
                 except Exception:
-                    selectors_with_counts.append({"value": sel, "count": 0})
+                    return [{"value": sel, "count": 0}]
 
-            # Fetch up to 10 bounding boxes for multi-target visual pagination
-            boxes = []
-            for i in range(min(count, 10)):
+            selectors_with_counts = []
+            tasks = [validate_selector(sel) for sel in selectors_raw]
+            results = await asyncio.gather(*tasks)
+            for res_list in results:
+                selectors_with_counts.extend(res_list)
+
+            # Fetch up to 10 bounding boxes concurrently for multi-target visual pagination
+            async def get_box(i):
                 try:
-                    bx = await locators.nth(i).bounding_box()
-                    if bx: boxes.append(bx)
+                    return await locators.nth(i).bounding_box()
                 except Exception:
-                    pass
+                    return None
+            
+            box_tasks = [get_box(i) for i in range(min(count, 10))]
+            box_results = await asyncio.gather(*box_tasks)
+            boxes = [b for b in box_results if b]
             
             # Final Filtering: Only show selectors that are uniquely identifying (exactly 1 match)
             # This eliminates automation errors and ambiguous locators
@@ -846,3 +887,48 @@ class WebInspectorService:
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+import threading
+_playwright_loop = asyncio.new_event_loop()
+def _run_playwright_loop():
+    asyncio.set_event_loop(_playwright_loop)
+    _playwright_loop.run_forever()
+threading.Thread(target=_run_playwright_loop, daemon=True).start()
+
+class WebInspectorService:
+
+    @classmethod
+    async def register_frame_queue(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.register_frame_queue(*args, **kwargs))
+    @classmethod
+    async def _dispatch(cls, coro):
+        future = asyncio.run_coroutine_threadsafe(coro, _playwright_loop)
+        return await asyncio.wrap_future(future)
+
+    @classmethod
+    async def start_session(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.start_session(*args, **kwargs))
+
+    @classmethod
+    async def stop_session(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.stop_session(*args, **kwargs))
+
+    @classmethod
+    async def get_snapshot(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.get_snapshot(*args, **kwargs))
+
+    @classmethod
+    async def resize_session(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.resize_session(*args, **kwargs))
+
+    @classmethod
+    async def interact(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.interact(*args, **kwargs))
+
+    @classmethod
+    async def test_selector(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.test_selector(*args, **kwargs))
+
+    @classmethod
+    async def generate_selectors_for_element(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.generate_selectors_for_element(*args, **kwargs))

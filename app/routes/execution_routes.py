@@ -25,6 +25,9 @@ class ExecutionRequest(BaseModel):
     capture_video: Optional[bool] = False # Optional flag to record video
     capture_screenshot: Optional[bool] = False # Optional flag to capture per-step screenshots
     visible_execution: Optional[bool] = False # Run with visible browser window (headless=False)
+    timeout_ms: Optional[int] = 5000 # Step timeout limit
+    virtual_users: Optional[int] = 2 # Reused for step retries
+    ramp_up_seconds: Optional[int] = 0 # Reused for flow retries
 
 from app.auth import get_current_user
 from app.models.user_models import UserDB
@@ -70,6 +73,9 @@ def trigger_execution(
         capture_video=req.capture_video,
         capture_screenshot=req.capture_screenshot,
         visible_execution=req.visible_execution,
+        duration_seconds=req.timeout_ms, # Repurposing duration_seconds for step timeout in E2E
+        virtual_users=req.virtual_users, # Repurposing for retryActions
+        ramp_up_seconds=req.ramp_up_seconds, # Repurposing for retryTest
 
         company_id=current_user.company_id, # Use Auth
         user_id=current_user.id # Use Auth

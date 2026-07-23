@@ -116,3 +116,45 @@ def get_cards_inventory(
 ):
     """Retorna o inventário de cards da empresa"""
     return FlowService.get_cards_inventory(db, company_id=current_user.company_id)
+
+from app.schemas.flow_schemas import TestDbSchema
+from app.services.database_executor_service import DatabaseExecutorService
+from app.services.variable_service import VariableService
+
+@router.post("/test-db")
+def test_db_connection(
+    data: TestDbSchema,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """Testa uma consulta de banco de dados e retorna o resultado"""
+    variables_dict = {}
+    
+    if data.environmentId:
+        from app.models.variable_model import Variable
+        vars_db = db.query(Variable).filter(Variable.environment_id == data.environmentId).all()
+        variables_dict = {v.name: v.value for v in vars_db}
+
+    step_data = {
+        "connection_string": data.connectionString,
+        "query": data.query,
+        "timeout": 10,
+        "assertions": data.assertions or [],
+        "extracts": data.extracts or []
+    }
+    
+    return DatabaseExecutorService.execute_db_step(step_data, variables_dict)
+
+from app.schemas.flow_schemas import HealStepSchema
+@router.put("/heal-step")
+def heal_flow_step(
+    data: HealStepSchema,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """Aplica uma correção de auto-healing ao fluxo persistido"""
+    try:
+        updated_flow = FlowService.apply_healing(db, data.project_id, current_user.company_id, data.flow_id, data.node_id, data.old_selector, data.new_selector)
+        return {"status": "success", "message": "Healing applied successfully", "flow": updated_flow}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))

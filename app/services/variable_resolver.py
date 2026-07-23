@@ -95,11 +95,28 @@ def replace_vars(text: str, variables: dict) -> str:
     The variables dict can contain:
       - Direct string values: {"VAR_NAME": "value"}
       - ORM objects with .name and .value attributes
+      - Dictionaries with 'name' and 'value' keys
     
     Matching is case-insensitive (normalized to UPPER).
     """
     if not text or not isinstance(text, str):
         return text
+
+    def get_attr(obj, attr, default=None):
+        if isinstance(obj, dict):
+            return obj.get(attr, default)
+        return getattr(obj, attr, default)
+
+    def has_attr(obj, attr):
+        if isinstance(obj, dict):
+            return attr in obj
+        return hasattr(obj, attr)
+
+    def set_attr(obj, attr, value):
+        if isinstance(obj, dict):
+            obj[attr] = value
+        else:
+            setattr(obj, attr, value)
 
     def replacer(match):
         var_name = match.group(1).strip().upper()
@@ -108,30 +125,30 @@ def replace_vars(text: str, variables: dict) -> str:
         if var_name in variables:
             val = variables[var_name]
             
-            # If it's an ORM Variable object and has a faker_type, generate it dynamically
-            if hasattr(val, 'type') and val.type == 'faker' and getattr(val, 'faker_type', None):
-                if not hasattr(val, '_generated_value'):
-                    dynamic_val = _generate_faker_value(val.faker_type, getattr(val, 'faker_options', {}))
-                    setattr(val, '_generated_value', dynamic_val)
+            # If it's a Variable object/dict and has a faker_type, generate it dynamically
+            if has_attr(val, 'type') and get_attr(val, 'type') == 'faker' and get_attr(val, 'faker_type'):
+                if not has_attr(val, '_generated_value'):
+                    dynamic_val = _generate_faker_value(get_attr(val, 'faker_type'), get_attr(val, 'faker_options', {}))
+                    set_attr(val, '_generated_value', dynamic_val)
                     logger.debug(f"Generated and cached dynamic faker value for '{var_name}': {dynamic_val}")
-                return str(val._generated_value)
+                return str(get_attr(val, '_generated_value'))
                 
-            if hasattr(val, 'value'):
-                return str(val.value)
+            if has_attr(val, 'value'):
+                return str(get_attr(val, 'value'))
             return str(val)
 
-        # 2. Fallback: scan ORM objects by .name attribute
+        # 2. Fallback: scan objects by .name attribute
         for v in variables.values():
-            if hasattr(v, 'name') and v.name.upper() == var_name:
-                if hasattr(v, 'type') and v.type == 'faker' and getattr(v, 'faker_type', None):
-                    if not hasattr(v, '_generated_value'):
-                        dynamic_val = _generate_faker_value(v.faker_type, getattr(v, 'faker_options', {}))
-                        setattr(v, '_generated_value', dynamic_val)
+            if has_attr(v, 'name') and get_attr(v, 'name').upper() == var_name:
+                if has_attr(v, 'type') and get_attr(v, 'type') == 'faker' and get_attr(v, 'faker_type'):
+                    if not has_attr(v, '_generated_value'):
+                        dynamic_val = _generate_faker_value(get_attr(v, 'faker_type'), get_attr(v, 'faker_options', {}))
+                        set_attr(v, '_generated_value', dynamic_val)
                         logger.debug(f"Generated and cached dynamic faker value for '{var_name}' (Fallback Match): {dynamic_val}")
-                    return str(v._generated_value)
+                    return str(get_attr(v, '_generated_value'))
                     
-                logger.debug(f"Replaced '{match.group(1)}' with '{v.value}' (Fallback Match)")
-                return str(v.value)
+                logger.debug(f"Replaced '{match.group(1)}' with '{get_attr(v, 'value')}' (Fallback Match)")
+                return str(get_attr(v, 'value'))
 
         # 3. Not found — keep original placeholder
         logger.warning(f"Variable '{var_name}' NOT FOUND. Available: {list(variables.keys())}")

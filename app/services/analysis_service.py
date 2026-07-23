@@ -536,8 +536,13 @@ class AnalysisService:
         ```
         
         Analyze the HTML. The class, ID, or structure might have changed slightly from the broken selector.
-        Identify the correct new CSS Selector (or XPath if CSS is impossible) for the intended element.
-        Return ONLY the raw selector string. No markdown formatting, no explanations, no JSON. Just the string the automation engine can use directly (e.g. `button#new-login` or `[name="email_addr"]`).
+        Identify the correct new Playwright locator strategy for the intended element.
+        CRITICAL RULES:
+        1. Ensure your selector is STRICTLY UNIQUE and identifies EXACTLY ONE element on the page.
+        2. Prefer exact text matches (e.g., `text="Exact Text"`) or specific attributes (e.g., `[data-testid="submit"]`, `button[type="submit"]`).
+        3. AVOID generic substring matches like `:has-text("Login")` if there are multiple elements containing that text.
+        4. NEVER use Playwright JS methods inside the selector string (DO NOT use `.exact()`, `.nth()`, `.first()`). The string must be a pure CSS or text selector.
+        5. Return ONLY the raw selector string. No markdown formatting, no explanations, no JSON. Just the string the automation engine can use directly with Playwright (e.g. `button#new-login`, `text="Submit"`, or `[name="email_addr"]`).
         """
         
         try:
@@ -550,14 +555,14 @@ class AnalysisService:
                 url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
                 resp = requests.post(url, headers=headers, json=data, timeout=20)
                 if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
+                    return resp.json()["choices"][0]["message"]["content"].replace("```", "").replace("`", "").strip()
 
             elif settings.ai_provider == "anthropic":
                 headers = {"x-api-key": settings.ai_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
                 data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 100}
                 resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=20)
                 if resp.status_code == 200:
-                    return resp.json()["content"][0]["text"].replace("```", "").strip()
+                    return resp.json()["content"][0]["text"].replace("```", "").replace("`", "").strip()
 
             elif settings.ai_provider == "gemini":
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
@@ -565,14 +570,14 @@ class AnalysisService:
                 resp = requests.post(url, json=data, timeout=20)
                 if resp.status_code == 200:
                     text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                    return text.replace("```", "").strip()
+                    return text.replace("```", "").replace("`", "").strip()
             
             elif settings.ai_provider == "deepseek":
                  headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
                  data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.0, "max_tokens": 100}
                  resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=20)
                  if resp.status_code == 200:
-                     return resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
+                     return resp.json()["choices"][0]["message"]["content"].replace("```", "").replace("`", "").strip()
             
             elif settings.ai_provider == "ollama":
                 from app.config import settings as app_settings
@@ -603,7 +608,7 @@ class AnalysisService:
                     data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
                     resp = requests.post(url, headers=headers, json=data, timeout=30)
                     if resp.status_code == 200:
-                        selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
+                        selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").replace("`", "").strip()
                         return selector
                     else:
                         logger.error(f"License Manager returned error: {resp.status_code} - {resp.text}")
@@ -620,7 +625,7 @@ class AnalysisService:
                     logger.info(f"📡 [Auto-Heal] Ollama Req: {url}")
                     resp = requests.post(url, headers=headers, json=data, timeout=30)
                     if resp.status_code == 200:
-                        selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").strip()
+                        selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").replace("`", "").strip()
                         logger.info(f"✨ [Auto-Heal] Ollama Returned: {selector}")
                         return selector
                     else:

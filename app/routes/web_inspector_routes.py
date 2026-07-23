@@ -1,9 +1,10 @@
 import traceback
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import logging
 import uuid
+import json
 
 from app.services.web_inspector_service import WebInspectorService
 
@@ -14,13 +15,98 @@ router = APIRouter()
 class SessionStartPayload(BaseModel):
     steps: Optional[List[Dict[str, Any]]] = None
 
+@router.websocket("/session/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    logger.info(f"🟢 [WebSocket] Client connected to session {session_id}")
+    
+    import asyncio
+    
+    frame_queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    
+    await WebInspectorService.register_frame_queue(session_id, frame_queue, loop)
+    
+    async def frame_sender():
+        try:
+            while True:
+                frame_bytes = await frame_queue.get()
+                await websocket.send_bytes(frame_bytes)
+        except Exception:
+            pass
+            
+    sender_task = asyncio.create_task(frame_sender())
+    
+    try:
+        while True:
+            data = await websocket.receive_json()
+            message_id = data.get("messageId")
+            action_type = data.get("type")
+            payload = data.get("payload", {})
+            skip_tree = data.get("skip_tree", False)
+            
+            try:
+                if action_type == "interact":
+                    result, image_bytes = await WebInspectorService.interact(session_id, payload, skip_tree=skip_tree)
+                    await websocket.send_json({"messageId": message_id, "success": True, "data": result})
+                    if result.get("has_binary_image") and image_bytes:
+                        await websocket.send_bytes(image_bytes)
+                    
+                elif action_type == "snapshot":
+                    result, image_bytes = await WebInspectorService.get_snapshot(session_id, skip_tree=skip_tree)
+                    await websocket.send_json({"messageId": message_id, "success": True, "data": result})
+                    if result.get("has_binary_image") and image_bytes:
+                        await websocket.send_bytes(image_bytes)
+                    
+                elif action_type == "resize":
+                    width = payload.get("width", 1280)
+                    height = payload.get("height", 720)
+                    result, image_bytes = await WebInspectorService.resize_session(session_id, width, height)
+                    await websocket.send_json({"messageId": message_id, "success": True, "data": result})
+                    if result.get("has_binary_image") and image_bytes:
+                        await websocket.send_bytes(image_bytes)
+                
+                elif action_type == "test-selector":
+                    selector = payload.get("selector")
+                    if not selector:
+                        await websocket.send_json({"messageId": message_id, "success": False, "error": "Selector is empty."})
+                    else:
+                        result = await WebInspectorService.test_selector(session_id, selector)
+                        await websocket.send_json({"messageId": message_id, "success": True, "data": result})
+                        
+                elif action_type == "generate-selectors":
+                    text = payload.get("text")
+                    lws_id = payload.get("lwsId")
+                    if not text and not lws_id:
+                        await websocket.send_json({"messageId": message_id, "success": False, "error": "Forneça o text ou lwsId do elemento."})
+                    else:
+                        result = await WebInspectorService.generate_selectors_for_element(session_id, text, lws_id)
+                        await websocket.send_json({"messageId": message_id, "success": True, "data": result})
+                
+                else:
+                    await websocket.send_json({"messageId": message_id, "success": False, "error": f"Unknown action type: {action_type}"})
+                    
+            except Exception as e:
+                logger.error(f"🔴 [WebSocket] action {action_type} failed: {e}")
+                traceback.print_exc()
+                # Send error back so frontend Promise can reject
+                await websocket.send_json({"messageId": message_id, "success": False, "error": str(e)})
+                
+    except WebSocketDisconnect:
+        logger.info(f"⚪ [WebSocket] disconnected for session {session_id}")
+    except Exception as e:
+        logger.error(f"🔴 [WebSocket] connection error for session {session_id}: {e}")
+
 @router.post("/session/start")
 async def start_web_session(payload: SessionStartPayload = None, initial_url: str = None):
     """Starts a live web session."""
     session_id = str(uuid.uuid4())
     try:
+        import base64
         steps = payload.steps if payload else None
-        snapshot = await WebInspectorService.start_session(session_id, initial_url, steps=steps)
+        snapshot, image_bytes = await WebInspectorService.start_session(session_id, initial_url, steps=steps)
+        if image_bytes:
+            snapshot["image_b64"] = base64.b64encode(image_bytes).decode("utf-8")
         return {"session_id": session_id, **snapshot}
     except Exception as e:
         logger.error(f"Failed to start web session: {e}")

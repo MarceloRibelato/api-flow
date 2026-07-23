@@ -79,6 +79,8 @@ class FlowCardDataDB(Base):
     bdd_scenarios = Column(JSON, default=list) # Changed from dict to list for better default consistency
     api_calls = Column(JSON, default=list)
     e2e_steps = Column(JSON, default=list)
+    db_queries = Column(JSON, default=list)
+    message_queues = Column(JSON, default=list)
     env_data = Column(JSON, default=dict)
 
     flow = relationship("FlowDB", back_populates="flow_card_data")

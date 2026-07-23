@@ -159,6 +159,8 @@ class FlowService:
                 description=c.description,
                 bdd_scenarios=c.bddScenarios or [],
                 api_calls=api_calls,
+                db_queries=c.dbQueries or [],
+                message_queues=[mq.model_dump() if hasattr(mq, 'model_dump') else mq for mq in (c.messageQueues or [])],
                 env_data=env_data_dict
             )
             db.add(card_db)
@@ -229,6 +231,8 @@ class FlowService:
                 "description": c.description,
                 "bddScenarios": c.bdd_scenarios or [],
                 "apiCalls": c.api_calls or [],
+                "dbQueries": c.db_queries or [],
+                "messageQueues": c.message_queues or [],
                 "e2eSteps": steps,
                 "envData": c.env_data or {}
             }
@@ -360,4 +364,49 @@ class FlowService:
             "cards": inventory_cards,
             "edges": inventory_edges
         }
+
+    @staticmethod
+    def apply_healing(db: Session, project_id: int, company_id: int, flow_id: int, node_id: str, old_selector: str, new_selector: str):
+        # 1. Carregar fluxo atual
+        flow_data = FlowService.load(db, project_id, company_id, flow_id)
+        if not flow_data:
+            raise ValueError(f"Fluxo {flow_id} não encontrado")
+
+        card_data = flow_data.get('cardData', {})
+        if node_id not in card_data:
+            raise ValueError(f"Nó {node_id} não encontrado no fluxo")
+
+        node = card_data[node_id]
+        e2e_steps = node.get('e2eSteps', [])
+        
+        # 2. Localizar e substituir o seletor
+        replaced = False
+        for step in e2e_steps:
+            props = step.get('properties', {})
+            db_selector = str(props.get('selector', '')).strip()
+            target_selector = str(old_selector).strip()
+            
+            if db_selector == target_selector:
+                props['selector'] = new_selector
+                step['properties'] = props
+                replaced = True
+                break
+
+        if not replaced:
+            available = [str(s.get('properties', {}).get('selector', '')) for s in e2e_steps]
+            raise ValueError(f"Passo com o seletor antigo '{old_selector}' não encontrado no nó {node_id}. Seletores neste nó: {available}")
+
+        # 3. Preparar schema para salvar
+        save_payload = FlowSaveSchema(
+            projectId=project_id,
+            flowId=flow_id,
+            name=flow_data.get('name'),
+            flow_type=flow_data.get('flow_type', 'api'),
+            nodes=flow_data.get('nodes', []),
+            edges=flow_data.get('edges', []),
+            cardData=card_data
+        )
+
+        # 4. Salvar fluxo
+        return FlowService.save(db, save_payload, company_id, 1)
 

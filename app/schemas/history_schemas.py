@@ -102,6 +102,7 @@ class ExecutionHistorySummary(BaseModel):
     environment_name: Optional[str] = None
     node_name: Optional[str] = None  # Added node_name
     node_id: Optional[Union[int, str]] = None  # Added node_id
+    project_id: Optional[int] = None # Added project_id
     api_id: Optional[Union[int, str]] = None
     flow_id: Optional[Union[int, str]] = None
     api_name: Optional[str] = None  # RESTORED: Critical for matching in frontend
