@@ -123,6 +123,22 @@ class FrontRecordingService:
         if not interactions:
             return
 
+        # Common telemetry and analytics domains to ignore during flow generation
+        TELEMETRY_DOMAINS = [
+            "backtrace.io", "sentry.io", "google-analytics.com", "googletagmanager.com",
+            "datadoghq.com", "newrelic.com", "mixpanel.com", "segment.com",
+            "facebook.net", "facebook.com/tr", "doubleclick.net", "clarity.ms",
+            "hotjar.com", "optimizely.com", "stats.g.doubleclick.net",
+            "track.hubspot.com", "analytics"
+        ]
+
+        def is_telemetry(url: str) -> bool:
+            if not url: return True
+            for domain in TELEMETRY_DOMAINS:
+                if domain in url:
+                    return True
+            return False
+
         # 1. Group interactions by step name or Page URL
         steps = []
         current_step = {"name": "Início", "inters": []}
@@ -145,6 +161,10 @@ class FrontRecordingService:
         # Assign requests to steps to avoid orphans
         if recording.requests and steps:
             for req in recording.requests:
+                req_url = req.get('url', '')
+                if is_telemetry(req_url):
+                    continue
+
                 req_page_url = req.get('pageUrl')
                 req_custom_name = req.get('customNodeName')
                 req_ts = req.get('timestamp', 0)
@@ -188,7 +208,37 @@ class FrontRecordingService:
         
         spacing_x = 300
         
-        # No Master Node appended anymore. Starts with recorded steps.
+        # ADD START NODE
+        nodes.append({
+            "id": "start",
+            "type": "startNode",
+            "position": {"x": -300, "y": 100},
+            "data": {
+                "name": "Start", 
+                "color": "#10b981",
+                "childCount": 0,
+                "isCollapsed": False
+            }
+        })
+        card_data["start"] = {
+            "name": "Start",
+            "color": "#10b981",
+            "description": "Início do fluxo",
+            "apiCalls": [],
+            "e2eSteps": [],
+            "bddScenarios": [],
+            "envData": {}
+        }
+
+        if steps:
+            edges.append({
+                "id": "edge-start-node-recorded-0",
+                "source": "start",
+                "target": "node-recorded-0",
+                "type": "buttonedge",
+                "animated": True
+            })
+        
         for idx, step in enumerate(steps):
             node_id = f"node-recorded-{idx}"
             

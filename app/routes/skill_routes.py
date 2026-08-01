@@ -249,8 +249,37 @@ def generate_alternatives(
         raise HTTPException(status_code=500, detail=str(e))
 
 def _normalize_card_data(card_data: dict):
-    """Normalizes API calls to match Pydantic schema."""
+    """Normalizes API calls and E2E steps to match Pydantic schema."""
     for card_id, cd in card_data.items():
+        
+        # 1. Normalize E2E Steps
+        if "steps" in cd and "e2eSteps" not in cd:
+            cd["e2eSteps"] = cd.pop("steps")
+        if "e2e_steps" in cd and "e2eSteps" not in cd:
+            cd["e2eSteps"] = cd.pop("e2e_steps")
+            
+        if "e2eSteps" in cd and isinstance(cd["e2eSteps"], list):
+            import uuid
+            for idx, step in enumerate(cd["e2eSteps"]):
+                if not isinstance(step, dict): continue
+                if "id" not in step:
+                    step["id"] = f"ai-step-{uuid.uuid4().hex[:6]}"
+                if "type" not in step:
+                    step["type"] = "action"
+                if "name" not in step:
+                    step["name"] = f"Passo {idx+1}"
+                if "properties" not in step:
+                    step["properties"] = {}
+                
+                # Move hallucinated root properties into the 'properties' dictionary
+                if "selector" in step and "selector" not in step["properties"]:
+                    step["properties"]["selector"] = step.pop("selector")
+                if "value" in step and "value" not in step["properties"]:
+                    step["properties"]["value"] = step.pop("value")
+                if "text" in step and "value" not in step["properties"]:
+                    step["properties"]["value"] = step.pop("text")
+                
+        # 2. Normalize API Calls
         all_api_calls_lists = []
         if "apiCalls" in cd:
             all_api_calls_lists.append(cd.get("apiCalls", []))
@@ -338,16 +367,23 @@ def save_generated_flow(
     from app.models.flow_models import FlowDB
     
     try:
-        if "projectId" not in payload and flow_id:
+        if flow_id:
             flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
             if flow:
-                payload["projectId"] = flow.project_id
+                if "projectId" not in payload:
+                    payload["projectId"] = flow.project_id
+                if "flow_type" not in payload or payload["flow_type"] not in ["api", "e2e", "web", "mobile"]:
+                    payload["flow_type"] = flow.flow_type
         
         if "projectId" not in payload:
              payload["projectId"] = 1 # Fallback safe project_id
              
         if "flow_type" not in payload:
              payload["flow_type"] = "api"
+             
+        # Normalize flow_type web to e2e
+        if payload["flow_type"] == "web":
+             payload["flow_type"] = "e2e"
              
         # Merge with original flow to prevent data loss and ADD AS NEW BRANCHES
         if flow_id:
@@ -459,6 +495,49 @@ def save_generated_flow(
                         new_key = id_mapping.get(str(k), str(k))
                         if new_key not in new_card_data:
                             new_card_data[new_key] = payload["cardData"][k]
+                            
+                # Ensure every new custom node has an entry in new_card_data!
+                for n in new_nodes:
+                    if n.get("type", "custom") != "startNode" and n.get("id") != "start":
+                        n_id = n.get("id")
+                        if n_id not in new_card_data:
+                            old_key = next((k for k, v in id_mapping.items() if v == n_id), None)
+                            if not old_key and suffix in n_id:
+                                old_key = n_id.replace(suffix, "")
+                                
+                            if old_key and old_key in orig_card_data:
+                                import copy
+                                new_card_data[n_id] = copy.deepcopy(orig_card_data[old_key])
+                            else:
+                                new_card_data[n_id] = {}
+
+                # 3. Recover missing E2E selectors from the original flow
+                for new_key, card in new_card_data.items():
+                    old_key = next((k for k, v in id_mapping.items() if v == new_key), None)
+                    if not old_key and suffix in new_key:
+                        old_key = new_key.replace(suffix, "")
+                        
+                    if old_key and old_key in orig_card_data:
+                        orig_steps = orig_card_data[old_key].get("e2eSteps", [])
+                        new_steps = card.get("e2eSteps", card.get("steps", card.get("e2e_steps", [])))
+                        
+                        if not new_steps and orig_steps:
+                            import copy
+                            card["e2eSteps"] = copy.deepcopy(orig_steps)
+                            new_steps = card["e2eSteps"]
+                        
+                        if isinstance(new_steps, list) and isinstance(orig_steps, list):
+                            for i, n_step in enumerate(new_steps):
+                                if not isinstance(n_step, dict): continue
+                                if i < len(orig_steps) and isinstance(orig_steps[i], dict):
+                                    o_props = orig_steps[i].get("properties", {})
+                                    o_selector = o_props.get("selector")
+                                    
+                                    n_props = n_step.get("properties", {})
+                                    if o_selector and "selector" not in n_step and "selector" not in n_props:
+                                        if "properties" not in n_step:
+                                            n_step["properties"] = {}
+                                        n_step["properties"]["selector"] = o_selector
                         
                 # Force the first generated custom node to adopt the alternative scenario's name
                 # This fixes the issue where the AI forgets to rename the node inside cardData

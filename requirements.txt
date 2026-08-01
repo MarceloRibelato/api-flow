@@ -33,3 +33,5 @@ pymysql
 pika
 boto3
 azure-servicebus
+opencv-python-headless
+numpy

@@ -65,7 +65,8 @@ const results = [];
                 
                 interactables.forEach((el, index) => {
                     const rect = el.getBoundingClientRect();
-                    if (rect.width === 0 || rect.height === 0 || window.getComputedStyle(el).display === 'none') return;
+                    const style = window.getComputedStyle(el);
+                    if (rect.width === 0 || rect.height === 0 || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
 
                     // Imprint JIT locator for deferred Playwright targeting
                     el.setAttribute('data-lws-id', `lws-${index}`);
@@ -78,6 +79,19 @@ const results = [];
                         placeholder: el.placeholder?.substring(0, 50) || '',
                         nameAttr: el.name || '',
                         idAttr: el.id || '',
+                        pointerEvents: window.getComputedStyle(el).pointerEvents,
+                        className: (typeof el.className === 'string' ? el.className : '').substring(0, 100),
+                        labelAttr: (el.getAttribute('aria-label') || '').substring(0, 50) || (function(){
+                            try {
+                                if (el.id) {
+                                    let lbl = document.querySelector(`label[for="${el.id}"]`);
+                                    if (lbl) return lbl.innerText.trim().substring(0, 50);
+                                }
+                                let pLbl = el.closest('label');
+                                if (pLbl) return pLbl.innerText.trim().substring(0, 50);
+                            } catch(e) {}
+                            return '';
+                        })(),
                         bounds: {
                             x: rect.x,
                             y: rect.y,
@@ -499,7 +513,7 @@ class _WebInspectorServiceImpl:
                     # Ensure element is in view
                     locator = page.locator(selector).first
                     try:
-                        await locator.scroll_into_view_if_needed(timeout=2000)
+                        await locator.scroll_into_view_if_needed(timeout=5000)
                         # Move to element first so hover/focus CSS effects fire (real-user behaviour)
                         await locator.hover(timeout=1000)
                     except Exception:
@@ -507,11 +521,11 @@ class _WebInspectorServiceImpl:
                     
                     try:
                         # Standard click handles scrolling automatically
-                        await locator.click(button=button, timeout=4000)
+                        await locator.click(button=button, timeout=15000)
                     except Exception as click_err:
                         # Fallback for obscured elements
                         logger.info(f"🌐 [WebInspector] Click failed for {selector}, retrying with force=True: {click_err}")
-                        await locator.click(button=button, force=True, timeout=2000)
+                        await locator.click(button=button, force=True, timeout=8000)
                 else:
                     # Coordinate-based click: move first to trigger hover, then click
                     x, y = props.get("x"), props.get("y")
@@ -550,7 +564,7 @@ class _WebInspectorServiceImpl:
                 try:
                     # Standard fill() is usually the most reliable for state updates
                     try:
-                        await locator.fill(str(val), timeout=4000)
+                        await locator.fill(str(val), timeout=15000)
                     except Exception as fill_err:
                         logger.warning(f"🌐 [WebInspector] Standard fill failed for {selector}, trying press_sequentially: {fill_err}")
                         await locator.focus()
@@ -564,7 +578,7 @@ class _WebInspectorServiceImpl:
                 except Exception as type_err:
                     logger.warning(f"🌐 [WebInspector] Robust type failed for {selector}, falling back to native fill: {type_err}")
                     try:
-                        await locator.fill(str(val), timeout=2000)
+                        await locator.fill(str(val), timeout=8000)
                     except Exception:
                         # Final attempt: just try to type at the current focus
                         await page.keyboard.type(str(val))
@@ -585,6 +599,8 @@ class _WebInspectorServiceImpl:
             if not return_snapshot:
                 return {"success": True}, b""
                 
+            # Wait for SPA animations/routing to settle before capturing the new DOM tree
+            await asyncio.sleep(0.5)
             res, image_bytes = await cls.get_snapshot(session_id, skip_tree=skip_tree)
             # Inject auto-synced selectors if available
             last_selectors = session.pop("last_selectors", None)

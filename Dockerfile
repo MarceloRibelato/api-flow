@@ -37,6 +37,10 @@ COPY . .
 # Expose port 8000
 EXPOSE 8000
 
+# Set entrypoint
+RUN chmod +x /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]
+
 # Command to run the application
 # Using uvicorn directly for simplicity, but gunicorn+uvicorn is better for prod
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

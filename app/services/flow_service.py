@@ -408,5 +408,6 @@ class FlowService:
         )
 
         # 4. Salvar fluxo
-        return FlowService.save(db, save_payload, company_id, 1)
+        FlowService.save(db, save_payload, company_id, 1)
+        return FlowService.load(db, project_id, company_id, flow_id)
 

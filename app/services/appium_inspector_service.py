@@ -3,16 +3,18 @@ import json
 import xml.etree.ElementTree as ET
 import re
 from typing import Optional, Dict, Any, List
-from threading import Lock
 import time
+import redis
 
 from app.services.appium_executor_service import AppiumExecutorService
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Basic lock to prevent concurrent sessions colliding on single executor
-# In a robust production environment, this should be a session pool dict.
-_session_lock = Lock()
+# Configuração do Redis para estado compartilhado usando settings
+redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+
+# Em memória (Cache L1) local do Worker atual
 _active_sessions: Dict[str, AppiumExecutorService] = {}
 
 class AppiumInspectorService:
@@ -27,57 +29,84 @@ class AppiumInspectorService:
     @classmethod
     def start_session(cls, session_id: str, db, product_id: int, steps: List[Dict[str, Any]] = None) -> dict:
         """Starts a persistent driver session if one does not exist."""
-        with _session_lock:
-            if session_id in _active_sessions:
-                logger.info(f"🔍 [Inspector] Session {session_id} is already active.")
-                return cls.get_snapshot(session_id)
+        # 1. Verifica cache L1 (Memória local)
+        if session_id in _active_sessions:
+            logger.info(f"🔍 [Inspector] Session {session_id} is already active locally.")
+            return cls.get_snapshot(session_id)
+            
+        # 2. Verifica cache L2 (Redis) para ver se outro worker já iniciou
+        try:
+            metadata = redis_client.get(f"appium_session:{session_id}")
+            if metadata:
+                logger.info(f"🔍 [Inspector] Session {session_id} exists in Redis. Attaching proxy logic here.")
+                # TODO: Implement webdriver.Remote override to attach to existing Appium Session ID
+                # For now, we will fallback to restarting or using the local active session if available
+        except Exception as e:
+            logger.warning(f"🔍 [Inspector] Redis fetch failed: {e}")
 
-            logger.info(f"🔍 [Inspector] Starting new session {session_id} for product {product_id}...")
-            executor = AppiumExecutorService()
-            try:
-                executor.start(db=db, product_id=product_id)
-                _active_sessions[session_id] = executor
-                # If we have steps, try to replay them
-                failed_step_index = None
-                failed_step_error = None
-                
-                if steps:
-                    for idx, step in enumerate(steps):
-                        try:
-                            logger.info(f"🔍 [Inspector] Replaying step {idx}: {step}")
-                            result = executor.execute_step(step, db=db)
-                            if result.get("status", 500) >= 400:
-                                raise Exception(result.get("text", "Unknown Appium Execution Error"))
-                            time.sleep(1.0)
-                        except Exception as e:
-                            logger.error(f"🔍 [Inspector] Replay failed at step {idx}: {e}")
-                            failed_step_index = idx
-                            failed_step_error = str(e)
-                            break
-                            
-                snapshot = cls.get_snapshot(session_id)
-                if failed_step_index is not None:
-                    snapshot["failed_step_index"] = failed_step_index
-                    snapshot["failed_step_error"] = failed_step_error
-                
-                return snapshot
-            except Exception as e:
-                logger.error(f"🔍 [Inspector] Failed to start session: {e}")
-                # Ensure we clean up if start fails
-                if executor._driver:
-                    executor.close()
-                raise e
+        logger.info(f"🔍 [Inspector] Starting new session {session_id} for product {product_id}...")
+        executor = AppiumExecutorService()
+        try:
+            executor.start(db=db, product_id=product_id)
+            _active_sessions[session_id] = executor
+            
+            # Salva metadados no Redis
+            if executor._driver:
+                try:
+                    meta = {
+                        "appium_session_id": executor._driver.session_id,
+                        "server_url": executor._settings.get("server_url", "http://localhost:4723"),
+                        "product_id": product_id
+                    }
+                    redis_client.set(f"appium_session:{session_id}", json.dumps(meta), ex=3600)
+                except Exception as e:
+                    logger.warning(f"🔍 [Inspector] Failed to save session to Redis: {e}")
+            
+            # If we have steps, try to replay them
+            failed_step_index = None
+            failed_step_error = None
+            
+            if steps:
+                for idx, step in enumerate(steps):
+                    try:
+                        logger.info(f"🔍 [Inspector] Replaying step {idx}: {step}")
+                        result = executor.execute_step(step, db=db)
+                        if result.get("status", 500) >= 400:
+                            raise Exception(result.get("text", "Unknown Appium Execution Error"))
+                        time.sleep(1.0)
+                    except Exception as e:
+                        logger.error(f"🔍 [Inspector] Replay failed at step {idx}: {e}")
+                        failed_step_index = idx
+                        failed_step_error = str(e)
+                        break
+                        
+            snapshot = cls.get_snapshot(session_id)
+            if failed_step_index is not None:
+                snapshot["failed_step_index"] = failed_step_index
+                snapshot["failed_step_error"] = failed_step_error
+            
+            return snapshot
+        except Exception as e:
+            logger.error(f"🔍 [Inspector] Failed to start session: {e}")
+            # Ensure we clean up if start fails
+            if executor._driver:
+                executor.close()
+            raise e
 
     @classmethod
     def stop_session(cls, session_id: str):
-        with _session_lock:
-            if session_id in _active_sessions:
-                logger.info(f"🔍 [Inspector] Stopping session {session_id}.")
-                try:
-                    _active_sessions[session_id].close()
-                except Exception as e:
-                    logger.warning(f"🔍 [Inspector] Error while closing session: {e}")
-                del _active_sessions[session_id]
+        if session_id in _active_sessions:
+            logger.info(f"🔍 [Inspector] Stopping session {session_id}.")
+            try:
+                _active_sessions[session_id].close()
+            except Exception as e:
+                logger.warning(f"🔍 [Inspector] Error while closing session: {e}")
+            del _active_sessions[session_id]
+            
+        # Limpa do Redis
+        try:
+            redis_client.delete(f"appium_session:{session_id}")
+        except Exception: pass
 
     @classmethod
     def get_snapshot(cls, session_id: str) -> dict:
@@ -265,14 +294,26 @@ class AppiumInspectorService:
             return {"success": False, "error": "Element not found on current screen."}
             
         selectors = []
-        if target_node.get("resource_id"):
-            selectors.append({"value": f"//*[@resource-id='{target_node['resource_id']}']", "count": 1})
-        if target_node.get("content_desc"):
-            selectors.append({"value": f"//*[@content-desc='{target_node['content_desc']}']", "count": 1})
-        if target_node.get("text"):
-            selectors.append({"value": f"//*[@text='{target_node['text']}']", "count": 1})
+        text_val = target_node.get("text", "")
+        desc_val = target_node.get("content_desc", "")
+        res_val = target_node.get("resource_id", "")
+        name_val = target_node.get("name", "")
+        label_val = target_node.get("label", "")
+        
+        # 1. Native Strategies (High Performance)
+        if res_val:
+            selectors.append({"value": f"id={res_val}", "strategy": "id", "count": 1})
+        if desc_val:
+            selectors.append({"value": f"accessibility_id={desc_val}", "strategy": "accessibility_id", "count": 1})
+            
+        # 2. Universal XPath Fallback (Android + iOS)
+        # Using a unified OR clause to catch properties across platforms
+        val_to_use = text_val or desc_val or res_val or name_val or label_val
+        if val_to_use:
+            uni_xpath = f"//*[@resource-id='{val_to_use}' or @name='{val_to_use}' or @label='{val_to_use}' or @text='{val_to_use}']"
+            selectors.append({"value": uni_xpath, "strategy": "xpath", "count": 1})
             
         if not selectors:
-            selectors.append({"value": f"//{target_node.get('class', '*')}", "count": 1})
+            selectors.append({"value": f"//{target_node.get('class', '*')}", "strategy": "xpath", "count": 1})
             
         return {"success": True, "selectors": selectors}

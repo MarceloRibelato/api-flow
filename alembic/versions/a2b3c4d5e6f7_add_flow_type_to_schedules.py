@@ -16,7 +16,11 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column('schedules', sa.Column('flow_type', sa.String(20), nullable=True, server_default='api'))
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    columns = [c['name'] for c in inspector.get_columns('schedules')]
+    if 'flow_type' not in columns:
+        op.add_column('schedules', sa.Column('flow_type', sa.String(20), nullable=True, server_default='api'))
 
 
 def downgrade():

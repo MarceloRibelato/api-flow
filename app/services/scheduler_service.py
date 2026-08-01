@@ -201,6 +201,7 @@ def execute_job_logic(schedule_id: int):
             s, f = FlowExecutorService.execute_feature_group(
                 db, feature_id, env_id, schedule.company_id, 
                 schedule_id=schedule.id, user_id=schedule.user_id or 1,
+                max_concurrency=getattr(schedule, 'max_concurrency', None),
                 flow_type=getattr(schedule, 'flow_type', 'api'),
                 capture_video=getattr(schedule, 'capture_video', False),
                 capture_screenshot=getattr(schedule, 'capture_screenshot', False),
@@ -221,6 +222,7 @@ def execute_job_logic(schedule_id: int):
             s, f = FlowExecutorService.execute_flow_by_id(
                 db, flow_id, env_id, schedule.company_id, 
                 schedule_id=schedule.id, user_id=schedule.user_id or 1,
+                max_concurrency=getattr(schedule, 'max_concurrency', None),
                 flow_type=getattr(schedule, 'flow_type', 'api'),
                 capture_video=getattr(schedule, 'capture_video', False),
                 capture_screenshot=getattr(schedule, 'capture_screenshot', False),

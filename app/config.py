@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     HISTORY_ARCHIVE_RETENTION_DAYS: int = 180
     MAX_CONCURRENT_FEATURES: int = 5
     
+    # Redis Settings
+    REDIS_URL: str = "redis://localhost:6379/0"
+    
     # License & AI Manager Integration
     LICENSE_MANAGER_URL: str = ""
     QA_FLOW_LICENSE_KEY: str = ""

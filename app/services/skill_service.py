@@ -23,16 +23,57 @@ def _robust_json_parse(text: str) -> Any:
         # Fallback: try to find the outermost array or object
         start_idx = text.find('[')
         start_obj = text.find('{')
+        
+        first_idx = -1
         if start_idx != -1 and (start_obj == -1 or start_idx < start_obj):
-            end_idx = text.rfind(']')
-            if end_idx != -1 and end_idx >= start_idx:
-                text = text[start_idx:end_idx+1]
+            first_idx = start_idx
         elif start_obj != -1:
-            end_idx = text.rfind('}')
-            if end_idx != -1 and end_idx >= start_obj:
-                text = text[start_obj:end_idx+1]
+            first_idx = start_obj
+            
+        if first_idx != -1:
+            text = text[first_idx:]
+            
+        # Strip trailing markdown if left over
+        text = re.sub(r'\s*```[a-zA-Z]*\s*$', '', text)
                 
+    # Remove single-line comments safely (full line or after spaces)
+    text = re.sub(r'(?m)^\s*//.*$', '', text)
+    
+    # Remove trailing commas
     text = re.sub(r',\s*([\]}])', r'\1', text)
+    
+    # Auto-heal truncated JSON
+    stack = []
+    in_string = False
+    escape = False
+    
+    for char in text:
+        if escape:
+            escape = False
+            continue
+        if char == '\\':
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+            
+        if not in_string:
+            if char == '{': stack.append('}')
+            elif char == '[': stack.append(']')
+            elif char in ('}', ']'):
+                if stack and stack[-1] == char:
+                    stack.pop()
+                    
+    if in_string:
+        text += '"'
+        
+    while stack:
+        text += stack.pop()
+        
+    # Fix common pythonisms
+    text = text.replace('True', 'true').replace('False', 'false').replace('None', 'null')
+    
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:

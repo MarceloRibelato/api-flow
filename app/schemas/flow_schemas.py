@@ -64,6 +64,7 @@ class MessageQueueSchema(BaseModel):
 class NodeDataBasic(BaseModel):
     name: str = Field(..., description="Nome exibido no nó")
     color: str = Field("#10b981", description="Cor de destaque do nó")
+    nodeType: Optional[str] = Field("api", description="Tipo do nó: api, database, queue, etc")
     childCount: int = Field(0, description="Número de filhos diretos")
     isCollapsed: bool = Field(False, description="Estado de colapso visual")
     layoutDirection: Optional[str] = Field(None, description="Direção do layout (LR ou TB)")
@@ -74,6 +75,7 @@ class NodeDataBasic(BaseModel):
 class NodeDataFull(BaseModel):
     name: str = Field(..., description="Nome do nó")
     color: str = Field("#10b981", description="Cor do nó")
+    nodeType: Optional[str] = Field("api", description="Tipo do nó: api, database, queue, etc")
     description: str = Field("", description="Descrição do objetivo do nó")
     childCount: int = Field(0, description="Número de filhos")
     isCollapsed: bool = Field(False, description="Estado de colapso")
@@ -109,6 +111,7 @@ class EnvSpecificData(BaseModel):
 class CardDataSchema(BaseModel):
     name: str = Field(..., description="Nome do card")
     color: str = Field("#10b981", description="Cor do card")
+    nodeType: Optional[str] = Field("api", description="Tipo do nó: api, database, queue, etc")
     description: str = Field("", description="Descrição detalhada")
     isMainFlow: bool = Field(False, description="Indica se é o caminho principal (happy path)")
     bddScenarios: List[Dict[str, Any]] = []

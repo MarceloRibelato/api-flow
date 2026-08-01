@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 class HeuristicHealerService:
     @staticmethod
-    def attempt_heal(page, broken_selector: str, action_val: str, step_type: str) -> tuple[str | None, list]:
+    async def attempt_heal(page, broken_selector: str, action_val: str, step_type: str) -> tuple[str | None, list]:
         """
         Tries to automatically heal a selector using local heuristics (Levenshtein distance, exact tag matching).
         Returns a tuple of (best_selector_match, list_of_all_candidates_found).
@@ -41,6 +41,10 @@ class HeuristicHealerService:
                     
                     const tag = el.tagName.toLowerCase();
                     if (['script', 'style', 'meta', 'link', 'noscript', 'svg', 'path', 'iframe'].includes(tag)) continue;
+                    
+                    if (stepType === 'click' && window.getComputedStyle(el).pointerEvents === 'none') {
+                        continue;
+                    }
                     
                     const role = el.getAttribute('role') || '';
                     const type = el.getAttribute('type') || '';
@@ -84,7 +88,7 @@ class HeuristicHealerService:
                 return candidates;
             }"""
             
-            candidates = page.evaluate(js_script, step_type)
+            candidates = await page.evaluate(js_script, step_type)
             if not candidates:
                 logger.info("🔍 [Heuristic-Heal] No valid candidates found in DOM.")
                 return None, []
@@ -129,13 +133,27 @@ class HeuristicHealerService:
                             scored_candidates.append((sim, f"{c['tag']}[name='{c['name']}']"))
                             
                 # Text fallback for clicks
-                if step_type == 'click' and action_val and c['text']:
-                    if action_val.lower() == c['text'].lower():
-                        safe_text = action_val.replace('"', '\\"')
-                        scored_candidates.append((0.99, f"{c['tag']}:text-is(\"{safe_text}\")"))
-                    elif action_val.lower() in c['text'].lower() and len(action_val) > 2:
-                        safe_text = action_val.replace('"', '\\"')
-                        scored_candidates.append((0.95, f"{c['tag']}:has-text(\"{safe_text}\")"))
+                if step_type == 'click':
+                    expected_text = action_val
+                    if not expected_text:
+                        m = re.search(r'text=["\']([^"\']+)["\']', broken_selector)
+                        if not m:
+                            m = re.search(r'has-text\((["\']?)([^"\']+)\1\)', broken_selector)
+                        if m:
+                            expected_text = m.group(1) if len(m.groups()) == 1 else m.group(2)
+                            
+                    if expected_text and c['text']:
+                        if expected_text.lower() == c['text'].lower():
+                            safe_text = expected_text.replace('"', '\\"')
+                            scored_candidates.append((0.99, f"{c['tag']}:text-is(\"{safe_text}\")"))
+                        elif expected_text.lower() in c['text'].lower() and len(expected_text) > 2:
+                            safe_text = expected_text.replace('"', '\\"')
+                            scored_candidates.append((0.95, f"{c['tag']}:has-text(\"{safe_text}\")"))
+                        else:
+                            sim = difflib.SequenceMatcher(None, expected_text.lower(), c['text'].lower()).ratio()
+                            if sim >= 0.75:
+                                safe_text = c['text'].replace('"', '\\"')
+                                scored_candidates.append((sim, f"{c['tag']}:has-text(\"{safe_text}\")"))
                             
                 # Text fallback for types (placeholder)
                 if step_type == 'type' and c['placeholder']:
@@ -160,7 +178,7 @@ class HeuristicHealerService:
             for score, sel in dedup_candidates:
                 try:
                     visible_sel = f"{sel} >> visible=true"
-                    count = page.locator(visible_sel).count()
+                    count = await page.locator(visible_sel).count()
                     if count == 1:
                         logger.info(f"✨ [Heuristic-Heal] Found unique match '{visible_sel}' with {(score*100):.1f}% confidence!")
                         return visible_sel, candidates

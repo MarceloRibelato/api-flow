@@ -365,18 +365,22 @@ class AppiumExecutorService:
 
             elif step_type == 'scroll_to':
                 selector = self._get_platform_selector(props)
-                from appium.webdriver.common.appiumby import AppiumBy
-                try:
-                    self._driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR,
-                        f'new UiScrollable(new UiSelector().scrollable(true))'
-                        f'.scrollIntoView(new UiSelector().descriptionContains("{selector}"))')
-                except Exception:
-                    # Fallback: scroll until element appears
-                    el = self._find_element(selector)
-                    if el:
-                        self._driver.execute_script("mobile: scrollGesture", {
-                            "elementId": el.id, "direction": "down", "percent": 0.75
-                        })
+                platform = str(self._driver.capabilities.get('platformName', 'android')).lower()
+                if platform == 'ios':
+                    self._driver.execute_script("mobile: scroll", {"direction": "down"})
+                else:
+                    from appium.webdriver.common.appiumby import AppiumBy
+                    try:
+                        self._driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR,
+                            f'new UiScrollable(new UiSelector().scrollable(true))'
+                            f'.scrollIntoView(new UiSelector().descriptionContains("{selector}"))')
+                    except Exception:
+                        # Fallback: scroll until element appears
+                        el = self._find_element(selector)
+                        if el:
+                            self._driver.execute_script("mobile: scrollGesture", {
+                                "elementId": el.id, "direction": "down", "percent": 0.75
+                            })
 
             elif step_type == 'drag_drop':
                 from appium.webdriver.common.touch_action import TouchAction
@@ -420,10 +424,18 @@ class AppiumExecutorService:
                 self._driver.shake()
 
             elif step_type == 'back_button':
-                self._driver.press_keycode(4)  # Android KEYCODE_BACK
+                platform = str(self._driver.capabilities.get('platformName', 'android')).lower()
+                if platform == 'ios':
+                    self._driver.execute_script('mobile: swipe', {'direction': 'right'})
+                else:
+                    self._driver.press_keycode(4)  # Android KEYCODE_BACK
 
             elif step_type == 'home_button':
-                self._driver.press_keycode(3)  # Android KEYCODE_HOME
+                platform = str(self._driver.capabilities.get('platformName', 'android')).lower()
+                if platform == 'ios':
+                    self._driver.execute_script('mobile: pressButton', {'name': 'home'})
+                else:
+                    self._driver.press_keycode(3)  # Android KEYCODE_HOME
 
             elif step_type == 'set_location':
                 lat = float(props.get('latitude', -23.5505))
@@ -461,14 +473,13 @@ class AppiumExecutorService:
                         raise AssertionError(f"Element '{selector}' should be disabled")
 
             elif step_type == 'assert_visual':
-                import io
                 import base64
-                from PIL import Image, ImageChops
-                import math
+                import numpy as np
+                import cv2
 
                 selector = self._get_platform_selector(props)
                 base_image_b64 = props.get('base_image_b64', '')
-                tolerance = float(props.get('tolerance', 5.0)) # Percentage difference allowed
+                tolerance = float(props.get('tolerance', 5.0)) # Note: Lower is stricter. With OpenCV, we use matching threshold
 
                 if not base_image_b64:
                     raise AssertionError("No base image provided for visual assertion")
@@ -488,34 +499,40 @@ class AppiumExecutorService:
                     base_bytes = base64.b64decode(base_image_b64.split(',')[1] if ',' in base_image_b64 else base_image_b64)
                     current_bytes = base64.b64decode(current_b64)
                     
-                    img1 = Image.open(io.BytesIO(base_bytes)).convert('RGB')
-                    img2 = Image.open(io.BytesIO(current_bytes)).convert('RGB')
+                    # Convert to numpy arrays for OpenCV
+                    nparr_base = np.frombuffer(base_bytes, np.uint8)
+                    nparr_curr = np.frombuffer(current_bytes, np.uint8)
                     
-                    # Resize img2 to img1 if sizes differ slightly due to resolution shifts
-                    if img1.size != img2.size:
-                        logger.warning(f"Resizing captured image {img2.size} to base image {img1.size}")
-                        img2 = img2.resize(img1.size)
+                    img_base = cv2.imdecode(nparr_base, cv2.IMREAD_COLOR)
+                    img_curr = cv2.imdecode(nparr_curr, cv2.IMREAD_COLOR)
                     
-                    # Calculate difference
-                    diff = ImageChops.difference(img1, img2)
+                    # If sizes differ, OpenCV matchTemplate expects template to be smaller or equal
+                    # So we use resize if necessary, or just compute similarity if same size.
+                    if img_base.shape != img_curr.shape:
+                        logger.warning(f"Resizing captured image {img_curr.shape} to base image {img_base.shape}")
+                        img_curr = cv2.resize(img_curr, (img_base.shape[1], img_base.shape[0]))
                     
-                    # Root Mean Square (RMS) difference calculation
-                    h = diff.histogram()
-                    sq = (value * (idx ** 2) for idx, value in enumerate(h))
-                    sum_of_squares = sum(sq)
-                    rms = math.sqrt(sum_of_squares / float(img1.size[0] * img1.size[1]))
+                    # Convert to grayscale for better structure matching
+                    gray_base = cv2.cvtColor(img_base, cv2.COLOR_BGR2GRAY)
+                    gray_curr = cv2.cvtColor(img_curr, cv2.COLOR_BGR2GRAY)
                     
-                    # Normalize RMS to percentage (max possible RMS is 255.0 for RGB)
-                    diff_pct = (rms / 255.0) * 100.0
-                    logger.info(f"Visual diff calculated: {diff_pct:.2f}% (Tolerance: {tolerance}%)")
+                    # Template Matching
+                    res = cv2.matchTemplate(gray_curr, gray_base, cv2.TM_CCOEFF_NORMED)
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                    
+                    # max_val is the accuracy (1.0 is perfect match)
+                    similarity_pct = max_val * 100.0
+                    diff_pct = 100.0 - similarity_pct
+                    
+                    logger.info(f"Visual similarity: {similarity_pct:.2f}% (Diff: {diff_pct:.2f}%, Tolerance: {tolerance}%)")
                     
                     if diff_pct > tolerance:
                         raise AssertionError(f"Visual mismatch: Image differs by {diff_pct:.2f}% (max allowed is {tolerance}%)")
                 except AssertionError as ae:
                     raise ae
                 except Exception as ex:
-                    logger.error(f"Error during visual assert: {ex}")
-                    raise AssertionError(f"Failed to perform visual comparison: {ex}")
+                    logger.error(f"Error during OpenCV visual assert: {ex}")
+                    raise AssertionError(f"Failed to perform OpenCV visual comparison: {ex}")
 
             elif step_type == 'wait':
                 delay = int(props.get('timeout', 1000))
@@ -749,16 +766,20 @@ class AppiumExecutorService:
                     best_node = element
                     
             if best_node is not None and highest_score > 0:
+                text_val = best_node.attrib.get('text', '')
+                desc_val = best_node.attrib.get('content-desc', '')
+                res_val = best_node.attrib.get('resource-id', '')
+                
                 healed_selector = None
-                if best_node.attrib.get('resource-id'):
-                    healed_selector = f"//*[@resource-id='{best_node.attrib.get('resource-id')}']"
-                elif best_node.attrib.get('content-desc'):
-                    healed_selector = f"//*[@content-desc='{best_node.attrib.get('content-desc')}']"
-                elif best_node.attrib.get('text'):
-                    healed_selector = f"//*[@text='{best_node.attrib.get('text')}']"
+                if res_val:
+                    healed_selector = f"//*[@resource-id='{res_val}' or @name='{res_val}' or @label='{res_val}']"
+                elif desc_val:
+                    healed_selector = f"//*[@content-desc='{desc_val}' or @name='{desc_val}' or @label='{desc_val}']"
+                elif text_val:
+                    healed_selector = f"//*[@text='{text_val}' or @name='{text_val}' or @label='{text_val}']"
                     
                 if healed_selector:
-                    logger.info(f"✨ [Self-Healing] Healed selector found: {healed_selector} (Score: {highest_score})")
+                    logger.info(f"✨ [Self-Healing] Universal XPath Healed selector found: {healed_selector} (Score: {highest_score})")
                     return healed_selector
                     
         except Exception as e:
@@ -793,55 +814,62 @@ class AppiumExecutorService:
                 locator = (AppiumBy.ACCESSIBILITY_ID, selector)
                 
             try:
-                el = wait.until(EC.presence_of_element_located(locator))
-                logger.info(f"🎯 [Appium] Found element with primary strategy {locator[0]}")
+                # Tentativa primária: visibility (mais segura para taps e interações)
+                el = wait.until(EC.visibility_of_element_located(locator))
+                logger.info(f"🎯 [Appium] Found visible element with primary strategy {locator[0]}")
                 return el
             except Exception:
-                # Fallback: if ID/AccessibilityID fails, try the other one briefly
-                fallback_timeout = 1.5
-                short_wait = WebDriverWait(self._driver, fallback_timeout)
-                
-                # If we tried ID, try Accessibility ID now
-                if locator[0] == AppiumBy.ID:
-                    try: 
-                        el = short_wait.until(EC.presence_of_element_located((AppiumBy.ACCESSIBILITY_ID, selector)))
-                        logger.info(f"🎯 [Appium] Found with fallback: Accessibility ID")
-                        return el
-                    except: pass
-                # If we tried Accessibility ID, try ID now
-                elif locator[0] == AppiumBy.ACCESSIBILITY_ID:
-                    try: 
-                        el = short_wait.until(EC.presence_of_element_located((AppiumBy.ID, selector)))
-                        logger.info(f"🎯 [Appium] Found with fallback: ID")
-                        return el
-                    except: pass
-                
-                # 3. Final fallback strategy: Combined attribute search (High Performance)
-                # Instead of looping through strategies, we use a single broad XPath search
-                # to reduce network round-trips between the backend and Appium.
-
-                partial_text = clean_selector[:30] if len(clean_selector) > 30 else clean_selector
-                
-                # Combine multiple possible locations in one query
-                combined_xpath = (
-                    f"//*[@text='{selector}' or @content-desc='{selector}' or "
-                    f"contains(@text, '{partial_text}') or contains(@content-desc, '{partial_text}') or "
-                    f"@hint='{selector}' or @placeholder='{selector}']"
-                )
-
                 try:
-                    el = short_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, combined_xpath)))
-                    logger.info(f"🎯 [Appium] Found with combined adaptive XPath")
+                    # Fallback: presence (pode estar na tela mas não considerado 'visível' ainda pelo Appium)
+                    el = wait.until(EC.presence_of_element_located(locator))
+                    logger.info(f"🎯 [Appium] Found present element with primary strategy {locator[0]}")
                     return el
-                except:
-                    # Final attempt: UIAutomator (sometimes more reliable than XPath on Android)
+                except Exception:
+                    # Fallback: if ID/AccessibilityID fails, try the other one briefly
+                    fallback_timeout = 1.5
+                    short_wait = WebDriverWait(self._driver, fallback_timeout)
+                    
+                    # If we tried ID, try Accessibility ID now
+                    if locator[0] == AppiumBy.ID:
+                        try: 
+                            el = short_wait.until(EC.presence_of_element_located((AppiumBy.ACCESSIBILITY_ID, selector)))
+                            logger.info(f"🎯 [Appium] Found with fallback: Accessibility ID")
+                            return el
+                        except: pass
+                    # If we tried Accessibility ID, try ID now
+                    elif locator[0] == AppiumBy.ACCESSIBILITY_ID:
+                        try: 
+                            el = short_wait.until(EC.presence_of_element_located((AppiumBy.ID, selector)))
+                            logger.info(f"🎯 [Appium] Found with fallback: ID")
+                            return el
+                        except: pass
+                    
+                    # 3. Final fallback strategy: Combined attribute search (High Performance)
+                    # Instead of looping through strategies, we use a single broad XPath search
+                    # to reduce network round-trips between the backend and Appium.
+
+                    partial_text = clean_selector[:30] if len(clean_selector) > 30 else clean_selector
+                    
+                    # Combine multiple possible locations in one query
+                    combined_xpath = (
+                        f"//*[@text='{selector}' or @content-desc='{selector}' or "
+                        f"contains(@text, '{partial_text}') or contains(@content-desc, '{partial_text}') or "
+                        f"@hint='{selector}' or @placeholder='{selector}']"
+                    )
+
                     try:
-                        uia_strategy = f'new UiSelector().textContains("{partial_text}")'
-                        el = short_wait.until(EC.presence_of_element_located((AppiumBy.ANDROID_UIAUTOMATOR, uia_strategy)))
-                        logger.info(f"🎯 [Appium] Found with UIAutomator fallback")
+                        el = short_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, combined_xpath)))
+                        logger.info(f"🎯 [Appium] Found with combined adaptive XPath")
                         return el
                     except:
-                        pass
+                        # Final attempt: UIAutomator (sometimes more reliable than XPath on Android)
+                        try:
+                            uia_strategy = f'new UiSelector().textContains("{partial_text}")'
+                            el = short_wait.until(EC.presence_of_element_located((AppiumBy.ANDROID_UIAUTOMATOR, uia_strategy)))
+                            logger.info(f"🎯 [Appium] Found with UIAutomator fallback")
+                            return el
+                        except:
+                            pass
                     
             # Se chegamos aqui sem retornar, é porque falhou tudo
             if step_data:

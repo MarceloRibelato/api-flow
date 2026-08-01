@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+import os
+import redis
 from app.database import get_db
 from app.models.hitl_models import HitlSessionDB
 from app.models.schedule_models import ScheduleModel
@@ -11,6 +13,16 @@ router = APIRouter(
     prefix="/hitl",
     tags=["HITL API"]
 )
+
+@router.get("/debug_logs")
+def debug_logs(db: Session = Depends(get_db)):
+    try:
+        from app.models.schedule_models import ScheduleLogModel
+        logs = db.query(ScheduleLogModel).order_by(ScheduleLogModel.id.desc()).limit(5).all()
+        return [{"id": l.id, "schedule_id": l.schedule_id, "status": l.status, "error": l.error, "log_messages": l.log_messages} for l in logs]
+    except Exception as e:
+        return {"error": str(e)}
+
 
 class HitlResolveRequest(BaseModel):
     selected_index: Optional[int] = None
@@ -28,14 +40,16 @@ def get_pending_hitl_sessions(
     sessions = query.all()
     
     valid_sessions = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     for s in sessions:
         # Check if expired (older than 5 minutes)
-        if s.created_at and (now - s.created_at).total_seconds() > 300:
-            s.status = "timeout"
-            db.commit()
-        else:
-            valid_sessions.append(s)
+        if s.created_at:
+            created = s.created_at.replace(tzinfo=timezone.utc) if s.created_at.tzinfo is None else s.created_at
+            if (now - created).total_seconds() > 300:
+                s.status = "timeout"
+                db.commit()
+                continue
+        valid_sessions.append(s)
             
     return [{
         "id": s.id,
@@ -67,5 +81,12 @@ def resolve_hitl_session(
     session.resolved_at = datetime.utcnow()
     
     db.commit()
+    
+    try:
+        redis_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+        r = redis.Redis.from_url(redis_url)
+        r.publish(f"hitl_resolve_{session_id}", "resolved")
+    except Exception as e:
+        print(f"Failed to publish to redis: {e}")
     
     return {"message": "Session resolved successfully", "status": "resolved"}

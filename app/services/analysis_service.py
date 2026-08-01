@@ -1,14 +1,100 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.models.flow_models import FlowCardDataDB, FlowDB
 from app.models.api_test_history_models import ApiExecutionHistory
 from app.models.agent_models import AgentSettingsDB
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 import json
+import re
+import time
 import requests
 import logging
 
 logger = logging.getLogger(__name__)
+
+# --- In-memory cache for auto-detected AI model names ---
+# Key: base_url, Value: (model_name, timestamp)
+_model_cache: dict = {}
+_MODEL_CACHE_TTL = 300  # 5 minutes
+
+
+def _get_custom_license_key(db: Session, user_id: int) -> str:
+    """Build composite license key (email+cnpj). Uses joinedload on company_rel to fetch
+    user + company in a single SQL JOIN instead of two separate queries."""
+    from app.models.user_models import UserDB
+    user = db.query(UserDB).filter(UserDB.id == user_id).options(
+        joinedload(UserDB.company_rel)
+    ).first()
+    email = user.email if user and user.email else f"user{user_id}@qaflow.com"
+    cnpj = "00000000000000"
+    if user:
+        # company_rel is the SQLAlchemy relationship to CompanyDB
+        company = getattr(user, 'company_rel', None)
+        if company and getattr(company, 'cnpj', None):
+            cnpj = company.cnpj
+        elif getattr(user, 'cnpj', None):
+            # Fall back to legacy cnpj column directly on UserDB
+            cnpj = user.cnpj
+    cnpj_clean = re.sub(r'[^0-9]', '', cnpj)
+    return f"{email}+{cnpj_clean}"
+
+
+def _detect_model(base_url: str) -> str:
+    """Auto-detect Ollama/Open WebUI model with in-memory TTL cache."""
+    cached = _model_cache.get(base_url)
+    if cached:
+        model_name, ts = cached
+        if time.time() - ts < _MODEL_CACHE_TTL:
+            return model_name
+
+    model_name = "llama3"  # safe default
+    try:
+        m_resp = requests.get(f"{base_url}models", timeout=3)
+        if m_resp.status_code == 200 and m_resp.json().get("data"):
+            model_name = m_resp.json()["data"][0]["id"]
+        else:
+            tags_url = base_url.replace("v1/", "api/tags").replace("v1", "api/tags")
+            o_resp = requests.get(tags_url, timeout=3)
+            if o_resp.status_code == 200 and o_resp.json().get("models"):
+                model_name = o_resp.json()["models"][0]["name"]
+    except Exception:
+        pass
+
+    _model_cache[base_url] = (model_name, time.time())
+    return model_name
+
+
+def _build_flow_ia_request_params(db: Session, user_id: int, settings) -> tuple:
+    """Build (url, headers, base_url) for flow_ia provider, routing through License Manager."""
+    from app.config import settings as app_settings
+    default_url = "http://host.docker.internal:11434/v1"
+    base_url = settings.ai_base_url if settings.ai_base_url else default_url
+    if "localhost" in base_url or "127.0.0.1" in base_url:
+        base_url = base_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+    if not base_url.endswith("/"):
+        base_url += "/"
+    parsed = urlparse(base_url)
+    if parsed.path in ("", "/"):
+        base_url += "v1/"
+
+    custom_license = _get_custom_license_key(db, user_id)
+    license_url = app_settings.LICENSE_MANAGER_URL
+    if license_url:
+        url = f"{license_url.rstrip('/')}/api/ai/chat"
+        headers = {
+            "Content-Type": "application/json",
+            "X-License-Key": custom_license,
+            "X-Target-Url": base_url,
+            "X-User-Identifier": f"user_{user_id}",
+        }
+    else:
+        url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer local-dummy-token",
+        }
+    return url, headers, base_url
 
 class AnalysisService:
 
@@ -46,7 +132,7 @@ class AnalysisService:
                 base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
                 if not base_url.endswith("/"): base_url += "/"
                 url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-                resp = requests.post(url, headers=headers, json=data, timeout=60)
+                resp = requests.post(url, headers=headers, json=data, timeout=120)
                 if resp.status_code == 200:
                     result_text = resp.json()["choices"][0]["message"]["content"]
                     if flow_id:
@@ -60,7 +146,7 @@ class AnalysisService:
             elif settings.ai_provider == "anthropic":
                 headers = {"x-api-key": settings.ai_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
                 data = {"model": settings.ai_model, "messages": messages, "max_tokens": 4096}
-                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=60)
+                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=120)
                 if resp.status_code == 200:
                     result_text = resp.json()["content"][0]["text"]
                     if flow_id:
@@ -102,38 +188,43 @@ class AnalysisService:
                         db.commit()
                     return result_text
 
+            elif settings.ai_provider == "flow_ia":
+                url, headers, base_url = _build_flow_ia_request_params(db, user_id, settings)
+                model_name = _detect_model(base_url)
+                data = {"messages": messages, "stream": False, "model": model_name}
+                resp = requests.post(url, headers=headers, json=data, timeout=120)
+                if resp.status_code == 200:
+                    result_text = resp.json()["choices"][0]["message"]["content"]
+                    if flow_id:
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                        db.commit()
+                    return result_text
+                else:
+                    raise Exception(f"Flow-IA Error: {resp.status_code} - {resp.text}")
+
             elif settings.ai_provider == "ollama":
                 from app.config import settings as app_settings
-                
-                # Check if UI configured fields are a QA-Flow license
                 license_url = settings.ai_base_url or app_settings.LICENSE_MANAGER_URL
-                license_key = settings.ai_api_key
-                
-                if not (license_key and license_key.startswith("QAFLOW-")):
-                    license_url = app_settings.LICENSE_MANAGER_URL
-                    license_key = app_settings.QA_FLOW_LICENSE_KEY
-                    
+                license_key = _get_custom_license_key(db, user_id)
+                user_ident = f"user_{user_id}"
+                try:
+                    if getattr(settings, 'user', None):
+                        user_ident = settings.user.email or settings.user.username or user_ident
+                except Exception as ue:
+                    logger.warning(f"Could not retrieve user info: {ue}")
+
                 if license_url and license_key:
                     url = f"{license_url.rstrip('/')}/api/ai/chat"
-                    user_ident = "unknown"
-                    try:
-                        if settings.user:
-                            user_ident = settings.user.email or settings.user.username or f"user_{settings.user_id}"
-                        else:
-                            user_ident = f"user_{settings.user_id}"
-                    except Exception as ue:
-                        logger.warning(f"Could not retrieve user info: {ue}")
                     headers = {
                         "Content-Type": "application/json",
                         "X-License-Key": license_key,
-                        "X-User-Identifier": user_ident
+                        "X-User-Identifier": user_ident,
                     }
                     data = {"messages": messages, "stream": False}
-                    # Only send model if it's not the default gpt-4o or legacy flow-ia
                     if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia"):
                         data["model"] = settings.ai_model
-                        
-                    resp = requests.post(url, headers=headers, json=data, timeout=300)
+                    resp = requests.post(url, headers=headers, json=data, timeout=120)
                     if resp.status_code == 200:
                         result_text = resp.json()["choices"][0]["message"]["content"]
                         if flow_id:
@@ -150,15 +241,14 @@ class AnalysisService:
                     if not base_url.endswith("/"): base_url += "/"
                     url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
                     headers = {"Content-Type": "application/json"}
-                    if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                    
+                    if settings.ai_api_key:
+                        headers["Authorization"] = f"Bearer {settings.ai_api_key}"
                     data = {"messages": messages, "stream": False}
                     if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia"):
                         data["model"] = settings.ai_model
                     else:
-                        data["model"] = "llama3" # local default
-                        
-                    resp = requests.post(url, headers=headers, json=data, timeout=300)
+                        data["model"] = "llama3"
+                    resp = requests.post(url, headers=headers, json=data, timeout=120)
                     if resp.status_code == 200:
                         result_text = resp.json()["choices"][0]["message"]["content"]
                         if flow_id:
@@ -506,6 +596,15 @@ class AnalysisService:
         """
         Uses AI to attempt to find a broken or missing CSS/XPath selector by analyzing a snippet of the current DOM.
         """
+        import re
+        def _clean(text):
+            if not text: return ""
+            text = text.strip()
+            # Strip markdown code block headers like ```css\n
+            text = re.sub(r"```[a-zA-Z]*\n?", "", text)
+            # Remove remaining backticks
+            return text.replace("```", "").replace("`", "").strip()
+
         settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
         if not settings:
             logger.warning(f"⚠️ [Auto-Heal] Aborted: No AgentSettings found for user_id={user_id}")
@@ -555,14 +654,14 @@ class AnalysisService:
                 url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
                 resp = requests.post(url, headers=headers, json=data, timeout=20)
                 if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"].replace("```", "").replace("`", "").strip()
+                    return _clean(resp.json()["choices"][0]["message"]["content"])
 
             elif settings.ai_provider == "anthropic":
                 headers = {"x-api-key": settings.ai_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
                 data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 100}
                 resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=20)
                 if resp.status_code == 200:
-                    return resp.json()["content"][0]["text"].replace("```", "").replace("`", "").strip()
+                    return _clean(resp.json()["content"][0]["text"])
 
             elif settings.ai_provider == "gemini":
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
@@ -570,25 +669,73 @@ class AnalysisService:
                 resp = requests.post(url, json=data, timeout=20)
                 if resp.status_code == 200:
                     text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                    return text.replace("```", "").replace("`", "").strip()
+                    return _clean(text)
             
             elif settings.ai_provider == "deepseek":
                  headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
                  data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.0, "max_tokens": 100}
                  resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=20)
                  if resp.status_code == 200:
-                     return resp.json()["choices"][0]["message"]["content"].replace("```", "").replace("`", "").strip()
+                     return _clean(resp.json()["choices"][0]["message"]["content"])
+            
+            elif settings.ai_provider == "flow_ia":
+                default_url = "http://host.docker.internal:11434/v1"
+                base_url = settings.ai_base_url if settings.ai_base_url else default_url
+                if "localhost" in base_url or "127.0.0.1" in base_url:
+                    base_url = base_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+                if not base_url.endswith("/"): base_url += "/"
+                from urllib.parse import urlparse
+                parsed = urlparse(base_url)
+                if parsed.path == "" or parsed.path == "/":
+                    base_url += "v1/"
+                
+                from app.config import settings as app_settings
+                custom_license = _get_custom_license_key(db, user_id)
+                license_url = app_settings.LICENSE_MANAGER_URL
+                if license_url:
+                    url = f"{license_url.rstrip('/')}/api/ai/chat"
+                    headers = {
+                        "Content-Type": "application/json",
+                        "X-License-Key": custom_license,
+                        "X-Target-Url": base_url,
+                        "X-User-Identifier": f"user_{user_id}"
+                    }
+                else:
+                    url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer local-dummy-token"
+                    }
+                
+                # Auto-detect model
+                model_name = "llama3"
+                try:
+                    m_resp = requests.get(f"{base_url}models", timeout=2)
+                    if m_resp.status_code == 200 and m_resp.json().get("data"):
+                        model_name = m_resp.json()["data"][0]["id"]
+                    else:
+                        o_resp = requests.get(base_url.replace("v1/", "api/tags").replace("v1", "api/tags"), timeout=2)
+                        if o_resp.status_code == 200 and o_resp.json().get("models"):
+                            model_name = o_resp.json()["models"][0]["name"]
+                except Exception:
+                    pass
+                
+                data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
+                
+                logger.info(f"📡 [Auto-Heal] Flow-IA Req: {url} using model {model_name}")
+                resp = requests.post(url, headers=headers, json=data, timeout=30)
+                if resp.status_code == 200:
+                    selector = _clean(resp.json()["choices"][0]["message"]["content"])
+                    logger.info(f"✨ [Auto-Heal] Flow-IA Returned: {selector}")
+                    return selector
+                else:
+                    logger.error(f"❌ [Auto-Heal] Flow-IA Error: {resp.status_code} - {resp.text}")
             
             elif settings.ai_provider == "ollama":
                 from app.config import settings as app_settings
                 
-                # Check if UI configured fields are a QA-Flow license
                 license_url = settings.ai_base_url or app_settings.LICENSE_MANAGER_URL
-                license_key = settings.ai_api_key
-                
-                if not (license_key and license_key.startswith("QAFLOW-")):
-                    license_url = app_settings.LICENSE_MANAGER_URL
-                    license_key = app_settings.QA_FLOW_LICENSE_KEY
+                license_key = _get_custom_license_key(db, user_id)
                     
                 if license_url and license_key:
                     url = f"{license_url.rstrip('/')}/api/ai/chat"
@@ -608,7 +755,7 @@ class AnalysisService:
                     data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
                     resp = requests.post(url, headers=headers, json=data, timeout=30)
                     if resp.status_code == 200:
-                        selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").replace("`", "").strip()
+                        selector = _clean(resp.json()["choices"][0]["message"]["content"])
                         return selector
                     else:
                         logger.error(f"License Manager returned error: {resp.status_code} - {resp.text}")
@@ -625,7 +772,7 @@ class AnalysisService:
                     logger.info(f"📡 [Auto-Heal] Ollama Req: {url}")
                     resp = requests.post(url, headers=headers, json=data, timeout=30)
                     if resp.status_code == 200:
-                        selector = resp.json()["choices"][0]["message"]["content"].replace("```", "").replace("`", "").strip()
+                        selector = _clean(resp.json()["choices"][0]["message"]["content"])
                         logger.info(f"✨ [Auto-Heal] Ollama Returned: {selector}")
                         return selector
                     else:
@@ -637,6 +784,112 @@ class AnalysisService:
             logger.error(f"💥 [Auto-Heal] LLM Fatal Error: {e}")
             import traceback
             logger.error(traceback.format_exc())
+        
+        return None
+
+    @staticmethod
+    def resolve_ambiguity(db: Session, user_id: int, generic_selector: str, action_value: str, step_type: str, candidates_html: str) -> str:
+        """
+        Uses AI to choose the correct element index from a list of candidates when a generic selector matches multiple elements.
+        """
+        import re
+        def _clean(text):
+            if not text: return ""
+            text = text.strip()
+            match = re.search(r'\d+', text)
+            if match:
+                return match.group()
+            return None
+
+        settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
+        if not settings or (not settings.ai_api_key and settings.ai_provider != "ollama"):
+            return None
+            
+        prompt = f"""
+        You are an expert QA Automation Engineer. A Playwright E2E test found multiple elements matching the generic selector `{generic_selector}`.
+        
+        The intended action is `{step_type}`. The step name or context is: `{action_value}`.
+        
+        Here are the candidates:
+        {candidates_html}
+        
+        Analyze the candidates. Which index [0], [1], [2], etc., is the most likely target for the action?
+        CRITICAL RULES:
+        1. Return ONLY the integer number of the index (e.g. `0` or `1`).
+        2. Do NOT return any text, explanation, or selector string. Just the number.
+        """
+        
+        try:
+            if settings.ai_provider == "openai":
+                headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
+                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
+                base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
+                if not base_url.endswith("/"): base_url += "/"
+                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                resp = requests.post(url, headers=headers, json=data, timeout=20)
+                if resp.status_code == 200:
+                    return _clean(resp.json()["choices"][0]["message"]["content"])
+
+            elif settings.ai_provider == "anthropic":
+                headers = {"x-api-key": settings.ai_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 10}
+                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=20)
+                if resp.status_code == 200:
+                    return _clean(resp.json()["content"][0]["text"])
+
+            elif settings.ai_provider == "gemini":
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
+                data = {"contents": [{"parts": [{"text": prompt}]}]}
+                resp = requests.post(url, json=data, timeout=20)
+                if resp.status_code == 200:
+                    text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                    return _clean(text)
+            
+            elif settings.ai_provider == "deepseek":
+                 headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
+                 data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.0, "max_tokens": 10}
+                 resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=20)
+                 if resp.status_code == 200:
+                     return _clean(resp.json()["choices"][0]["message"]["content"])
+            
+            elif settings.ai_provider == "flow_ia":
+                # Re-use the shared helper — no duplicate URL/header building
+                url, headers, base_url = _build_flow_ia_request_params(db, user_id, settings)
+                model_name = _detect_model(base_url)  # cached, no extra HTTP round-trip
+                data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
+                resp = requests.post(url, headers=headers, json=data, timeout=30)
+                if resp.status_code == 200:
+                    return _clean(resp.json()["choices"][0]["message"]["content"])
+            
+            elif settings.ai_provider == "ollama":
+                from app.config import settings as app_settings
+                license_url = settings.ai_base_url or app_settings.LICENSE_MANAGER_URL
+                license_key = settings.ai_api_key
+                if not (license_key and license_key.startswith("QAFLOW-")):
+                    license_url = app_settings.LICENSE_MANAGER_URL
+                    license_key = app_settings.QA_FLOW_LICENSE_KEY
+                    
+                if license_url and license_key:
+                    url = f"{license_url.rstrip('/')}/api/ai/chat"
+                    headers = {"Content-Type": "application/json", "X-License-Key": license_key, "X-User-Identifier": f"user_{settings.user_id}"}
+                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    resp = requests.post(url, headers=headers, json=data, timeout=30)
+                    if resp.status_code == 200:
+                        return _clean(resp.json()["choices"][0]["message"]["content"])
+                else:
+                    default_url = "http://host.docker.internal:11434/v1"
+                    base_url = settings.ai_base_url if settings.ai_base_url else default_url
+                    if not base_url.endswith("/"): base_url += "/"
+                    url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                    headers = {"Content-Type": "application/json"}
+                    if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
+                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    resp = requests.post(url, headers=headers, json=data, timeout=30)
+                    if resp.status_code == 200:
+                        return _clean(resp.json()["choices"][0]["message"]["content"])
+                        
+        except Exception as e:
+            logger.error(f"💥 [Resolve Ambiguity] LLM Fatal Error: {e}")
         
         return None
 

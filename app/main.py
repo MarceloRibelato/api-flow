@@ -77,32 +77,7 @@ async def lifespan(app: FastAPI):
             # Skip this and Alembic migration if running with SQLite (tests) to preserve the in-memory database.
             if "sqlite" not in str(engine.url):
                 engine.dispose()
-                logger.debug("SQLAlchemy Engine disposed before Alembic upgrade")
-                
-                # Step 2: Run Alembic migrations via Subprocess (Avoids deadlocks/logging clashes)
-                try:
-                    import subprocess
-                    logger.info("Iniciando Alembic upgrade head via subprocess...")
-                    
-                    # Get path to alembic.ini
-                    ini_path = os.path.join(os.path.dirname(__file__), '..', 'alembic.ini')
-                    
-                    result = subprocess.run(
-                        ["alembic", "-c", ini_path, "upgrade", "head"],
-                        capture_output=True,
-                        text=True,
-                        env=os.environ.copy()
-                    )
-                    
-                    if result.returncode == 0:
-                        logger.info(f"Alembic migrations executadas com sucesso")
-                        if result.stdout:
-                            logger.debug(f"Alembic stdout: {result.stdout}")
-                    else:
-                        logger.warning(f"Alembic migration failed with return code {result.returncode}")
-                        logger.warning(f"Alembic stderr: {result.stderr}")
-                except Exception as alembic_err:
-                    logger.warning(f"Alembic migration via subprocess failed: {alembic_err}")
+                logger.debug("SQLAlchemy Engine disposed (migrations are now handled externally)")
             
             break
         except Exception as e:
@@ -203,6 +178,15 @@ async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500,
         content={"detail": "Ocorreu um erro interno no servidor."},
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    import traceback
+    logger.error(f"❌ Validation Error for request {request.method} {request.url}: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
     )
 
 # Incluir rotas

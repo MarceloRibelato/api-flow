@@ -1,8 +1,9 @@
 import logging
 import json
 import time as _time
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 import playwright_stealth
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ _IGNORED_DOMAINS = (
     'facebook.com/tr', 'connect.facebook.net',
     'linkedin.com/px', 'snap.licdn.com',
     # Error trackers
-    'sentry.io', 'sentry-cdn.com', 'bugsnag.com', 'rollbar.com',
+    'sentry.io', 'sentry-cdn.com', 'bugsnag.com', 'rollbar.com', 'backtrace.io',
     # Chat / support widgets
     'tawk.to', 'crisp.chat', 'freshchat', 'zendesk.com',
     # Generic CDN noise
@@ -66,14 +67,15 @@ class PlaywrightExecutorService:
         self._captured_requests = []   # list of captured API calls during execution
         self._pending_requests = {}    # url -> {method, start_time}
         self._headless = headless
+        self._last_dialog_message = None
 
-    def start(self, video_dir: str = None):
+    async def start(self, video_dir: str = None, storage_state: dict = None):
         """Starts the playwright engine and browser instance."""
         if not self._playwright:
-            self._playwright = sync_playwright().start()
+            self._playwright = await async_playwright().start()
         
         if not self._browser:
-            self._browser = self._playwright.chromium.launch(
+            self._browser = await self._playwright.chromium.launch(
                 headless=self._headless,
                 args=[
                     "--disable-dev-shm-usage", 
@@ -107,21 +109,33 @@ class PlaywrightExecutorService:
                 context_args["record_video_size"] = {"width": 1280, "height": 720}
                 logger.info(f"📹 Video Recording enabled in: {video_dir} (1280x720 resolution)")
                 
-            self._context = self._browser.new_context(**context_args)
-            # Removed hardcoded default timeouts to respect step-specific timeouts
-            pass
+            if storage_state:
+                context_args["storage_state"] = storage_state
+                
+            self._context = await self._browser.new_context(**context_args)
+            
+            # Enable Tracing (Time Machine) for this context
+            try:
+                await self._context.tracing.start(screenshots=True, snapshots=True, sources=True)
+                logger.info("🕒 Playwright Tracing enabled.")
+            except Exception as e:
+                logger.warning(f"Failed to start tracing: {e}")
         
         if not self._page:
-            self._page = self._context.new_page()
+            self._page = await self._context.new_page()
             
             # Apply stealth to bypass bot detection
             try:
-                playwright_stealth.stealth_sync(self._page)
+                await playwright_stealth.stealth_async(self._page)
             except Exception as e:
                 logger.warning(f"Stealth application failed: {e}")
             
-            # Auto-handle dialogs to prevent deadlocks
-            self._page.on("dialog", lambda dialog: dialog.accept())
+            # Auto-handle dialogs to prevent deadlocks and capture message
+            def handle_dialog(dialog):
+                self._last_dialog_message = dialog.message
+                dialog.accept()
+                
+            self._page.on("dialog", handle_dialog)
             
             self._install_network_listeners()
 
@@ -180,26 +194,52 @@ class PlaywrightExecutorService:
         self._pending_requests.clear()
         return captured
 
-    def stop(self):
-        """Shuts down the browser and playwright engine."""
-        if self._page:
-            self._page.close()
+    async def stop(self, trace_path: str = None):
+        """Shuts down the browser and playwright engine, optionally saving a trace."""
+        try:
+            if self._context and trace_path:
+                try:
+                    await self._context.tracing.stop(path=trace_path)
+                    logger.info(f"💾 Playwright Trace saved to {trace_path}")
+                except Exception as trace_e:
+                    logger.warning(f"Failed to save trace: {trace_e}")
+                    
+            if self._context:
+                await self._context.close()
             self._page = None
-            
-        if self._context:
-            self._context.close()
             self._context = None
             
-        if self._browser:
-            self._browser.close()
-            self._browser = None
+            if self._browser:
+                await self._browser.close()
+                self._browser = None
         
-        if self._playwright:
-            self._playwright.stop()
-            self._playwright = None
+            if self._playwright:
+                await self._playwright.stop()
+                self._playwright = None
+                
             logger.info("Playwright Browser stopped")
+        except Exception as e:
+            logger.error(f"Error stopping Playwright gracefully: {e}")
+            self._browser = None
+            self._playwright = None
 
-    def _wait_for_loading_to_finish(self, timeout_ms=3000):
+    async def get_state(self):
+        """Returns the current browser storage state (cookies/localstorage) and URL."""
+        state = None
+        url = None
+        if self._context:
+            try:
+                state = await self._context.storage_state()
+            except:
+                pass
+        if self._page:
+            try:
+                url = self._page.url
+            except:
+                pass
+        return {"storage_state": state, "url": url}
+
+    async def _wait_for_loading_to_finish(self, timeout_ms=3000):
         """Intelligently wait for network idle and common loaders to disappear."""
         if not self._page:
             return
@@ -207,7 +247,7 @@ class PlaywrightExecutorService:
         logger.info("⏳ [Smart Wait] Checking for loaders and network idle...")
         try:
             # Wait for common loaders to vanish
-            self._page.wait_for_function('''() => {
+            await self._page.wait_for_function('''() => {
                 const loaders = document.querySelectorAll('.spinner, .loader, mat-spinner, [role="progressbar"], .loading-overlay, #loader, #spinner, app-loader');
                 for (let i = 0; i < loaders.length; i++) {
                     const el = loaders[i];
@@ -223,12 +263,15 @@ class PlaywrightExecutorService:
 
         try:
             # Wait for network idle
-            self._page.wait_for_load_state("networkidle", timeout=timeout_ms)
+            await self._page.wait_for_load_state("networkidle", timeout=timeout_ms)
         except Exception:
             pass
 
-    def _handle_hitl_pause(self, target, selector, step, db, user_id):
+    async def _handle_hitl_pause(self, target, selector, step, db, user_id):
         import time
+        import os
+        import redis.asyncio as aioredis
+        import asyncio
         from app.models.hitl_models import HitlSessionDB
         
         loc_visible = target.locator(f"{selector} >> visible=true")
@@ -236,13 +279,13 @@ class PlaywrightExecutorService:
         # We must wait for at least one element to appear before counting,
         # otherwise count() returns 0 immediately on dynamic pages.
         try:
-            loc_visible.first.wait_for(state="attached", timeout=5000)
+            await loc_visible.first.wait_for(state="attached", timeout=5000)
         except:
             pass # Let the rest of the logic handle 0 elements
             
         count = 0
         try:
-            count = loc_visible.count()
+            count = await loc_visible.count()
         except:
             return None
 
@@ -253,11 +296,11 @@ class PlaywrightExecutorService:
         for i in range(min(count, 10)):
             try:
                 el = loc_visible.nth(i)
-                html = el.evaluate("el => el.outerHTML")
+                html = await el.evaluate("el => el.outerHTML")
                 candidates.append({
                     "index": i,
                     "html": html,
-                    "text": el.text_content().strip() if el.text_content() else ""
+                    "text": await el.text_content().strip() if await el.text_content() else ""
                 })
             except Exception as e:
                 logger.warning(f"Failed to get candidate {i}: {e}")
@@ -282,15 +325,45 @@ class PlaywrightExecutorService:
 
         timeout = 300
         resolved_selector = None
-        for _ in range(timeout):
-            db.refresh(hitl_session)
-            if hitl_session.status == "resolved":
-                if hitl_session.custom_selector:
-                    resolved_selector = hitl_session.custom_selector
-                elif hitl_session.selected_index is not None:
-                    resolved_selector = f"{selector} >> nth={hitl_session.selected_index}"
-                break
-            time.sleep(1)
+        
+        try:
+            redis_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+            r = aioredis.from_url(redis_url)
+            pubsub = r.pubsub()
+            await pubsub.subscribe(f"hitl_resolve_{hitl_session.id}")
+            
+            async def wait_for_message():
+                async for message in pubsub.listen():
+                    if message['type'] == 'message':
+                        return message['data']
+            
+            try:
+                await asyncio.wait_for(wait_for_message(), timeout=timeout)
+                # Message received, meaning the session was resolved by the API
+                db.refresh(hitl_session)
+                if hitl_session.status == "resolved":
+                    if hitl_session.custom_selector:
+                        resolved_selector = hitl_session.custom_selector
+                    elif hitl_session.selected_index is not None:
+                        resolved_selector = f"{selector} >> nth={hitl_session.selected_index}"
+            except asyncio.TimeoutError:
+                # 300 seconds passed without any pub/sub message
+                pass
+            finally:
+                await pubsub.unsubscribe(f"hitl_resolve_{hitl_session.id}")
+                await r.aclose()
+        except Exception as redis_ex:
+            logger.error(f"Redis PubSub failed during HITL, falling back to basic sleep: {redis_ex}")
+            # Fallback in case Redis connection fails
+            for _ in range(timeout):
+                db.refresh(hitl_session)
+                if hitl_session.status == "resolved":
+                    if hitl_session.custom_selector:
+                        resolved_selector = hitl_session.custom_selector
+                    elif hitl_session.selected_index is not None:
+                        resolved_selector = f"{selector} >> nth={hitl_session.selected_index}"
+                    break
+                await asyncio.sleep(1)
 
         if not resolved_selector:
             logger.warning(f"⏰ [HITL] Timeout reached. Falling back to AI for '{selector}'.")
@@ -299,11 +372,16 @@ class PlaywrightExecutorService:
             from app.services.analysis_service import AnalysisService
             clean_html = "\\n".join([f"[{c['index']}] {c['html']}" for c in candidates])
             try:
-                ai_sel = AnalysisService.heal_selector(db, user_id, selector, step.get('name', ''), step.get('type', ''), clean_html)
-                if ai_sel:
-                    resolved_selector = ai_sel
-            except:
-                pass
+                ai_index_str = AnalysisService.resolve_ambiguity(db, user_id, selector, step.get('name', ''), step.get('type', ''), clean_html)
+                if ai_index_str is not None:
+                    import re
+                    match = re.search(r'\d+', str(ai_index_str))
+                    if match:
+                        ai_index = int(match.group())
+                        resolved_selector = f"{selector} >> nth={ai_index}"
+            except Exception as e:
+                logger.error(f"Error during AI resolve_ambiguity: {e}")
+                
             if not resolved_selector:
                 resolved_selector = f"{selector} >> nth=0"
 
@@ -324,7 +402,7 @@ class PlaywrightExecutorService:
 
         return resolved_selector
 
-    def execute_step(self, step, capture_screenshot: bool = False, db=None, user_id=None):
+    async def execute_step(self, step, capture_screenshot: bool = False, db=None, user_id=None):
         """
         Executes a single E2E step using the persistent page.
         Returns a result dict.
@@ -332,19 +410,19 @@ class PlaywrightExecutorService:
         step_type = step.get('type')
         name = step.get('name', 'Untitled Step')
         properties = step.get('properties', {})
-        # Get timeout from properties or default to 45s
+        # Get timeout from properties or default to 15s
         timeout = properties.get('timeout')
         if timeout is None:
-            timeout = 45000
+            timeout = 15000
         else:
             try:
                 timeout = int(timeout)
             except:
-                timeout = 45000
+                timeout = 15000
         
-        # Ensure a minimum timeout for Docker environments (increased for slow pages like banks)
-        if timeout < 1000:
-            timeout = 1000
+        # Ensure a minimum timeout for Docker environments
+        if timeout < 5000:
+            timeout = 5000
         
         logger.info(f"Executing E2E step: {name} ({step_type}) [Timeout: {timeout}ms]")
         
@@ -364,7 +442,7 @@ class PlaywrightExecutorService:
         except:
             retries_val = 1
             
-        MAX_ATTEMPTS = max(1, retries_val + 1)
+        MAX_ATTEMPTS = max(2, retries_val + 1)
         for attempt in range(MAX_ATTEMPTS):
             try:
                 self.start() # Ensure started
@@ -394,19 +472,19 @@ class PlaywrightExecutorService:
                             logger.warning(f"      ⚠️ Could not sanitize URL for Docker: {e}")
 
                         # Use 'commit' for maximum resilience in Docker, same as Web Studio
-                        self._page.goto(url, timeout=timeout, wait_until='commit')
+                        await self._page.goto(url, timeout=timeout, wait_until='commit')
                         step_result["text"] = f"Navigated to {url}"
                     else:
                         raise ValueError("URL is missing for browser step")
 
                 elif step_type == 'click':
-                    self._wait_for_loading_to_finish()
+                    await self._wait_for_loading_to_finish()
                     selector = properties.get('selector', '')
                     x_coord = properties.get('x')
                     y_coord = properties.get('y')
                     if selector:
                         if db and user_id:
-                            hitl_sel = self._handle_hitl_pause(target, selector, step, db, user_id)
+                            hitl_sel = await self._handle_hitl_pause(target, selector, step, db, user_id)
                             if hitl_sel:
                                 selector = hitl_sel
                                 orig_sel = step.get('_original_properties', {}).get('selector', properties.get('selector'))
@@ -417,7 +495,7 @@ class PlaywrightExecutorService:
                             import time
                             t1 = time.time()
                             # Perform forced click to bypass actionability wait times, return immediately
-                            el.click(timeout=timeout, force=True, no_wait_after=True)
+                            await el.click(timeout=timeout, force=True, no_wait_after=True)
                             t2 = time.time()
                             logger.info(f"⏱️ Click timing: click_exec={round((t2-t1)*1000)}ms")
                         except Exception as click_err:
@@ -425,7 +503,7 @@ class PlaywrightExecutorService:
                             raise click_err
                             
                         # Brief wait for UI to handle event
-                        self._page.wait_for_timeout(50)
+                        await self._page.wait_for_timeout(50)
                         if "[HEURISTIC" in step_result["text"] or "[AI" in step_result["text"]:
                             step_result["text"] += f" | Clicked element: {selector}"
                         else:
@@ -437,18 +515,18 @@ class PlaywrightExecutorService:
                         self._page.mouse.click(float(x_coord), float(y_coord))
                         t2 = time.time()
                         logger.info(f"⏱️ Coordinate click at ({x_coord},{y_coord}): {round((t2-t1)*1000)}ms")
-                        self._page.wait_for_timeout(50)
+                        await self._page.wait_for_timeout(50)
                         step_result["text"] = f"Clicked at coordinates ({x_coord}, {y_coord})"
                     else:
                         raise ValueError("Selector is missing for click step")
                         
                 elif step_type == 'type':
-                    self._wait_for_loading_to_finish()
+                    await self._wait_for_loading_to_finish()
                     selector = properties.get('selector', '')
                     value = str(properties.get('value', ''))
                     if selector:
                         if db and user_id:
-                            hitl_sel = self._handle_hitl_pause(target, selector, step, db, user_id)
+                            hitl_sel = await self._handle_hitl_pause(target, selector, step, db, user_id)
                             if hitl_sel:
                                 selector = hitl_sel
                                 orig_sel = step.get('_original_properties', {}).get('selector', properties.get('selector'))
@@ -459,26 +537,26 @@ class PlaywrightExecutorService:
                             import time
                             t1 = time.time()
                             try:
-                                el.wait_for(state="attached", timeout=timeout)
-                                tag = el.evaluate("e => e.tagName.toLowerCase()")
+                                await el.wait_for(state="attached", timeout=timeout)
+                                tag = await el.evaluate("e => e.tagName.toLowerCase()")
                             except:
                                 tag = ""
                                 
                             if tag == 'select':
-                                el.select_option(value=value, timeout=timeout)
+                                await el.select_option(value=value, timeout=timeout)
                             else:
-                                type_attr = el.evaluate("e => e.type ? e.type.toLowerCase() : ''")
+                                type_attr = await el.evaluate("e => e.type ? e.type.toLowerCase() : ''")
                                 if type_attr in ['radio', 'checkbox']:
-                                    el.check(timeout=timeout, force=True)
+                                    await el.check(timeout=timeout, force=True)
                                 else:
-                                    el.fill(value, timeout=timeout, force=True, no_wait_after=True)
+                                    await el.fill(value, timeout=timeout, force=True, no_wait_after=True)
                             t2 = time.time()
                             logger.info(f"⏱️ Type/Select timing: exec={round((t2-t1)*1000)}ms")
                         except Exception as type_err:
                             logger.warning(f"Forced fill/select failed, error: {type_err}")
                             raise type_err
                         # Minimal wait for state
-                        self._page.wait_for_timeout(50)
+                        await self._page.wait_for_timeout(50)
                         # Mask sensitive fields
                         _sensitive = ('password', 'passwd', 'secret', 'token', 'pin', 'cvv')
                         display_value = '••••••' if any(s in selector.lower() for s in _sensitive) else (value[:60] + ('…' if len(value) > 60 else ''))
@@ -492,7 +570,7 @@ class PlaywrightExecutorService:
                         try:
                             # Wait a brief moment for focus to settle after the previous click
                             for _ in range(10):
-                                is_input = self._page.evaluate("""() => {
+                                is_input = await self._page.evaluate("""() => {
                                     const el = document.activeElement;
                                     if (!el) return false;
                                     const tag = el.tagName;
@@ -505,7 +583,7 @@ class PlaywrightExecutorService:
                                     self._page.keyboard.type(value)
                                     step_result["text"] = f"Typed into focused element (no selector provided)"
                                     return step_result # Success
-                                self._page.wait_for_timeout(200)
+                                await self._page.wait_for_timeout(200)
                         except Exception as fe:
                             logger.warning(f"Smart fallback check failed: {fe}")
                         
@@ -514,24 +592,24 @@ class PlaywrightExecutorService:
                 elif step_type == 'wait_selector':
                     selector = properties.get('selector', '')
                     if selector:
-                        target.locator(selector).first.wait_for(timeout=timeout)
+                        await target.locator(selector).first.wait_for(timeout=timeout)
                         step_result["text"] = f"Element {selector} is now present"
                     else:
                         raise ValueError("Selector is missing for wait_selector step")
                     
                 elif step_type == 'wait':
                     ms = int(properties.get('value', 1000))
-                    self._page.wait_for_timeout(ms)
+                    await self._page.wait_for_timeout(ms)
                     step_result["text"] = f"Waited for {ms}ms"
                     
                 elif step_type == 'hover':
-                    self._wait_for_loading_to_finish()
+                    await self._wait_for_loading_to_finish()
                     selector = properties.get('selector', '')
                     x_coord = properties.get('x')
                     y_coord = properties.get('y')
                     if selector:
                         el = target.locator(selector).first
-                        el.hover(timeout=timeout)
+                        await el.hover(timeout=timeout)
                         step_result["text"] = f"Hovered over {selector}"
                     elif x_coord is not None and y_coord is not None:
                         self._page.mouse.move(float(x_coord), float(y_coord))
@@ -558,10 +636,10 @@ class PlaywrightExecutorService:
                             dy_val = int(float(dy)) if dy is not None else 0
                             
                             if dy == 'bottom':
-                                self._page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                                await self._page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
                                 step_result["text"] = "Scrolled to bottom"
                             elif dy == 'top':
-                                self._page.evaluate("() => window.scrollTo(0, 0)")
+                                await self._page.evaluate("() => window.scrollTo(0, 0)")
                                 step_result["text"] = "Scrolled to top"
                             else:
                                 if x is not None and y is not None:
@@ -571,7 +649,7 @@ class PlaywrightExecutorService:
                         except Exception as e:
                             logger.warning(f"Scroll via mouse.wheel failed: {e}")
                             # Final fallback to window.scrollBy
-                            self._page.evaluate(f"window.scrollBy({dx_val if 'dx_val' in locals() else 0}, {dy_val if 'dy_val' in locals() else 0})")
+                            await self._page.evaluate(f"window.scrollBy({dx_val if 'dx_val' in locals() else 0}, {dy_val if 'dy_val' in locals() else 0})")
                             step_result["text"] = f"Scrolled by X:{dx_val if 'dx_val' in locals() else 0} Y:{dy_val if 'dy_val' in locals() else 0} (fallback)"
                             
                 elif step_type == 'keypress':
@@ -594,12 +672,12 @@ class PlaywrightExecutorService:
                     
                     if operator == 'visible':
                         if selector:
-                            target.locator(selector).first.wait_for(state="visible", timeout=timeout)
+                            await target.locator(selector).first.wait_for(state="visible", timeout=timeout)
                             step_result["text"] = f"Assertion passed: {selector} is visible"
                         else:
                             # If no selector, evaluate innerText of the frame/body
                             eval_target = target if hasattr(target, 'evaluate') else target.locator("body")
-                            content = eval_target.evaluate("el => el.innerText || document.body.innerText")
+                            content = await eval_target.evaluate("el => el.innerText || document.body.innerText")
                             if expected_value in content:
                                 step_result["text"] = f"Assertion passed: text '{expected_value}' found on page"
                             else:
@@ -607,14 +685,19 @@ class PlaywrightExecutorService:
                                 
                     elif operator == 'hidden':
                         if selector:
-                            target.locator(selector).first.wait_for(state="hidden", timeout=timeout)
+                            await target.locator(selector).first.wait_for(state="hidden", timeout=timeout)
                             step_result["text"] = f"Assertion passed: {selector} is hidden"
                         else:
                             raise ValueError("Selector is missing for 'hidden' assertion")
                             
                     elif operator == 'equals':
-                        if selector == 'document.title':
-                            actual_value = target.evaluate("document.title", timeout=timeout)
+                        if selector == 'dialog.message':
+                            if self._last_dialog_message == expected_value:
+                                step_result["text"] = f"Assertion passed: modal message equals '{expected_value}'"
+                            else:
+                                raise ValueError(f"Assertion failed: expected modal '{expected_value}', but found '{self._last_dialog_message}'")
+                        elif selector == 'document.title':
+                            actual_value = await target.evaluate("document.title", timeout=timeout)
                             if actual_value == expected_value:
                                 step_result["text"] = f"Assertion passed: title equals '{expected_value}'"
                             else:
@@ -629,8 +712,14 @@ class PlaywrightExecutorService:
                             raise ValueError("Selector is missing for 'equals' assertion")
                             
                     elif operator == 'contains':
-                        if selector == 'document.title':
-                            actual_value = target.evaluate("document.title", timeout=timeout)
+                        if selector == 'dialog.message':
+                            actual = self._last_dialog_message or ""
+                            if expected_value in actual:
+                                step_result["text"] = f"Assertion passed: modal message contains '{expected_value}'"
+                            else:
+                                raise ValueError(f"Assertion failed: '{expected_value}' not found in modal message '{actual}'")
+                        elif selector == 'document.title':
+                            actual_value = await target.evaluate("document.title", timeout=timeout)
                             if expected_value in actual_value:
                                 step_result["text"] = f"Assertion passed: title contains '{expected_value}'"
                             else:
@@ -643,7 +732,7 @@ class PlaywrightExecutorService:
                                 raise ValueError(f"Assertion failed: '{expected_value}' not found in '{actual_value}'")
                         else:
                             # Use Frame-safe innerText
-                            actual_value = target.locator("body").inner_text()
+                            actual_value = target.locator(await "body").inner_text()
                             if expected_value in actual_value:
                                 step_result["text"] = f"Assertion passed: page content contains '{expected_value}'"
                             else:
@@ -681,7 +770,7 @@ class PlaywrightExecutorService:
                         screenshot_name = f"{safe_name}.png"
                         path = os.path.join(SCREENSHOT_DIR, screenshot_name)
                         full_page = str(properties.get('selector', 'false')).lower() != 'false'
-                        self._page.screenshot(path=path, full_page=full_page)
+                        await self._page.screenshot(path=path, full_page=full_page)
                         step_result["text"] = f"Screenshot captured [Screenshot: /screenshots/{screenshot_name}]"
                         logger.info(f"      📸 Manual screenshot saved: {screenshot_name}")
                     except Exception as se:
@@ -689,7 +778,7 @@ class PlaywrightExecutorService:
 
                 elif step_type == 'switch_tab':
                     value = str(properties.get('value', '0')).strip()
-                    self._page.wait_for_timeout(1000) # Wait for page to open
+                    await self._page.wait_for_timeout(1000) # Wait for page to open
                     pages = self._context.pages
                     if value.isdigit():
                         idx = int(value)
@@ -731,7 +820,7 @@ class PlaywrightExecutorService:
                         self._page.add_script_tag(url="https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js")
                         
                         # Run evaluation
-                        axe_results = self._page.evaluate("async () => await axe.run()")
+                        axe_results = await self._page.evaluate("async () => await axe.run()")
                         violations = axe_results.get('violations', [])
                         
                         # Filter by impact threshold
@@ -774,7 +863,7 @@ class PlaywrightExecutorService:
                         safe_name = "".join(c if c.isalnum() else "_" for c in f"{step_type}_{name}")[:40]
                         screenshot_name = f"live_{safe_name}.png"
                         path = os.path.join(SCREENSHOT_DIR, screenshot_name)
-                        self._page.screenshot(path=path, full_page=False)
+                        await self._page.screenshot(path=path, full_page=False)
                         step_result["text"] += f" [Screenshot: /screenshots/{screenshot_name}]"
                         logger.info(f"      📸 Screenshot saved: {screenshot_name}")
                     except Exception as se:
@@ -788,8 +877,12 @@ class PlaywrightExecutorService:
                     logger.warning(f"⚠️ Step '{name}' failed (Attempt {attempt+1}/{MAX_ATTEMPTS}). Retrying... Error: {str(e)}")
                     
                     # 🤖 AI Auto-Healing Check
-                    logger.info(f"DEBUG Auto-Heal check: type={step_type}, timeout_match={'Timeout' in str(e) or 'Locator' in str(e)}, db={bool(db)}, user_id={user_id}, broken_selector={properties.get('selector')}")
-                    if ("Timeout" in str(e) or "Locator" in str(e) or "Waiting for" in str(e)) and step_type in ['click', 'type', 'hover', 'scroll', 'assert', 'getText', 'getAttribute']:
+                    err_str = str(e).lower()
+                    is_healable_error = ("timeout" in err_str or "locator" in err_str or "waiting for" in err_str or "strict mode" in err_str or "not attached" in err_str or "hidden" in err_str)
+                    is_healable_step = step_type in ['click', 'type', 'fill', 'wait_selector', 'hover', 'scroll', 'assert', 'getText', 'getAttribute']
+                    
+                    logger.info(f"DEBUG Auto-Heal check: type={step_type} (valid={is_healable_step}), err_match={is_healable_error}, db={bool(db)}, user_id={user_id}, broken_selector={properties.get('selector')}")
+                    if is_healable_error and is_healable_step:
                         broken_selector = properties.get('selector', '')
                         if db and user_id and broken_selector:
                             action_val = properties.get('value', '')
@@ -797,7 +890,7 @@ class PlaywrightExecutorService:
                             logger.info(f"🤖 [Auto-Heal] Triggering Expert Heuristic to fix broken selector: {broken_selector}")
                             try:
                                 from app.services.heuristic_healer_service import HeuristicHealerService
-                                new_selector, candidates = HeuristicHealerService.attempt_heal(self._page, broken_selector, action_val, step_type)
+                                new_selector, candidates = await HeuristicHealerService.attempt_heal(self._page, broken_selector, action_val, step_type)
                             except Exception as h_err:
                                 logger.error(f"Heuristic failed: {h_err}")
                                 new_selector, candidates = None, []
@@ -820,30 +913,37 @@ class PlaywrightExecutorService:
                                     # This is insanely faster, uses 95% less tokens, and reduces hallucinations.
                                     clean_html = json.dumps(candidates[:50], indent=2) if candidates else "[]"
                                     
-                                    logger.info(f"🤖 [Auto-Heal] Triggering AI model fallback with {min(len(candidates), 50)} candidates")
+                                    logger.info(f"🤖 [Auto-Heal] Triggering AI model fallback with {min(len(candidates or []), 50)} candidates")
                                     new_selector = AnalysisService.heal_selector(db, user_id, broken_selector, action_val, step_type, clean_html)
                                     
                                     if new_selector and new_selector != broken_selector and "```" not in new_selector:
                                         logger.info(f"✨ [Auto-Heal] AI Success! Replacing '{broken_selector}' with '{new_selector}'")
                                         properties['selector'] = new_selector
                                         step['properties'] = properties
-                                        orig_sel = step.get('_original_properties', {}).get('selector', broken_selector)
+                                        orig_sel = step.get('_original_properties') or {}
+                                        orig_sel_str = orig_sel.get('selector', broken_selector) if isinstance(orig_sel, dict) else broken_selector
                                         step_result["text"] = f"[AI-HEALED -> {new_selector}] "
-                                        step_result["healed_selector"] = f"{orig_sel}:::{new_selector}"
+                                        step_result["healed_selector"] = f"{orig_sel_str}:::{new_selector}"
+                                    else:
+                                        logger.warning(f"❌ [Auto-Heal] AI could not find a valid alternative selector.")
+                                        step_result["text"] = "[AI-HEAL FAILED] "
                                 except Exception as heal_err:
                                     import traceback
                                     logger.error(f"🤖 [Auto-Heal] Fatal AI Exception: {heal_err}")
                                     logger.error(traceback.format_exc())
+                                    step_result["text"] = f"[AI-HEAL ERROR: {str(heal_err)}] "
 
                     # Wait a bit before retry
-                    self._page.wait_for_timeout(1000)
+                    await self._page.wait_for_timeout(1000)
                     continue
                 
                 # If last attempt, log and return error result
                 logger.error(f"❌ E2E Execution Permanent Failure: {str(e)}")
                 step_result["status"] = 500
                 step_result["reason"] = "E2E Error"
-                step_result["text"] = str(e)
+                
+                existing_text = step_result.get("text", "")
+                step_result["text"] = f"{existing_text}\n{str(e)}".strip()
                 
                 if self._page:
                     try:
@@ -854,7 +954,7 @@ class PlaywrightExecutorService:
                         SCREENSHOT_DIR = os.path.join(os.path.dirname(VIDEO_DIR), "screenshots")
                         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
                         path = os.path.join(SCREENSHOT_DIR, screenshot_name)
-                        self._page.screenshot(path=path, full_page=True)
+                        await self._page.screenshot(path=path, full_page=True)
                         step_result["text"] += f"\n[Screenshot: /screenshots/{screenshot_name}]"
                     except Exception as se:
                         logger.error(f"Failed to take error screenshot: {se}")
