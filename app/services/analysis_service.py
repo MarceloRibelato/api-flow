@@ -1010,6 +1010,8 @@ class AnalysisService:
         Analyze this API Response and suggest a list of robust assertions to validate it.
         Make sure to validate important fields inside the JSON body if it exists.
         
+        CRITICAL RULE: Do NOT generate assertions for environment-specific or dynamic headers such as 'Date', 'Server', 'X-Powered-By', 'ETag', 'Content-Length', or CORS headers like 'Access-Control-Allow-Origin' or 'Access-Control-Allow-Credentials'. Focus ONLY on functional headers (like Content-Type) and the body.
+        
         Status: {api_data.get('status')}
         Headers: {json.dumps(api_data.get('headers', {}), indent=2)}
         Body (Truncated): {json.dumps(api_data.get('body', {}), indent=2)[:3000]}

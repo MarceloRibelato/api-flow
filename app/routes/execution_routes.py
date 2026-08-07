@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import Optional, Union, List, Dict, Any
 
 from app.database import get_db
 from app.models.schedule_models import ScheduleModel
@@ -28,6 +28,7 @@ class ExecutionRequest(BaseModel):
     timeout_ms: Optional[int] = 5000 # Step timeout limit
     virtual_users: Optional[int] = 2 # Reused for step retries
     ramp_up_seconds: Optional[int] = 0 # Reused for flow retries
+    dataset: Optional[List[Dict[str, Any]]] = None
 
 from app.auth import get_current_user
 from app.models.user_models import UserDB
@@ -76,6 +77,7 @@ def trigger_execution(
         duration_seconds=req.timeout_ms, # Repurposing duration_seconds for step timeout in E2E
         virtual_users=req.virtual_users, # Repurposing for retryActions
         ramp_up_seconds=req.ramp_up_seconds, # Repurposing for retryTest
+        dataset=req.dataset,
 
         company_id=current_user.company_id, # Use Auth
         user_id=current_user.id # Use Auth

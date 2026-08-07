@@ -82,6 +82,7 @@ class ExecutionHistoryResponse(ExecutionHistoryBase):
     execution_id: str
     created_at: datetime
     updated_at: Optional[datetime] = None
+    success: bool # Read directly from Model property
 
     model_config = ConfigDict(from_attributes=True)
 

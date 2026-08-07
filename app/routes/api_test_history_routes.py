@@ -2,6 +2,7 @@ from datetime import datetime
 import logging
 from typing import List, Optional
 
+import traceback
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
@@ -84,6 +85,31 @@ def get_execution_history(
         logging.error(f"❌ Error getting history: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erro ao buscar: {str(e)}")
 
+
+
+@router.get("/batches")
+def get_history_batches(
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
+    project_id: Optional[int] = None,
+    flow_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
+):
+    """Retorna os batches agrupados e paginados"""
+    try:
+        return HistoryService.get_batches(
+            db=db,
+            company_id=current_user.company_id,
+            page=page,
+            limit=limit,
+            project_id=project_id,
+            flow_id=flow_id
+        )
+    except Exception as e:
+        import logging
+        logging.error(f"❌ Error getting history batches: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar batches: {str(e)}")
 
 @router.get("/averages")
 def get_history_averages(

@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, BigInteger
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, BigInteger, JSON
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -33,6 +33,9 @@ class ScheduleModel(Base):
     virtual_users = Column(Integer, nullable=True)
     duration_seconds = Column(Integer, nullable=True)
     ramp_up_seconds = Column(Integer, nullable=True)
+    
+    # Dataset (Array of Dicts) for Data-Driven execution
+    dataset = Column(JSON, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     

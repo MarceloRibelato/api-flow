@@ -37,7 +37,7 @@ def evaluate_assertion(assertion: dict, resp_status: int, resp_headers: dict,
             except (ValueError, TypeError):
                 is_success = False
 
-        elif src == 'header':
+        elif src in ['header', 'headers']:
             h_key = str(prop).lower() if prop else ""
             actual_val = next((v for k, v in resp_headers.items() if k.lower() == h_key), None)
             str_act = str(actual_val) if actual_val is not None else ""
@@ -67,6 +67,7 @@ def evaluate_assertion(assertion: dict, resp_status: int, resp_headers: dict,
     return {
         "source": src_raw,
         "operator": raw_operator,
+        "property": str(prop) if prop else None,
         "target": str(target),
         "actual": str(actual_val),
         "success": is_success
@@ -111,13 +112,30 @@ def _compare_numeric(actual: int, target: int, op: str) -> bool:
 
 
 def _compare_string(actual: str, target: str, op: str, raw_actual: Any = None) -> bool:
-    """Compares string values based on operator."""
-    if op in ['equals', 'eq', 'is']:
-        return actual == target
-    elif op in ['contains', 'in']:
+    """Compares string values based on operator string, matching frontend capabilities."""
+    op_lower = op.lower() if op else ""
+    
+    if op_lower in ['equals', 'eq', 'is', '==']:
+        return actual == target or str(actual).strip().lower() == str(target).strip().lower()
+    elif op_lower in ['notequals', 'neq', '!=', 'not_equals']:
+        return actual != target
+    elif op_lower in ['contains', 'in']:
         return target in actual
-    elif op in ['exists', 'not_null']:
+    elif op_lower in ['notcontains', 'not_contains', 'not_in']:
+        return target not in actual
+    elif op_lower in ['exists', 'not_null']:
         return raw_actual is not None
+    elif op_lower in ['notexists', 'not_exists', 'is_null']:
+        return raw_actual is None
+    elif op_lower == 'istype':
+        if raw_actual is None: return str(target).lower() == 'null'
+        if str(target).lower() == 'array': return isinstance(raw_actual, list)
+        if str(target).lower() == 'object': return isinstance(raw_actual, dict)
+        if str(target).lower() in ['number', 'integer', 'float']: return isinstance(raw_actual, (int, float))
+        if str(target).lower() == 'boolean': return isinstance(raw_actual, bool)
+        if str(target).lower() == 'string': return isinstance(raw_actual, str)
+        return False
+        
     return False
 
 
@@ -144,7 +162,9 @@ def _evaluate_body_assertion(op: str, prop: str, target: Any, resp_json: Any) ->
     """
     Evaluates a body assertion. Returns (is_success, actual_value).
     """
-    if op == 'exists':
+    op_lower = str(op).lower()
+    
+    if op_lower in ['exists', 'not_null']:
         if not prop:
             is_success = resp_json is not None
             actual_val = "Body Received" if is_success else None
@@ -153,6 +173,15 @@ def _evaluate_body_assertion(op: str, prop: str, target: Any, resp_json: Any) ->
             is_success = actual_val is not None
             actual_val = str(actual_val) if is_success else None
         return is_success, actual_val
+        
+    if op_lower in ['notexists', 'not_exists', 'is_null']:
+        if not prop:
+            is_success = resp_json is None
+            actual_val = None
+        else:
+            actual_val = _resolve_json_path(resp_json, prop)
+            is_success = actual_val is None
+        return is_success, str(actual_val) if actual_val is not None else None
 
     if resp_json is None:
         return False, None
@@ -162,11 +191,33 @@ def _evaluate_body_assertion(op: str, prop: str, target: Any, resp_json: Any) ->
     str_tar = str(target)
 
     is_success = False
-    if op in ['equals', 'eq', 'is']:
-        is_success = str_act == str_tar
-    elif op in ['contains', 'in']:
+    
+    if op_lower in ['equals', 'eq', 'is', '==']:
+        # Try direct type matching first, then string
+        if type(actual_val) == type(target) and actual_val == target:
+            is_success = True
+        else:
+            is_success = str_act == str_tar or str_act.strip() == str_tar.strip()
+    elif op_lower in ['notequals', 'neq', '!=', 'not_equals']:
+        is_success = str_act != str_tar
+    elif op_lower in ['contains', 'in']:
         is_success = str_tar in str_act
-    elif op in ['exists', 'not_null']:
-        is_success = actual_val is not None
+    elif op_lower in ['notcontains', 'not_contains', 'not_in']:
+        is_success = str_tar not in str_act
+    elif op_lower in ['greaterthan', 'gt', '>']:
+        try:
+            is_success = float(actual_val) > float(target)
+        except (ValueError, TypeError): pass
+    elif op_lower in ['lessthan', 'lt', '<']:
+        try:
+            is_success = float(actual_val) < float(target)
+        except (ValueError, TypeError): pass
+    elif op_lower == 'istype':
+        if actual_val is None: is_success = str(target).lower() == 'null'
+        elif str(target).lower() == 'array': is_success = isinstance(actual_val, list)
+        elif str(target).lower() == 'object': is_success = isinstance(actual_val, dict)
+        elif str(target).lower() in ['number', 'integer', 'float']: is_success = isinstance(actual_val, (int, float))
+        elif str(target).lower() == 'boolean': is_success = isinstance(actual_val, bool)
+        elif str(target).lower() == 'string': is_success = isinstance(actual_val, str)
 
     return is_success, actual_val

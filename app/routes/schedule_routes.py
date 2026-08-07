@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 
@@ -28,6 +28,7 @@ class ScheduleCreate(BaseModel):
     virtual_users: Optional[int] = None
     duration_seconds: Optional[int] = None
     ramp_up_seconds: Optional[int] = None
+    dataset: Optional[List[Dict[str, Any]]] = None
 
 class ScheduleOut(BaseModel):
     id: int
@@ -75,7 +76,8 @@ def create_schedule(schedule_in: ScheduleCreate, db: Session = Depends(get_db), 
         company_id=current_user.company_id, # Assign Company
         virtual_users=schedule_in.virtual_users,
         duration_seconds=schedule_in.duration_seconds,
-        ramp_up_seconds=schedule_in.ramp_up_seconds
+        ramp_up_seconds=schedule_in.ramp_up_seconds,
+        dataset=schedule_in.dataset
     )
     db.add(db_schedule)
     db.commit()

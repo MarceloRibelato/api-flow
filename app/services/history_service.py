@@ -160,29 +160,26 @@ class HistoryService:
 
         query = db.query(ApiExecutionHistory)
 
-        if schedule_id is not None:
-             query = query.join(ScheduleModel, ApiExecutionHistory.schedule_id == ScheduleModel.id).filter(
-                  ScheduleModel.id == schedule_id,
-                  ScheduleModel.company_id == company_id
-             )
-        elif project_id is not None:
-             query = query.join(ProductModel, ApiExecutionHistory.project_id == ProductModel.id).filter(
-                  ProductModel.id == project_id,
-                  ProductModel.company_id == company_id
-             )
-        else:
-             query = query.join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
-                  UserDB.company_id == company_id
-             )
+        # Always join UserDB to ensure company scoping
+        query = query.join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
+            UserDB.company_id == company_id
+        )
 
-        if api_id is not None: query = query.filter(ApiExecutionHistory.api_id == str(api_id))
-        if flow_id is not None: query = query.filter(ApiExecutionHistory.flow_id == str(flow_id))
-        if environment_id is not None: query = query.filter(ApiExecutionHistory.environment_id == environment_id)
+        if schedule_id is not None:
+            query = query.filter(ApiExecutionHistory.schedule_id == schedule_id)
+        if project_id is not None:
+            query = query.filter(ApiExecutionHistory.project_id == project_id)
+        if api_id is not None: 
+            query = query.filter(ApiExecutionHistory.api_id == str(api_id))
+        if flow_id is not None: 
+            query = query.filter(ApiExecutionHistory.flow_id == str(flow_id))
+        if environment_id is not None: 
+            query = query.filter(ApiExecutionHistory.environment_id == environment_id)
         if node_id: query = query.filter(ApiExecutionHistory.node_id == str(node_id))
         if execution_type: query = query.filter(ApiExecutionHistory.execution_type == execution_type)
         if method: query = query.filter(ApiExecutionHistory.method == method.upper())
         if status_code is not None: query = query.filter(ApiExecutionHistory.status_code == status_code)
-        if batch_id: query = query.filter(ApiExecutionHistory.batch_id == batch_id)
+        if batch_id: query = query.filter(ApiExecutionHistory.batch_id.startswith(batch_id))
         
         # New: Exact date filter to isolate batches sharing the same ID
         if start_date and start_date == end_date:
@@ -234,6 +231,69 @@ class HistoryService:
             "items": query.offset(skip).limit(limit).all(),
         }
 
+
+    @staticmethod
+    def get_batches(
+        db: Session,
+        company_id: int,
+        page: int = 1,
+        limit: int = 10,
+        project_id: Optional[int] = None,
+        flow_id: Optional[int] = None
+    ):
+        from app.models.api_test_history_models import ApiExecutionHistory
+        from app.models.user_models import UserDB
+        from app.models.product_models import ProductModel
+        
+        # Regex to strip _path... from batch_id
+        clean_batch_expr = func.regexp_replace(ApiExecutionHistory.batch_id, '_path.*$', '')
+        
+        query = db.query(
+            clean_batch_expr.label('batch_id'),
+            func.min(ApiExecutionHistory.created_at).label('started_at'),
+            func.count().label('total_requests'),
+            func.sum(case((ApiExecutionHistory.error_message == None, 1), else_=0)).label('success_requests'),
+            func.sum(case((ApiExecutionHistory.error_message != None, 1), else_=0)).label('failed_requests'),
+            func.sum(ApiExecutionHistory.response_time).label('duration_ms')
+        ).join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
+            UserDB.company_id == company_id,
+            ApiExecutionHistory.batch_id != None
+        )
+
+        if project_id is not None:
+            query = query.filter(ApiExecutionHistory.project_id == project_id)
+        if flow_id is not None:
+            query = query.filter(ApiExecutionHistory.flow_id == str(flow_id))
+
+        query = query.group_by(clean_batch_expr)
+        
+        # Total distinct batches
+        total = query.count()
+        total_pages = (total + limit - 1) // limit if limit > 0 else 0
+        
+        # Pagination
+        skip = (page - 1) * limit
+        results = query.order_by(func.min(ApiExecutionHistory.created_at).desc()).offset(skip).limit(limit).all()
+        
+        batches = []
+        for r in results:
+            batches.append({
+                "id": r.batch_id,
+                "started_at": r.started_at,
+                "total_requests": r.total_requests,
+                "success_requests": r.success_requests or 0,
+                "failed_requests": r.failed_requests or 0,
+                "duration_ms": r.duration_ms or 0
+            })
+            
+        return {
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "batches": batches
+        }
+
     @staticmethod
     def get_by_id(db: Session, execution_id: str, company_id: int):
         query = db.query(ApiExecutionHistory).join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
@@ -246,31 +306,64 @@ class HistoryService:
 
     @staticmethod
     def delete(db: Session, execution_id: str, company_id: int):
-        history = HistoryService.get_by_id(db, execution_id, company_id)
-        if not history: return False
-        db.delete(history)
+        from app.models.user_models import UserDB
+        
+        ids_to_delete = db.query(ApiExecutionHistory.id).outerjoin(UserDB).filter(
+            ApiExecutionHistory.execution_id == execution_id,
+            (UserDB.company_id == company_id) | (ApiExecutionHistory.user_id == None)
+        ).all()
+        
+        ids_list = [row[0] for row in ids_to_delete]
+        if not ids_list:
+            return False
+            
+        deleted_count = db.query(ApiExecutionHistory).filter(
+            ApiExecutionHistory.id.in_(ids_list)
+        ).delete(synchronize_session=False)
+        
         db.commit()
-        return True
+        return deleted_count > 0
 
     @staticmethod
     def delete_batch(db: Session, batch_id: str, company_id: int):
         from app.models.user_models import UserDB
+        
+        ids_to_delete = db.query(ApiExecutionHistory.id).outerjoin(UserDB).filter(
+            ApiExecutionHistory.batch_id.startswith(batch_id),
+            (UserDB.company_id == company_id) | (ApiExecutionHistory.user_id == None)
+        ).all()
+        
+        ids_list = [row[0] for row in ids_to_delete]
+        if not ids_list:
+            return False
+            
         deleted_count = db.query(ApiExecutionHistory).filter(
-            ApiExecutionHistory.batch_id == batch_id,
-            ApiExecutionHistory.id.in_(
-                db.query(ApiExecutionHistory.id).join(UserDB).filter(UserDB.company_id == company_id)
-            )
+            ApiExecutionHistory.id.in_(ids_list)
         ).delete(synchronize_session=False)
+        
         db.commit()
         return deleted_count > 0
 
     @staticmethod
     def clear_all(db: Session, company_id: int):
-        db.query(ApiExecutionHistory).filter(
-            ApiExecutionHistory.id.in_(
-                db.query(ApiExecutionHistory.id).join(UserDB).filter(UserDB.company_id == company_id)
-            )
-        ).delete(synchronize_session=False)
+        from app.models.user_models import UserDB
+        
+        ids_to_delete = db.query(ApiExecutionHistory.id).outerjoin(UserDB).filter(
+            (UserDB.company_id == company_id) | (ApiExecutionHistory.user_id == None)
+        ).all()
+        
+        ids_list = [row[0] for row in ids_to_delete]
+        if not ids_list:
+            return
+            
+        # To avoid passing too many variables in a single IN clause, batch delete
+        batch_size = 5000
+        for i in range(0, len(ids_list), batch_size):
+            batch_ids = ids_list[i:i + batch_size]
+            db.query(ApiExecutionHistory).filter(
+                ApiExecutionHistory.id.in_(batch_ids)
+            ).delete(synchronize_session=False)
+            
         db.commit()
 
     @staticmethod

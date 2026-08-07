@@ -34,7 +34,8 @@ def celery_run_load_test(
     company_id: int, 
     user_id: int,
     test_name: str = None,
-    environment_id: int = None
+    environment_id: int = None,
+    dataset: list = None
 ):
     """
     Celery task that executes a performance load test.
@@ -55,7 +56,8 @@ def celery_run_load_test(
             company_id=company_id,
             user_id=user_id,
             test_name=test_name,
-            environment_id=environment_id
+            environment_id=environment_id,
+            dataset=dataset
         )
     except Exception as e:
         logger.error(f"Celery Task celery_run_load_test failed for job {job_id}: {e}")

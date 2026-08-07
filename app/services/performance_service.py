@@ -30,7 +30,8 @@ class PerformanceService:
         company_id: int, 
         user_id: int,
         test_name: str = None,
-        environment_id: int = None
+        environment_id: int = None,
+        dataset: list = None
     ):
         """
         Executes a load test for a list of API endpoints sequentially per virtual user.
@@ -165,7 +166,12 @@ class PerformanceService:
             with requests.Session() as session:
                 session.trust_env = False
                 vu_variables = {}
+                import random
                 while time.time() < stop_time and active_tests.get(job_id, False):
+                    # Inject dataset row if available
+                    if dataset and isinstance(dataset, list) and len(dataset) > 0:
+                        vu_variables.update(random.choice(dataset))
+                        
                     # Iterate sequentially over the flow
                     executed_any = False
                     for api in parsed_apis:

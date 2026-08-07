@@ -26,6 +26,7 @@ class LoadTestRequest(BaseModel):
     ramp_up_seconds: int = 0
     test_name: Optional[str] = None
     environment_id: Optional[int] = None
+    dataset: Optional[List[Dict[str, Any]]] = None
 
 @router.post("/start")
 def start_performance_test(
@@ -66,7 +67,8 @@ def start_performance_test(
         company_id=current_user.company_id,
         user_id=current_user.id,
         test_name=req.test_name,
-        environment_id=req.environment_id
+        environment_id=req.environment_id,
+        dataset=req.dataset
     )
     
     return {"message": "Performance test started", "job_id": job_id}

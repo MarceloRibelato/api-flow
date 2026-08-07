@@ -43,6 +43,9 @@ class ExecutionRequestCICD(BaseModel):
     virtual_users: Optional[int] = 10
     duration_seconds: Optional[int] = 30
     ramp_up_seconds: Optional[int] = 0
+    
+    # Data-driven parameter
+    dataset: Optional[list] = None
 
 # --- Token Management ---
 @router.get("/tokens", response_model=List[TokenRead])
@@ -163,7 +166,8 @@ def execute_cicd(
         flow_type=req.flow_type or 'api',
         virtual_users=req.virtual_users if req.flow_type == 'performance' else None,
         duration_seconds=req.duration_seconds if req.flow_type == 'performance' else None,
-        ramp_up_seconds=req.ramp_up_seconds if req.flow_type == 'performance' else None
+        ramp_up_seconds=req.ramp_up_seconds if req.flow_type == 'performance' else None,
+        dataset=req.dataset
     )
     db.add(new_schedule)
     db.commit()

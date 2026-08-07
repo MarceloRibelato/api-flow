@@ -184,7 +184,8 @@ def execute_job_logic(schedule_id: int):
                     company_id=schedule.company_id,
                     user_id=schedule.user_id or 1,
                     test_name=perf_result.test_name,
-                    environment_id=env_id
+                    environment_id=env_id,
+                    dataset=getattr(schedule, 'dataset', None)
                 )
                 schedule.last_run_status = 'success' # Indicates it was triggered successfully
                 db.commit()
@@ -197,16 +198,24 @@ def execute_job_logic(schedule_id: int):
             feature_id = schedule.target_id
             env_id = schedule.environment_id
             logger.info(f"🚀 Running Scheduled Feature {feature_id} in Env {env_id}")
+            dataset = getattr(schedule, 'dataset', None)
+            dataset_rows = dataset if isinstance(dataset, list) and len(dataset) > 0 else [None]
             
-            s, f = FlowExecutorService.execute_feature_group(
-                db, feature_id, env_id, schedule.company_id, 
-                schedule_id=schedule.id, user_id=schedule.user_id or 1,
-                max_concurrency=getattr(schedule, 'max_concurrency', None),
-                flow_type=getattr(schedule, 'flow_type', 'api'),
-                capture_video=getattr(schedule, 'capture_video', False),
-                capture_screenshot=getattr(schedule, 'capture_screenshot', False),
-                visible_execution=getattr(schedule, 'visible_execution', False)
-            )
+            s, f = 0, 0
+            for row in dataset_rows:
+                row_s, row_f = FlowExecutorService.execute_feature_group(
+                    db, feature_id, env_id, schedule.company_id, 
+                    schedule_id=schedule.id, user_id=schedule.user_id or 1,
+                    max_concurrency=getattr(schedule, 'max_concurrency', None),
+                    flow_type=getattr(schedule, 'flow_type', 'api'),
+                    capture_video=getattr(schedule, 'capture_video', False),
+                    capture_screenshot=getattr(schedule, 'capture_screenshot', False),
+                    visible_execution=getattr(schedule, 'visible_execution', False),
+                    dataset_row=row
+                )
+                s += row_s
+                f += row_f
+                
             success_count = s
             fail_count = f
 
@@ -218,16 +227,24 @@ def execute_job_logic(schedule_id: int):
             flow_id = schedule.target_id
             env_id = schedule.environment_id
             logger.info(f"🚀 Running Scheduled Flow {flow_id} in Env {env_id}")
+            dataset = getattr(schedule, 'dataset', None)
+            dataset_rows = dataset if isinstance(dataset, list) and len(dataset) > 0 else [None]
             
-            s, f = FlowExecutorService.execute_flow_by_id(
-                db, flow_id, env_id, schedule.company_id, 
-                schedule_id=schedule.id, user_id=schedule.user_id or 1,
-                max_concurrency=getattr(schedule, 'max_concurrency', None),
-                flow_type=getattr(schedule, 'flow_type', 'api'),
-                capture_video=getattr(schedule, 'capture_video', False),
-                capture_screenshot=getattr(schedule, 'capture_screenshot', False),
-                visible_execution=getattr(schedule, 'visible_execution', False)
-            )
+            s, f = 0, 0
+            for row in dataset_rows:
+                row_s, row_f = FlowExecutorService.execute_flow_by_id(
+                    db, flow_id, env_id, schedule.company_id, 
+                    schedule_id=schedule.id, user_id=schedule.user_id or 1,
+                    max_concurrency=getattr(schedule, 'max_concurrency', None),
+                    flow_type=getattr(schedule, 'flow_type', 'api'),
+                    capture_video=getattr(schedule, 'capture_video', False),
+                    capture_screenshot=getattr(schedule, 'capture_screenshot', False),
+                    visible_execution=getattr(schedule, 'visible_execution', False),
+                    dataset_row=row
+                )
+                s += row_s
+                f += row_f
+                
             success_count = s
             fail_count = f
 
@@ -243,15 +260,24 @@ def execute_job_logic(schedule_id: int):
             # Extract concurrency from schedule (if any)
             concurrency = getattr(schedule, 'max_concurrency', None)
             
-            s, f = FlowExecutorService.execute_suite(
-                db, product_id, env_id, schedule.company_id, 
-                schedule_id=schedule.id, user_id=schedule.user_id or 1,
-                max_concurrency=schedule.max_concurrency,
-                flow_type=getattr(schedule, 'flow_type', 'api'),
-                capture_video=getattr(schedule, 'capture_video', False),
-                capture_screenshot=getattr(schedule, 'capture_screenshot', False),
-                visible_execution=getattr(schedule, 'visible_execution', False)
-            )
+            dataset = getattr(schedule, 'dataset', None)
+            dataset_rows = dataset if isinstance(dataset, list) and len(dataset) > 0 else [None]
+            
+            s, f = 0, 0
+            for row in dataset_rows:
+                row_s, row_f = FlowExecutorService.execute_suite(
+                    db, product_id, env_id, schedule.company_id, 
+                    schedule_id=schedule.id, user_id=schedule.user_id or 1,
+                    max_concurrency=schedule.max_concurrency,
+                    flow_type=getattr(schedule, 'flow_type', 'api'),
+                    capture_video=getattr(schedule, 'capture_video', False),
+                    capture_screenshot=getattr(schedule, 'capture_screenshot', False),
+                    visible_execution=getattr(schedule, 'visible_execution', False),
+                    dataset_row=row
+                )
+                s += row_s
+                f += row_f
+                
             success_count = s
             fail_count = f
             

@@ -202,51 +202,89 @@ class FrontRecordingService:
                 steps[assigned_idx].setdefault('matched_requests', []).append(req)
 
         # 2. Build React Flow Structure
+        company_id = None
+        if recording.feature and recording.feature.product:
+            company_id = recording.feature.product.company_id
+        
+        if not company_id:
+            logger.warning(f"Could not save flows for recording {recording.id}: Company ID not found")
+            return
+
+        existing_flow_e2e = FlowService.load(db, recording.feature_id, company_id, flow_type="e2e")
+        existing_flow_api = FlowService.load(db, recording.feature_id, company_id, flow_type="api")
+        
         nodes = []
         edges = []
         card_data = {}
         
-        spacing_x = 300
+        base_name_e2e = f"Fluxo Front: {recording.name}"
+        base_name_api = f"Fluxo API: {recording.name}"
         
-        # ADD START NODE
-        nodes.append({
-            "id": "start",
-            "type": "startNode",
-            "position": {"x": -300, "y": 100},
-            "data": {
-                "name": "Start", 
+        start_x = 0
+        last_existing_node_id = None
+        
+        if existing_flow_e2e and existing_flow_e2e.get("nodes"):
+            nodes = list(existing_flow_e2e["nodes"])
+            edges = list(existing_flow_e2e["edges"])
+            card_data = dict(existing_flow_e2e.get("cardData", {}))
+            base_name_e2e = existing_flow_e2e.get("name") or base_name_e2e
+            
+            if existing_flow_api and existing_flow_api.get("name"):
+                 base_name_api = existing_flow_api.get("name")
+                 
+            # Find the rightmost node to append our new nodes
+            max_x = -9999
+            for n in nodes:
+                x_pos = n.get("position", {}).get("x", 0)
+                if x_pos > max_x:
+                    max_x = x_pos
+                    last_existing_node_id = n.get("id")
+                    
+            start_x = max_x + 300
+        else:
+            # ADD START NODE
+            nodes.append({
+                "id": "start",
+                "type": "startNode",
+                "position": {"x": -300, "y": 100},
+                "data": {
+                    "name": "Start", 
+                    "color": "#10b981",
+                    "childCount": 0,
+                    "isCollapsed": False
+                }
+            })
+            card_data["start"] = {
+                "name": "Start",
                 "color": "#10b981",
-                "childCount": 0,
-                "isCollapsed": False
+                "description": "Início do fluxo",
+                "apiCalls": [],
+                "e2eSteps": [],
+                "bddScenarios": [],
+                "envData": {}
             }
-        })
-        card_data["start"] = {
-            "name": "Start",
-            "color": "#10b981",
-            "description": "Início do fluxo",
-            "apiCalls": [],
-            "e2eSteps": [],
-            "bddScenarios": [],
-            "envData": {}
-        }
+            last_existing_node_id = "start"
+            start_x = 0
 
-        if steps:
+        spacing_x = 300
+
+        if steps and last_existing_node_id:
             edges.append({
-                "id": "edge-start-node-recorded-0",
-                "source": "start",
-                "target": "node-recorded-0",
+                "id": f"edge-{last_existing_node_id}-node-recorded-{recording.id}-0",
+                "source": last_existing_node_id,
+                "target": f"node-recorded-{recording.id}-0",
                 "type": "buttonedge",
                 "animated": True
             })
         
         for idx, step in enumerate(steps):
-            node_id = f"node-recorded-{idx}"
+            node_id = f"node-recorded-{recording.id}-{idx}"
             
             # Node - Data must match NodeDataBasic (no description here)
             nodes.append({
                 "id": node_id,
                 "type": "custom",
-                "position": {"x": idx * spacing_x, "y": 100},
+                "position": {"x": start_x + (idx * spacing_x), "y": 100},
                 "data": {
                     "name": step["name"], 
                     "color": "#3b82f6",
@@ -257,7 +295,7 @@ class FrontRecordingService:
             
             # Edge from previous step
             if idx > 0:
-                source_id = f"node-recorded-{idx-1}"
+                source_id = f"node-recorded-{recording.id}-{idx-1}"
                 edges.append({
                     "id": f"edge-recorded-{source_id}-{node_id}",
                     "source": source_id,
@@ -358,25 +396,18 @@ class FrontRecordingService:
 
         # 3. SAVE DOUBLE FLOWS (E2E and API)
         import copy
-        company_id = None
-        if recording.feature and recording.feature.product:
-            company_id = recording.feature.product.company_id
         
-        if not company_id:
-            logger.warning(f"Could not save flows for recording {recording.id}: Company ID not found")
-            return
-
         # A. Save E2E Flow
         flow_schema_e2e = FlowSaveSchema(
             projectId=recording.feature_id,
             flow_type="e2e",
-            name=f"Fluxo Front: {recording.name}",
+            name=base_name_e2e,
             nodes=nodes,
             edges=edges,
             cardData=card_data
         )
         FlowService.save(db, flow_schema_e2e, company_id, user_id)
-        logger.info(f"✅ Auto-Generated E2E Flow for recording {recording.name}")
+        logger.info(f"✅ Auto-Generated/Updated E2E Flow for recording {recording.name}")
 
         # B. Save API Flow (Parallel)
         # We clone the card data and remove E2E steps for a clean API view
@@ -387,10 +418,10 @@ class FrontRecordingService:
         flow_schema_api = FlowSaveSchema(
             projectId=recording.feature_id,
             flow_type="api",
-            name=f"Fluxo API: {recording.name}",
+            name=base_name_api,
             nodes=nodes,
             edges=edges,
             cardData=card_data_api
         )
         FlowService.save(db, flow_schema_api, company_id, user_id)
-        logger.info(f"✅ Auto-Generated API Flow for recording {recording.name}")
+        logger.info(f"✅ Auto-Generated/Updated API Flow for recording {recording.name}")

@@ -49,7 +49,7 @@ class FlowExecutorService:
         return _is_blocked_domain(url)
 
     @staticmethod
-    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False):
+    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False, dataset_row: dict = None):
         # (imports now at top of file)
 
         # Resolve fallback env if none provided
@@ -147,6 +147,9 @@ class FlowExecutorService:
             flow_fail_count = 0 
 
             base_variables_dict = copy.deepcopy(variables_dict)
+            if dataset_row and isinstance(dataset_row, dict):
+                logger.info("Injecting dataset_row variables into execution context")
+                base_variables_dict.update(dataset_row)
 
             final_variables = copy.deepcopy(base_variables_dict)
 
@@ -302,7 +305,11 @@ class FlowExecutorService:
                                             url_val = FlowExecutorService.replace_vars(raw_conn, current_path_vars) or ""
                                             url = f"db://{url_val}" if url_val else "db://sql-database"
                                             
-                                            db_res = DatabaseExecutorService.execute_db_step(step_data, current_path_vars)
+                                            loop = asyncio.get_event_loop()
+                                            import functools
+                                            db_func = functools.partial(DatabaseExecutorService.execute_db_step, step_data, current_path_vars)
+                                            db_res = await loop.run_in_executor(None, db_func)
+                                            
                                             resp_status = db_res['status']
                                             resp_reason = db_res['reason']
                                             resp_text = db_res['text']
@@ -325,7 +332,11 @@ class FlowExecutorService:
                                             method = "MQ_" + str(step_data.get('broker', 'mq')).upper()
                                             url = step_data.get('queueName', 'topic/queue')
                                             
-                                            mq_res = QueueExecutorService.execute_queue_step(step_data, current_path_vars)
+                                            loop = asyncio.get_event_loop()
+                                            import functools
+                                            mq_func = functools.partial(QueueExecutorService.execute_queue_step, step_data, current_path_vars)
+                                            mq_res = await loop.run_in_executor(None, mq_func)
+                                            
                                             resp_status = mq_res['status']
                                             resp_reason = "MQ Success" if resp_status == 200 else "MQ Error"
                                             resp_text = str(mq_res.get('message') or mq_res.get('error') or '')
@@ -342,7 +353,10 @@ class FlowExecutorService:
                                             resp_reason = "MQ Error"
                                             resp_text = str(mq_err)
                                             final_error_message = str(mq_err)
-                                    elif step_type == 'e2e':
+                                            
+                                    attempt = 0 # Ensure attempt is defined for all flow types before logging history
+                                    
+                                    if step_type == 'e2e':
                                         try:
                                             if not e2e_executor:
                                                 if flow_type == 'mobile':
@@ -420,6 +434,12 @@ class FlowExecutorService:
                                                 resp_reason = "E2E Driver Error"
                                                 resp_text = str(e)
                                         else:
+                                            # Inject global config (retries/timeout) dynamically from Schedule Config for API steps
+                                            if global_retry_actions is not None:
+                                                step_data['retries'] = global_retry_actions
+                                            if global_timeout_ms is not None:
+                                                step_data['timeout'] = global_timeout_ms
+
                                             url = ensure_absolute_url(url)
                                             
                                             # ✅ RE-ENABLED: Normalize URL for Docker internal networking
@@ -547,7 +567,13 @@ class FlowExecutorService:
                                                         step_data['_was_cached'] = True
                                                     else:
                                                         start_time = time.time()
-                                                        resp = flow_session.request(method, url, headers=headers, data=body, params=params, timeout=30)
+                                                        api_timeout = float(step_data.get('timeout', 30000)) / 1000.0
+                                                        
+                                                        loop = asyncio.get_event_loop()
+                                                        import functools
+                                                        request_func = functools.partial(flow_session.request, method, url, headers=headers, data=body, params=params, timeout=api_timeout)
+                                                        resp = await loop.run_in_executor(None, request_func)
+                                                        
                                                         duration = int((time.time() - start_time) * 1000)
                                                         resp_status = resp.status_code
                                                         resp_reason = resp.reason
@@ -622,6 +648,8 @@ class FlowExecutorService:
                                 base_api_name = step_data.get('name') or "Step"
                                 if step_data.get('_was_cached'):
                                     base_api_name += " (CACHED)"
+                                if attempt > 0:
+                                    base_api_name += f":::RETRIES:::{attempt}"
 
                                 hist = ExecutionHistoryCreate(
                                     batch_id=batch_id,
@@ -635,6 +663,8 @@ class FlowExecutorService:
                                     node_name=card.get('name'),
                                     method=method,
                                     url=url,
+                                    request_headers=headers,
+                                    request_body=body,
                                     status_code=resp_status,
                                     response_body=resp_text,
                                     response_time=duration,
@@ -847,7 +877,7 @@ class FlowExecutorService:
         return variables
 
     @staticmethod
-    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False):
+    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
         """
         Executes all flows within a specific feature.
         """
@@ -906,7 +936,7 @@ class FlowExecutorService:
                         thread_db, latest_flow, feature.product_id, env_id, company_id, 
                         variables.copy(), feature_name=feature.name, schedule_id=schedule_id, 
                         user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, 
-                        flow_type=flow_type, visible_execution=visible_execution
+                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row
                     )
                     f_success = s
                     f_fail = f
@@ -929,7 +959,7 @@ class FlowExecutorService:
                     success_count += s
                     fail_count += f
             else:
-                s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution)
+                s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row)
                 success_count += s
                 fail_count += f
         else:
@@ -938,7 +968,7 @@ class FlowExecutorService:
         return success_count, fail_count
 
     @staticmethod
-    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False):
+    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
         """
         Executes a single specific flow.
         """
@@ -999,7 +1029,7 @@ class FlowExecutorService:
                         thread_db, flow_meta, product_id, env_id, company_id, 
                         variables.copy(), feature_name=feature_name, schedule_id=schedule_id, 
                         user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, 
-                        flow_type=flow_type, visible_execution=visible_execution
+                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row
                     )
                     f_success = s
                     f_fail = f
@@ -1018,10 +1048,10 @@ class FlowExecutorService:
                 fail_count += f
             return success_count, fail_count
         else:
-            return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution)
+            return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row)
 
     @staticmethod
-    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False):
+    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
         """
         Executes all features within a product.
         """
@@ -1073,7 +1103,7 @@ class FlowExecutorService:
                         variables.copy(),
                         feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id,
                         capture_video=capture_video, capture_screenshot=capture_screenshot,
-                        flow_type=flow_type, visible_execution=visible_execution
+                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row
                     )
                     f_success = s
                     f_fail = f

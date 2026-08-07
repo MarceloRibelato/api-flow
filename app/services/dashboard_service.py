@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, case
 from app.models.api_test_history_models import ApiExecutionHistory
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
@@ -49,7 +49,12 @@ class DashboardService:
             latest_batch = latest_batch_subq.order_by(desc(ApiExecutionHistory.created_at)).first()
             
             if latest_batch and latest_batch[0]:
-                query = query.filter(ApiExecutionHistory.batch_id == latest_batch[0])
+                full_batch_id = latest_batch[0]
+                if "_path_" in full_batch_id:
+                    base_batch_id = full_batch_id.split("_path_")[0]
+                    query = query.filter(ApiExecutionHistory.batch_id.startswith(base_batch_id))
+                else:
+                    query = query.filter(ApiExecutionHistory.batch_id == full_batch_id)
             else:
                 # If no batch_id, maybe just limit to the very last execution record time
                 pass
@@ -98,7 +103,7 @@ class DashboardService:
         return [
             {
                 "id": f.id,
-                "api_name": f.api_name or "Unknown API",
+                "api_name": f"{f.feature_name} (Web)" if f.execution_type == 'web' and f.feature_name else (f.api_name or "Unknown API"),
                 "flow_id": f.flow_id,
                 "created_at": f.created_at,
                 "status_code": f.status_code,
@@ -141,19 +146,35 @@ class DashboardService:
         query = db.query(ApiExecutionHistory)
         query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only)
         
-        slowest = query.order_by(desc(ApiExecutionHistory.response_time)).limit(limit).all()
-        return [
-            {
+        slowest = query.order_by(desc(ApiExecutionHistory.response_time)).limit(limit * 5).all()
+        
+        results = []
+        seen_batches = set()
+        
+        for f in slowest:
+            if f.execution_type == 'web':
+                if f.batch_id and f.batch_id in seen_batches:
+                    continue
+                if f.batch_id:
+                    seen_batches.add(f.batch_id)
+                api_name = f"{f.feature_name} (Web)" if f.feature_name else "Web Flow"
+            else:
+                api_name = f.api_name or "Unknown API"
+                
+            results.append({
                 "id": f.id,
-                "api_name": f.api_name or "Unknown API",
+                "api_name": api_name,
                 "flow_id": f.flow_id,
                 "created_at": f.created_at,
                 "response_time": f.response_time,
                 "status_code": f.status_code,
                 "environment_name": f.environment_name
-            }
-            for f in slowest
-        ]
+            })
+            
+            if len(results) >= limit:
+                break
+                
+        return results
 
     @staticmethod
     def get_daily_stats(db: Session, days: int = 7, project_id: int = None, flow_id: int = None,
@@ -216,8 +237,14 @@ class DashboardService:
                              start_date: datetime = None, end_date: datetime = None,
                              execution_type: str = None,
                              search_term: str = None, status_code: str = None, last_execution_only: bool = False) -> List[Dict[str, Any]]:
+        
+        api_name_expr = case(
+            (ApiExecutionHistory.execution_type == 'web', func.coalesce(ApiExecutionHistory.feature_name, 'Web Flow')),
+            else_=func.coalesce(ApiExecutionHistory.api_name, 'Unknown API')
+        ).label('api_name')
+
         query = db.query(
-            ApiExecutionHistory.api_name,
+            api_name_expr,
             func.count(ApiExecutionHistory.id).label('failure_count')
         ).filter(
              ApiExecutionHistory.error_message != None
@@ -226,14 +253,14 @@ class DashboardService:
         query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only)
         
         top_failures = query.group_by(
-            ApiExecutionHistory.api_name
+            api_name_expr
         ).order_by(
             desc('failure_count')
         ).limit(limit).all()
         
         return [
             {
-                "api_name": tf.api_name or "Unknown API",
+                "api_name": tf.api_name,
                 "failure_count": tf.failure_count
             }
             for tf in top_failures
