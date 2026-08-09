@@ -93,6 +93,7 @@ def get_history_batches(
     limit: int = Query(10, ge=1, le=100),
     project_id: Optional[int] = None,
     flow_id: Optional[int] = None,
+    schedule_type: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
@@ -104,7 +105,8 @@ def get_history_batches(
             page=page,
             limit=limit,
             project_id=project_id,
-            flow_id=flow_id
+            flow_id=flow_id,
+            schedule_type=schedule_type
         )
     except Exception as e:
         import logging

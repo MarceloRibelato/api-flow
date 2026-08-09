@@ -101,6 +101,7 @@ class EdgeSchema(BaseModel):
     target: str = Field(..., description="ID do nó de destino")
     type: str = Field("buttonedge", description="Tipo visual da aresta")
     animated: bool = Field(True, description="Animação de fluxo")
+    label: Optional[str] = Field(None, description="Rótulo (nome) da rota")
 
 class EnvSpecificData(BaseModel):
     description: str = ""

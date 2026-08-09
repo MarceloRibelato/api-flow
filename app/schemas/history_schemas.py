@@ -77,6 +77,21 @@ class ExecutionHistoryCreate(ExecutionHistoryBase):
     pass
 
 
+class ApiHistoryCreate(ExecutionHistoryBase):
+    execution_type: Optional[str] = "api"
+
+
+class WebHistoryCreate(ExecutionHistoryBase):
+    execution_type: Optional[str] = "web"
+    video_url: Optional[str] = None
+    healed_selector: Optional[str] = None
+
+
+class MobileHistoryCreate(ExecutionHistoryBase):
+    execution_type: Optional[str] = "mobile"
+    video_url: Optional[str] = None
+
+
 class ExecutionHistoryResponse(ExecutionHistoryBase):
     id: int
     execution_id: str

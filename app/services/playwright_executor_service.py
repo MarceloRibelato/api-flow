@@ -471,9 +471,20 @@ class PlaywrightExecutorService:
                         except Exception as e:
                             logger.warning(f"      ⚠️ Could not sanitize URL for Docker: {e}")
 
-                        # Use 'commit' for maximum resilience in Docker, same as Web Studio
-                        await self._page.goto(url, timeout=timeout, wait_until='commit')
-                        step_result["text"] = f"Navigated to {url}"
+                        # Wait until load so subsequent steps don't fail immediately because the page hasn't loaded
+                        await self._page.goto(url, timeout=timeout, wait_until='load')
+                        
+                        # Capture a screenshot if requested, to ensure UI shows the page was loaded
+                        if capture_screenshot:
+                            try:
+                                screenshot_bytes = await self._page.screenshot()
+                                s_url = await self._save_screenshot(screenshot_bytes)
+                                step_result["text"] = f"Navigated to {url} [Screenshot: {s_url}]"
+                            except Exception as e:
+                                logger.warning(f"Failed to capture screenshot after navigation: {e}")
+                                step_result["text"] = f"Navigated to {url}"
+                        else:
+                            step_result["text"] = f"Navigated to {url}"
                     else:
                         raise ValueError("URL is missing for browser step")
 
@@ -620,7 +631,7 @@ class PlaywrightExecutorService:
                 elif step_type == 'scroll':
                     selector = properties.get('selector', '')
                     if selector:
-                        target.locator(selector).first.scroll_into_view_if_needed(timeout=timeout)
+                        await target.locator(selector).first.scroll_into_view_if_needed(timeout=timeout)
                         step_result["text"] = f"Scrolled to {selector}"
                     else:
                         dx = properties.get('deltaX', 0)
@@ -656,7 +667,7 @@ class PlaywrightExecutorService:
                     key = properties.get('value', 'Enter')
                     selector = properties.get('selector', '')
                     if selector:
-                        target.locator(selector).first.press(key, timeout=timeout)
+                        await target.locator(selector).first.press(key, timeout=timeout)
                         step_result["text"] = f"Pressed {key} on {selector}"
                     else:
                         self._page.keyboard.press(key)
@@ -703,7 +714,7 @@ class PlaywrightExecutorService:
                             else:
                                 raise ValueError(f"Assertion failed: expected title '{expected_value}', but found '{actual_value}'")
                         elif selector:
-                            actual_value = target.locator(selector).first.inner_text(timeout=timeout)
+                            actual_value = await target.locator(selector).first.inner_text(timeout=timeout)
                             if actual_value == expected_value:
                                 step_result["text"] = f"Assertion passed: text for {selector} equals '{expected_value}'"
                             else:
@@ -725,14 +736,14 @@ class PlaywrightExecutorService:
                             else:
                                 raise ValueError(f"Assertion failed: '{expected_value}' not found in title '{actual_value}'")
                         elif selector:
-                            actual_value = target.locator(selector).first.inner_text(timeout=timeout)
+                            actual_value = await target.locator(selector).first.inner_text(timeout=timeout)
                             if expected_value in actual_value:
                                 step_result["text"] = f"Assertion passed: text for {selector} contains '{expected_value}'"
                             else:
                                 raise ValueError(f"Assertion failed: '{expected_value}' not found in '{actual_value}'")
                         else:
                             # Use Frame-safe innerText
-                            actual_value = target.locator(await "body").inner_text()
+                            actual_value = await target.locator("body").inner_text()
                             if expected_value in actual_value:
                                 step_result["text"] = f"Assertion passed: page content contains '{expected_value}'"
                             else:
@@ -741,7 +752,7 @@ class PlaywrightExecutorService:
                 elif step_type == 'getText':
                     selector = properties.get('selector', '')
                     if selector:
-                        val = target.locator(selector).first.inner_text(timeout=timeout)
+                        val = await target.locator(selector).first.inner_text(timeout=timeout)
                         step_result["text"] = val
                     else:
                         raise ValueError("Selector is missing for getText step")
@@ -750,7 +761,7 @@ class PlaywrightExecutorService:
                     selector = properties.get('selector', '')
                     attr = properties.get('attribute', 'value')
                     if selector:
-                        val = target.locator(selector).first.get_attribute(attr, timeout=timeout)
+                        val = await target.locator(selector).first.get_attribute(attr, timeout=timeout)
                         step_result["text"] = val if val is not None else ""
                     else:
                         raise ValueError("Selector is missing for getAttribute step")

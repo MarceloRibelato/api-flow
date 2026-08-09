@@ -60,6 +60,7 @@ class FlowEdgeDB(Base):
     target = Column(String(255), index=True)
     type = Column(String(50))
     animated = Column(Boolean, default=False)
+    label = Column(String(255), nullable=True)
     
     flow = relationship("FlowDB", back_populates="flow_edges")
 

@@ -34,7 +34,7 @@ from app.services.url_utils import (
 
 logger = logging.getLogger(__name__)
 
-class FlowExecutorService:
+class WebExecutorService:
     # ── Delegating wrappers for backward compatibility ──
     @staticmethod
     def replace_vars(text, variables):
@@ -49,7 +49,7 @@ class FlowExecutorService:
         return _is_blocked_domain(url)
 
     @staticmethod
-    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False, dataset_row: dict = None):
+    def execute(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False, dataset_row: dict = None):
         # (imports now at top of file)
 
         # Resolve fallback env if none provided
@@ -220,8 +220,8 @@ class FlowExecutorService:
                             
                             # Combine steps into a unified execution list
                             all_steps = []
-                            is_e2e_flow = flow_data.get('flow_type') in ['e2e', 'mobile', 'web'] or flow_meta.get('flow_type') in ['e2e', 'mobile', 'web']
-                            actual_exec_type = "mobile" if flow_type == 'mobile' else ("web" if flow_type in ['e2e', 'web'] or flow_data.get('flow_type') in ['e2e', 'web'] else "api")
+                            is_e2e_flow = flow_data.get('flow_type') in ['e2e', 'mobile'] or flow_meta.get('flow_type') in ['e2e', 'mobile']
+                            actual_exec_type = "mobile" if flow_type == 'mobile' else ("web" if flow_type == 'e2e' or flow_data.get('flow_type') == 'e2e' else "api")
                             
                             # Do NOT execute api_calls if this is an E2E node,
                             # because they are mapped APIs from the browser extension.
@@ -302,7 +302,7 @@ class FlowExecutorService:
                                             method = "SQL"
                                             props = step_data.get('properties', {}) if isinstance(step_data.get('properties'), dict) else {}
                                             raw_conn = step_data.get('connection_string') or step_data.get('connectionString') or props.get('connection_string') or props.get('connectionString') or ""
-                                            url_val = FlowExecutorService.replace_vars(raw_conn, current_path_vars) or ""
+                                            url_val = WebExecutorService.replace_vars(raw_conn, current_path_vars) or ""
                                             url = f"db://{url_val}" if url_val else "db://sql-database"
                                             
                                             loop = asyncio.get_event_loop()
@@ -373,7 +373,7 @@ class FlowExecutorService:
                                                     await e2e_executor.start(video_dir=video_dir if capture_video else None)
                                             # Resolve variables in E2E step data
                                             step_data_str = json.dumps(step_data)
-                                            resolved_step_data = json.loads(FlowExecutorService.replace_vars(step_data_str, current_path_vars))
+                                            resolved_step_data = json.loads(WebExecutorService.replace_vars(step_data_str, current_path_vars))
                                             
                                             # Preserve original unresolved properties for healing
                                             resolved_step_data['_original_properties'] = step_data.get('properties', {})
@@ -393,7 +393,7 @@ class FlowExecutorService:
                                                 val = step_data['properties']['value'].strip()
                                                 if val and not val.startswith(('http://', 'https://')):
                                                     val = f"http://{val}"
-                                                step_data['properties']['value'] = FlowExecutorService.sanitize_url_for_docker(val)
+                                                step_data['properties']['value'] = WebExecutorService.sanitize_url_for_docker(val)
                                                 logger.info(f"      🔗 Sanitize E2E URL: {val} -> {step_data['properties']['value']}")
 
                                             # Execute real Playwright step
@@ -415,7 +415,7 @@ class FlowExecutorService:
                                             resp_text = str(e)
                                     else:
                                         method = step_data.get('method', 'GET')
-                                        url = FlowExecutorService.replace_vars(step_data.get('url', ''), current_path_vars)
+                                        url = WebExecutorService.replace_vars(step_data.get('url', ''), current_path_vars)
                                         
                                         if method == 'PYTHON':
                                             try:
@@ -443,9 +443,9 @@ class FlowExecutorService:
                                             url = ensure_absolute_url(url)
                                             
                                             # ✅ RE-ENABLED: Normalize URL for Docker internal networking
-                                            url = FlowExecutorService.sanitize_url_for_docker(url)
+                                            url = WebExecutorService.sanitize_url_for_docker(url)
 
-                                            if FlowExecutorService.is_blocked_domain(url):
+                                            if WebExecutorService.is_blocked_domain(url):
                                                 logger.warning(f"      ⛔ Skipping Blocked/Ad Domain: {url}")
                                                 return
                                             
@@ -462,7 +462,7 @@ class FlowExecutorService:
                                                 headers_raw = mapping
                                             
                                             headers_json_str = json.dumps(headers_raw)
-                                            headers = json.loads(FlowExecutorService.replace_vars(headers_json_str, current_path_vars))
+                                            headers = json.loads(WebExecutorService.replace_vars(headers_json_str, current_path_vars))
                                             headers = {str(k): str(v) for k, v in headers.items() if k.lower() not in ['content-length', 'host']} 
                                             
                                             headers_lower = {k.lower(): v for k, v in headers.items()}
@@ -483,7 +483,7 @@ class FlowExecutorService:
                                                 params_raw = mapping
                                             
                                             params_json_str = json.dumps(params_raw)
-                                            params = json.loads(FlowExecutorService.replace_vars(params_json_str, current_path_vars))
+                                            params = json.loads(WebExecutorService.replace_vars(params_json_str, current_path_vars))
                                             if not isinstance(params, dict): params = {}
                                             params = {str(k): str(v) for k, v in params.items() if v is not None}
 
@@ -491,9 +491,9 @@ class FlowExecutorService:
                                             body_raw = step_data.get('body', '')
                                             if isinstance(body_raw, (dict, list)):
                                                 body_json_str = json.dumps(body_raw)
-                                                body = FlowExecutorService.replace_vars(body_json_str, current_path_vars)
+                                                body = WebExecutorService.replace_vars(body_json_str, current_path_vars)
                                             else:
-                                                body = FlowExecutorService.replace_vars(str(body_raw), current_path_vars)
+                                                body = WebExecutorService.replace_vars(str(body_raw), current_path_vars)
                                             
                                             if body is None: body = ""
 
@@ -899,7 +899,7 @@ class FlowExecutorService:
 
         # list_by_project actually returns flows for a "feature" (project in old naming)
         flows = FlowService.list_by_project(db, feature.id, company_id)
-        variables = FlowExecutorService.get_merged_variables(db, feature.product_id, env_id)
+        variables = WebExecutorService.get_merged_variables(db, feature.product_id, env_id)
 
         success_count = 0
         fail_count = 0
@@ -932,7 +932,7 @@ class FlowExecutorService:
                 start_t = time.time()
                 try:
                     logger.info(f"  📂 [PARALLEL] Feature Run {idx+1}/{max_workers} STARTED: {feature.name} (ID: {feature.id}) at t={start_t:.2f}")
-                    s, f = FlowExecutorService.execute_flow_logic(
+                    s, f = WebExecutorService.execute_flow_logic(
                         thread_db, latest_flow, feature.product_id, env_id, company_id, 
                         variables.copy(), feature_name=feature.name, schedule_id=schedule_id, 
                         user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, 
@@ -959,18 +959,13 @@ class FlowExecutorService:
                     success_count += s
                     fail_count += f
             else:
-                s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row)
+                s, f = WebExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row)
                 success_count += s
                 fail_count += f
         else:
             logger.warning(f"No flows found for feature {feature.id}")
         
         return success_count, fail_count
-
-    @staticmethod
-    def execute_flow(db: Session, flow_id: str, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
-        # We route directly to execute_flow_by_id
-        return FlowExecutorService.execute_flow_by_id(db, flow_id, env_id, company_id, schedule_id, user_id, 1, flow_type, capture_video, capture_screenshot, visible_execution, dataset_row)
 
     @staticmethod
     def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
@@ -1015,7 +1010,7 @@ class FlowExecutorService:
         logger.info(f"🚀 Executing Single Flow: {flow_meta['name']} (ID: {flow.id}) in Feature {feature_name}")
 
         # 4. Prepare Variables
-        variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
+        variables = WebExecutorService.get_merged_variables(db, product_id, env_id)
 
         # 5. Execute
         success_count = 0
@@ -1030,7 +1025,7 @@ class FlowExecutorService:
                 thread_db = SessionLocal()
                 try:
                     logger.info(f"  📂 Processing Flow Run {idx+1}/{max_workers}: {flow_meta['name']} (ID: {flow.id}) [Thread]")
-                    s, f = FlowExecutorService.execute_flow_logic(
+                    s, f = WebExecutorService.execute_flow_logic(
                         thread_db, flow_meta, product_id, env_id, company_id, 
                         variables.copy(), feature_name=feature_name, schedule_id=schedule_id, 
                         user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, 
@@ -1053,7 +1048,7 @@ class FlowExecutorService:
                 fail_count += f
             return success_count, fail_count
         else:
-            return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row)
+            return WebExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row)
 
     @staticmethod
     def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
@@ -1077,7 +1072,7 @@ class FlowExecutorService:
                 logger.info(f"    ⚠️ No Environment selected for Suite. Fallback to First Env: {fallback_env.name} (ID: {fallback_env.id})")
 
         # RAW VARIABLES (Objects converted to safe dicts)
-        variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
+        variables = WebExecutorService.get_merged_variables(db, product_id, env_id)
         
         total_success = 0
         total_fail = 0
@@ -1103,7 +1098,7 @@ class FlowExecutorService:
                         logger.warning(f"No flows of type '{flow_type}' found for feature {feature['id']}. Skipping.")
                         return f_success, f_fail
                     latest_flow = typed_flows[0]
-                    s, f = FlowExecutorService.execute_flow_logic(
+                    s, f = WebExecutorService.execute_flow_logic(
                         thread_db, latest_flow, product_id, env_id, company_id, 
                         variables.copy(),
                         feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id,

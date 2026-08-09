@@ -62,11 +62,11 @@ class FlowService:
         if not FlowService._verify_project_ownership(db, data.projectId, company_id):
              raise ValueError("Projeto não pertence à sua empresa")
 
-        # 1. Get or Create Flow
+        # 1. Get or Create Flow (with lock to prevent concurrent save deadlocks)
         flow = db.query(FlowDB).filter(
             FlowDB.project_id == data.projectId, 
             FlowDB.flow_type == data.flow_type
-        ).first()
+        ).with_for_update().first()
         
         if not flow:
             flow_name = data.name if data.name else f"Flow {str(data.flow_type).upper()}"
@@ -125,7 +125,8 @@ class FlowService:
                 source=str(e.source),
                 target=str(e.target),
                 type=e.type,
-                animated=e.animated
+                animated=e.animated,
+                label=e.label
             ))
         if edge_db_list:
             db.add_all(edge_db_list)
@@ -211,7 +212,8 @@ class FlowService:
             "source": e.source,
             "target": e.target,
             "type": e.type,
-            "animated": e.animated
+            "animated": e.animated,
+            "label": e.label
         } for e in flow.flow_edges]
 
         cardData = {}

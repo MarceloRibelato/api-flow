@@ -63,14 +63,25 @@ async def lifespan(app: FastAPI):
             logger.info("Tabelas verificadas/criadas via metadata sqlalchemy")
             
             # Step 1.5: Adicionar colunas novas que não foram criadas via metadata
+            from sqlalchemy import text
             try:
-                from sqlalchemy import text
                 with engine.begin() as conn:
                     conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS db_queries JSON DEFAULT '[]'::json;"))
-                    conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS message_queues JSON DEFAULT '[]'::json;"))
-                logger.info("Colunas db_queries e message_queues adicionadas/verificadas com sucesso.")
             except Exception as e:
-                logger.info(f"Erro ao adicionar coluna db_queries (pode já existir): {e}")
+                logger.info(f"Erro db_queries: {e}")
+            
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS message_queues JSON DEFAULT '[]'::json;"))
+            except Exception as e:
+                logger.info(f"Erro message_queues: {e}")
+
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE flow_edges ADD COLUMN IF NOT EXISTS label VARCHAR(255);"))
+            except Exception as e:
+                logger.info(f"Erro label: {e}")
+            logger.info("Colunas dinâmicas processadas.")
             
             # CRITICAL: Dispose engine to release connections before Alembic takes over
             # This prevents deadlocks in standard PostgreSQL/SQLAlchemy pooling.

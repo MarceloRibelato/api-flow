@@ -5,7 +5,13 @@ from typing import Optional
 from sqlalchemy import distinct, func, case
 from sqlalchemy.orm import Session
 
-from app.models.api_test_history_models import ApiExecutionHistory, ApiExecutionHistoryArchive
+from app.models.api_test_history_models import (
+    ApiExecutionHistory,
+    ApiExecutionHistoryArchive,
+    ApiHistoryDetails,
+    WebHistoryDetails,
+    MobileHistoryDetails
+)
 from app.models.user_models import UserDB
 from app.schemas.history_schemas import ExecutionHistoryCreate
 
@@ -74,13 +80,22 @@ class HistoryService:
         db_objects = []
         timestamp = int(datetime.now().timestamp())
         
+        model_map = {
+            "api": ApiHistoryDetails,
+            "web": WebHistoryDetails,
+            "mobile": MobileHistoryDetails
+        }
+        
         for i, history in enumerate(histories):
             # Generate unique ID for each item in batch
             execution_id = f"exec_{uuid.uuid4().hex[:10]}_{timestamp}_{i}"
             
             filtered_vars = HistoryService._filter_variables(history)
             
-            db_history = ApiExecutionHistory(
+            exec_type = history.execution_type or "api"
+            ModelClass = model_map.get(exec_type, ApiExecutionHistory)
+            
+            db_history = ModelClass(
                 execution_id=execution_id,
                 batch_id=history.batch_id,
                 api_id=history.api_id,
@@ -239,11 +254,13 @@ class HistoryService:
         page: int = 1,
         limit: int = 10,
         project_id: Optional[int] = None,
-        flow_id: Optional[int] = None
+        flow_id: Optional[int] = None,
+        schedule_type: Optional[str] = None
     ):
         from app.models.api_test_history_models import ApiExecutionHistory
         from app.models.user_models import UserDB
         from app.models.product_models import ProductModel
+        from app.models.schedule_models import ScheduleModel
         
         # Regex to strip _path... from batch_id
         clean_batch_expr = func.regexp_replace(ApiExecutionHistory.batch_id, '_path.*$', '')
@@ -254,14 +271,24 @@ class HistoryService:
             func.count().label('total_requests'),
             func.sum(case((ApiExecutionHistory.error_message == None, 1), else_=0)).label('success_requests'),
             func.sum(case((ApiExecutionHistory.error_message != None, 1), else_=0)).label('failed_requests'),
-            func.sum(ApiExecutionHistory.response_time).label('duration_ms')
+            func.sum(ApiExecutionHistory.response_time).label('duration_ms'),
+            func.max(ApiExecutionHistory.execution_type).label('execution_type')
         ).join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
             UserDB.company_id == company_id,
             ApiExecutionHistory.batch_id != None
         )
 
-        if project_id is not None:
+        if schedule_type is not None:
+            query = query.join(ScheduleModel, ApiExecutionHistory.schedule_id == ScheduleModel.id).filter(
+                ScheduleModel.type == schedule_type
+            )
+            if schedule_type == 'suite' and project_id is not None:
+                query = query.filter(ScheduleModel.target_id == project_id)
+            elif project_id is not None:
+                query = query.filter(ApiExecutionHistory.project_id == project_id)
+        elif project_id is not None:
             query = query.filter(ApiExecutionHistory.project_id == project_id)
+        
         if flow_id is not None:
             query = query.filter(ApiExecutionHistory.flow_id == str(flow_id))
 
@@ -283,7 +310,8 @@ class HistoryService:
                 "total_requests": r.total_requests,
                 "success_requests": r.success_requests or 0,
                 "failed_requests": r.failed_requests or 0,
-                "duration_ms": r.duration_ms or 0
+                "duration_ms": r.duration_ms or 0,
+                "execution_type": r.execution_type or 'api'
             })
             
         return {

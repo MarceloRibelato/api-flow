@@ -76,6 +76,11 @@ def save_flow(
         return FlowService.save(db, data, company_id=current_user.company_id, user_id=current_user.id)
     except ValueError as e:
         raise ValidationError(detail=str(e))
+    except Exception as e:
+        import traceback
+        with open("save_error.log", "w") as f:
+            f.write(traceback.format_exc())
+        raise
 
 
 @router.delete("/{project_id}")

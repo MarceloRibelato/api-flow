@@ -74,6 +74,11 @@ class ApiExecutionHistory(Base):
         Index('idx_history_batch_time', "batch_id", "created_at"),
     )
 
+    __mapper_args__ = {
+        'polymorphic_on': execution_type,
+        'polymorphic_identity': 'base'
+    }
+
     @property
     def success(self):
         # The scheduler service explicitly sets error_message if:
@@ -82,6 +87,24 @@ class ApiExecutionHistory(Base):
         # 3. Exception occurred
         # So providing error_message is the Source of Truth for failure.
         return not bool(self.error_message)
+
+
+class ApiHistoryDetails(ApiExecutionHistory):
+    __mapper_args__ = {
+        'polymorphic_identity': 'api'
+    }
+
+
+class WebHistoryDetails(ApiExecutionHistory):
+    __mapper_args__ = {
+        'polymorphic_identity': 'web'
+    }
+
+
+class MobileHistoryDetails(ApiExecutionHistory):
+    __mapper_args__ = {
+        'polymorphic_identity': 'mobile'
+    }
 
 
 class ApiExecutionHistoryArchive(Base):
