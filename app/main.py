@@ -320,7 +320,7 @@ def read_root():
 
 @app.get("/status", tags=["System"])
 def api_status():
-    routes = [{"path": route.path, "name": route.name} for route in app.routes]
+    routes = [{"path": getattr(route, "path", str(route)), "name": getattr(route, "name", "unknown")} for route in app.routes]
     return {"status": "online", "total_routes": len(routes)}
 
 if __name__ == "__main__":
