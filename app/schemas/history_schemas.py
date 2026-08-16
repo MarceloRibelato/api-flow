@@ -46,6 +46,7 @@ class ExecutionHistoryBase(BaseModel):
     video_url: Optional[str] = None  # Added for E2E recordings
     healed_selector: Optional[str] = None # Added for Drift Detection
     execution_type: Optional[str] = "api"  # 'api' or 'web'
+    trigger_origin: Optional[str] = "manual"  # 'manual', 'pipeline', 'schedule'
 
     @field_validator('request_headers', 'request_params', 'response_headers', 'variables_used', mode='before')
     @classmethod
@@ -130,6 +131,7 @@ class ExecutionHistorySummary(BaseModel):
     video_url: Optional[str] = None  # Added for E2E recordings
     healed_selector: Optional[str] = None # Added for Drift Detection
     execution_type: Optional[str] = "api"  # 'api' or 'web'
+    trigger_origin: Optional[str] = "manual"  # 'manual', 'pipeline', 'schedule'
     
     model_config = ConfigDict(from_attributes=True)
 

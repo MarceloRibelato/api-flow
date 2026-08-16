@@ -31,6 +31,7 @@ from app.routes.execution_routes import router as execution_router
 from app.routes.import_routes import router as import_router
 from app.routes.cicd_routes import router as cicd_router
 from app.routes.skill_routes import router as skill_router
+from app.routes.company_routes import router as company_router
 from app.routes.appium_inspector_routes import router as appium_inspector_router
 from app.routes.web_inspector_routes import router as web_inspector_router
 from app.routes.hitl_routes import router as hitl_router
@@ -81,6 +82,26 @@ async def lifespan(app: FastAPI):
                     conn.execute(text("ALTER TABLE flow_edges ADD COLUMN IF NOT EXISTS label VARCHAR(255);"))
             except Exception as e:
                 logger.info(f"Erro label: {e}")
+
+            # Auto-repair for trigger_origin if alembic failed
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE api_test_execution_history ADD COLUMN IF NOT EXISTS trigger_origin VARCHAR(50) DEFAULT 'manual';"))
+                    conn.execute(text("ALTER TABLE api_test_execution_history_archive ADD COLUMN IF NOT EXISTS trigger_origin VARCHAR(50) DEFAULT 'manual';"))
+                    
+                    # Fix previously misclassified schedules (one-time manual schedules were saved as pipeline)
+                    conn.execute(text("""
+                        UPDATE api_test_execution_history
+                        SET trigger_origin = 'schedule'
+                        FROM schedules
+                        WHERE api_test_execution_history.schedule_id = schedules.id
+                        AND api_test_execution_history.trigger_origin = 'pipeline'
+                        AND schedules.name NOT LIKE 'CI/CD%'
+                        AND schedules.name NOT LIKE '[PIPELINE]%'
+                    """))
+            except Exception as e:
+                logger.info(f"Erro trigger_origin: {e}")
+
             logger.info("Colunas dinâmicas processadas.")
             
             # CRITICAL: Dispose engine to release connections before Alembic takes over
@@ -220,6 +241,7 @@ app.include_router(skill_router)
 app.include_router(appium_inspector_router, prefix="/mobile-inspector", tags=["Mobile Inspector"])
 app.include_router(web_inspector_router, prefix="/web-inspector", tags=["Web Studio"])
 app.include_router(hitl_router)
+app.include_router(company_router)
 
 # Dashboard Router
 from app.routes.dashboard_routes import router as dashboard_router

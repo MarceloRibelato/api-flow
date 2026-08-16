@@ -239,7 +239,7 @@ class PlaywrightExecutorService:
                 pass
         return {"storage_state": state, "url": url}
 
-    async def _wait_for_loading_to_finish(self, timeout_ms=3000):
+    async def _wait_for_loading_to_finish(self, timeout_ms=1000):
         """Intelligently wait for network idle and common loaders to disappear."""
         if not self._page:
             return
@@ -420,9 +420,10 @@ class PlaywrightExecutorService:
             except:
                 timeout = 15000
         
-        # Ensure a minimum timeout for Docker environments
-        if timeout < 5000:
-            timeout = 5000
+        # Ensure a minimal safety timeout to avoid immediate race conditions, 
+        # but respect user's lower configurations if explicitly set.
+        if timeout < 1000:
+            timeout = 1000
         
         logger.info(f"Executing E2E step: {name} ({step_type}) [Timeout: {timeout}ms]")
         

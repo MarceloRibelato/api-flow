@@ -42,10 +42,6 @@ class HeuristicHealerService:
                     const tag = el.tagName.toLowerCase();
                     if (['script', 'style', 'meta', 'link', 'noscript', 'svg', 'path', 'iframe'].includes(tag)) continue;
                     
-                    if (stepType === 'click' && window.getComputedStyle(el).pointerEvents === 'none') {
-                        continue;
-                    }
-                    
                     const role = el.getAttribute('role') || '';
                     const type = el.getAttribute('type') || '';
                     
@@ -75,6 +71,13 @@ class HeuristicHealerService:
                     }
                     
                     if (isMatch) {
+                        // Perform expensive style checks ONLY if the element is a candidate
+                        if (stepType === 'click') {
+                            const style = window.getComputedStyle(el);
+                            if (style.pointerEvents === 'none' || style.opacity === '0' || style.visibility === 'hidden') {
+                                continue;
+                            }
+                        }
                         candidates.push({
                             tag: tag,
                             id: el.id || '',
@@ -174,8 +177,8 @@ class HeuristicHealerService:
                     seen_sels.add(sel)
                     dedup_candidates.append((score, sel))
             
-            # Test each candidate for uniqueness
-            for score, sel in dedup_candidates:
+            # Test each candidate for uniqueness (limit to top 10 to guarantee fast performance)
+            for score, sel in dedup_candidates[:10]:
                 try:
                     visible_sel = f"{sel} >> visible=true"
                     count = await page.locator(visible_sel).count()

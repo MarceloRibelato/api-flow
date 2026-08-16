@@ -381,7 +381,7 @@ class FlowService:
         node = card_data[node_id]
         e2e_steps = node.get('e2eSteps', [])
         
-        # 2. Localizar e substituir o seletor
+        # 2. Localizar e substituir o seletor em cardData
         replaced = False
         for step in e2e_steps:
             props = step.get('properties', {})
@@ -398,18 +398,32 @@ class FlowService:
             available = [str(s.get('properties', {}).get('selector', '')) for s in e2e_steps]
             raise ValueError(f"Passo com o seletor antigo '{old_selector}' não encontrado no nó {node_id}. Seletores neste nó: {available}")
 
-        # 3. Preparar schema para salvar
+        # 3. Sincronizar a modificação na estrutura bruta de 'nodes' para consistência do DB
+        nodes = flow_data.get('nodes', [])
+        for n in nodes:
+            if str(n.get('id')) == str(node_id):
+                ndata = n.get('data', {})
+                if 'e2eSteps' in ndata:
+                    for nstep in ndata['e2eSteps']:
+                        nprops = nstep.get('properties', {})
+                        if str(nprops.get('selector', '')).strip() == str(old_selector).strip():
+                            nprops['selector'] = new_selector
+                            nstep['properties'] = nprops
+                            break
+                break
+
+        # 4. Preparar schema para salvar
         save_payload = FlowSaveSchema(
             projectId=project_id,
             flowId=flow_id,
             name=flow_data.get('name'),
             flow_type=flow_data.get('flow_type', 'api'),
-            nodes=flow_data.get('nodes', []),
+            nodes=nodes,
             edges=flow_data.get('edges', []),
             cardData=card_data
         )
 
-        # 4. Salvar fluxo
+        # 5. Salvar fluxo
         FlowService.save(db, save_payload, company_id, 1)
         return FlowService.load(db, project_id, company_id, flow_id)
 

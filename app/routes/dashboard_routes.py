@@ -33,12 +33,13 @@ def get_metrics(
     search_term: str = None,
     status_code: str = None,
     last_execution_only: bool = False,
+    trigger_origin: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
     return DashboardService.get_summary_stats(
         db, days, project_id, flow_id, environment_id, valid_start, valid_end, execution_type,
-        search_term, status_code, last_execution_only
+        search_term, status_code, last_execution_only, trigger_origin
     )
 
 @router.get("/recent-executions")
@@ -53,12 +54,13 @@ def get_recent_executions(
     search_term: str = None,
     status_code: str = None,
     last_execution_only: bool = False,
+    trigger_origin: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
     return DashboardService.get_recent_executions(
         db, limit, project_id, flow_id, environment_id, valid_start, valid_end, execution_type,
-        search_term, status_code, last_execution_only
+        search_term, status_code, last_execution_only, trigger_origin
     )
 
 @router.get("/failures")
@@ -73,12 +75,13 @@ def get_failures(
     search_term: str = None,
     status_code: str = None,
     last_execution_only: bool = False,
+    trigger_origin: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
     return DashboardService.get_recent_failures(
         db, limit, project_id, flow_id, environment_id, valid_start, valid_end, execution_type,
-        search_term, status_code, last_execution_only
+        search_term, status_code, last_execution_only, trigger_origin
     )
 
 @router.get("/slowest")
@@ -93,12 +96,13 @@ def get_slowest(
     search_term: str = None,
     status_code: str = None,
     last_execution_only: bool = False,
+    trigger_origin: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
     return DashboardService.get_slowest_executions(
         db, limit, project_id, flow_id, environment_id, valid_start, valid_end, execution_type,
-        search_term, status_code, last_execution_only
+        search_term, status_code, last_execution_only, trigger_origin
     )
 
 @router.get("/daily")
@@ -113,12 +117,13 @@ def get_daily_stats(
     search_term: str = None,
     status_code: str = None,
     last_execution_only: bool = False,
+    trigger_origin: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
     return DashboardService.get_daily_stats(
         db, days, project_id, flow_id, environment_id, valid_start, valid_end, execution_type,
-        search_term, status_code, last_execution_only
+        search_term, status_code, last_execution_only, trigger_origin
     )
 
 @router.get("/top-failures")
@@ -133,12 +138,13 @@ def get_top_failures(
     search_term: str = None,
     status_code: str = None,
     last_execution_only: bool = False,
+    trigger_origin: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
     return DashboardService.get_top_failing_apis(
         db, limit, project_id, flow_id, environment_id, valid_start, valid_end, execution_type,
-        search_term, status_code, last_execution_only
+        search_term, status_code, last_execution_only, trigger_origin
     )
 
 @router.get("/export")
@@ -153,12 +159,13 @@ def export_dashboard(
     search_term: str = None,
     status_code: str = None,
     last_execution_only: bool = False,
+    trigger_origin: str = None,
     db: Session = Depends(get_db)
 ):
     valid_start, valid_end = _parse_dates(start_date, end_date)
     csv_data = DashboardService.export_data_csv(
         db, days, project_id, flow_id, environment_id, valid_start, valid_end, execution_type,
-        search_term, status_code, last_execution_only
+        search_term, status_code, last_execution_only, trigger_origin
     )
     return Response(
         content=csv_data,

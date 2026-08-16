@@ -16,6 +16,7 @@ redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 # Em memória (Cache L1) local do Worker atual
 _active_sessions: Dict[str, AppiumExecutorService] = {}
+_session_progress: Dict[str, Dict[str, Any]] = {}
 
 class AppiumInspectorService:
     """
@@ -47,7 +48,7 @@ class AppiumInspectorService:
         logger.info(f"🔍 [Inspector] Starting new session {session_id} for product {product_id}...")
         executor = AppiumExecutorService()
         try:
-            executor.start(db=db, product_id=product_id)
+            executor.start_sync(db=db, product_id=product_id)
             _active_sessions[session_id] = executor
             
             # Salva metadados no Redis
@@ -67,18 +68,63 @@ class AppiumInspectorService:
             failed_step_error = None
             
             if steps:
+                total_steps = len(steps)
                 for idx, step in enumerate(steps):
+                    step_name = step.get("name") or step.get("type") or f"Passo {idx + 1}"
+                    node_name = step.get("_sourceNodeName") or step.get("nodeName") or "Nó Atual"
+                    _session_progress[session_id] = {
+                        "current_index": idx,
+                        "total_steps": total_steps,
+                        "step_name": step_name,
+                        "node_name": node_name,
+                        "status": "running"
+                    }
                     try:
-                        logger.info(f"🔍 [Inspector] Replaying step {idx}: {step}")
-                        result = executor.execute_step(step, db=db)
+                        logger.info(f"🔍 [Inspector] Replaying step {idx + 1}/{total_steps} ({node_name} - {step_name}): {step}")
+                        result = executor.execute_step_sync(step, db=db)
                         if result.get("status", 500) >= 400:
                             raise Exception(result.get("text", "Unknown Appium Execution Error"))
+                        
+                        if result.get("warning"):
+                            logger.warning(f"⚠️ [Inspector] Step {idx + 1} Warning: {result.get('warning')}")
+                            _session_progress[session_id]["warning"] = result.get("warning")
+                        else:
+                            _session_progress[session_id]["warning"] = None
+
+                        if step.get("type") == "wait":
+                            logger.info(f"⏸️ [Inspector] Pause step reached at index {idx} ({step_name}). Halting replay for interactive debug.")
+                            _session_progress[session_id] = {
+                                "current_index": idx,
+                                "total_steps": total_steps,
+                                "step_name": step_name,
+                                "node_name": node_name,
+                                "status": "paused"
+                            }
+                            snapshot = cls.get_snapshot(session_id)
+                            snapshot["paused_step_index"] = idx
+                            snapshot["is_paused"] = True
+                            return snapshot
+
                         time.sleep(1.0)
                     except Exception as e:
                         logger.error(f"🔍 [Inspector] Replay failed at step {idx}: {e}")
                         failed_step_index = idx
                         failed_step_error = str(e)
+                        _session_progress[session_id] = {
+                            "current_index": idx,
+                            "total_steps": total_steps,
+                            "step_name": step_name,
+                            "node_name": node_name,
+                            "error": str(e),
+                            "status": "failed"
+                        }
                         break
+            
+            _session_progress[session_id] = {
+                "current_index": len(steps) if steps else 0,
+                "total_steps": len(steps) if steps else 0,
+                "status": "completed" if failed_step_index is None else "failed"
+            }
                         
             snapshot = cls.get_snapshot(session_id)
             if failed_step_index is not None:
@@ -88,17 +134,25 @@ class AppiumInspectorService:
             return snapshot
         except Exception as e:
             logger.error(f"🔍 [Inspector] Failed to start session: {e}")
+            if session_id in _session_progress:
+                _session_progress[session_id]["status"] = "failed"
             # Ensure we clean up if start fails
             if executor._driver:
-                executor.close()
+                executor.close_sync()
             raise e
 
     @classmethod
+    def get_progress(cls, session_id: str) -> dict:
+        return _session_progress.get(session_id, {"status": "idle", "current_index": 0, "total_steps": 0})
+
+    @classmethod
     def stop_session(cls, session_id: str):
+        if session_id in _session_progress:
+            del _session_progress[session_id]
         if session_id in _active_sessions:
             logger.info(f"🔍 [Inspector] Stopping session {session_id}.")
             try:
-                _active_sessions[session_id].close()
+                _active_sessions[session_id].close_sync()
             except Exception as e:
                 logger.warning(f"🔍 [Inspector] Error while closing session: {e}")
             del _active_sessions[session_id]
@@ -148,8 +202,8 @@ class AppiumInspectorService:
 
         try:
             logger.info(f"🔍 [Inspector] Interactive Execution: {action}")
-            # Borrow execute_step from executor
-            result = executor.execute_step(action, db=db)
+            # Borrow execute_step_sync from executor
+            result = executor.execute_step_sync(action, db=db)
             if result.get("status", 500) >= 400:
                 raise Exception(result.get("text", "Unknown Appium Execution Error"))
             
@@ -294,26 +348,178 @@ class AppiumInspectorService:
             return {"success": False, "error": "Element not found on current screen."}
             
         selectors = []
-        text_val = target_node.get("text", "")
-        desc_val = target_node.get("content_desc", "")
-        res_val = target_node.get("resource_id", "")
-        name_val = target_node.get("name", "")
-        label_val = target_node.get("label", "")
+        text_val = (target_node.get("text") or "").strip()
+        desc_val = (target_node.get("content_desc") or "").strip()
+        res_val = (target_node.get("resource_id") or "").strip()
+        name_val = (target_node.get("name") or "").strip()
+        label_val = (target_node.get("label") or "").strip()
+
+        # Sanitize accessibility tab index suffixes (e.g. "Guia 1 de 2", "Tab 2 of 4") universally
+        import re
+        desc_no_tab = re.sub(r'Guia \d+ de \d+|Tab \d+ of \d+', '', desc_val, flags=re.IGNORECASE).strip() if desc_val else ""
+        text_no_tab = re.sub(r'Guia \d+ de \d+|Tab \d+ of \d+', '', text_val, flags=re.IGNORECASE).strip() if text_val else ""
+
+        # Sanitize multiline strings
+        desc_first_line = " ".join(desc_no_tab.splitlines()[0].split()) if desc_no_tab else ""
+        desc_clean = " ".join(desc_no_tab.split()) if desc_no_tab else ""
+        text_first_line = " ".join(text_no_tab.splitlines()[0].split()) if text_no_tab else ""
+        text_clean = " ".join(text_no_tab.split()) if text_no_tab else ""
         
+        # Dynamic Action Line Extraction for merged React Native / Flutter container nodes (Universal for ANY app)
+        desc_lines = [l.strip() for l in desc_val.splitlines() if l.strip()] if desc_val else []
+        text_lines = [l.strip() for l in text_val.splitlines() if l.strip()] if text_val else []
+
+        full_clean = f"{desc_clean} {text_clean}".strip()
+
+        # Sub-token & Action Keyword Extraction for Compound Accessibility Strings
+        # Handles React Native / Flutter compound modal nodes like "Bomba teste A...btn_confirm_pumpConfirmar bomba" or "Código do motorista inválido!... Ok, entendi"
+        action_match = re.search(r'(btn_[a-zA-Z0-9_]+|confirm[a-zA-Z]*|salvar|continuar|avançar|ok[,\s]*entendi|ok|entendi|fechar|cancelar|sim|não|voltar|abastecer|bomba[^\n]*)', full_clean, flags=re.IGNORECASE)
+        if action_match:
+            act_kw = action_match.group(1).strip()
+            if len(act_kw) >= 2:
+                selectors.append({"value": f"//*[contains(translate(@text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{act_kw.lower()}')]", "strategy": "xpath", "count": 1})
+                selectors.append({"value": f"//*[contains(translate(@content-desc, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{act_kw.lower()}')]", "strategy": "xpath", "count": 1})
+
+        # Multiline strings in modals/cards: LAST LINE is almost always the action button (e.g. "Ok, entendi")
+        if len(text_lines) > 1:
+            last_text = " ".join(text_lines[-1].split())
+            if last_text and len(last_text) < 40:
+                selectors.append({"value": f"//*[contains(@text, '{last_text}')]", "strategy": "xpath", "count": 1})
+        elif text_clean and len(text_clean.split()) > 3:
+            words = text_clean.split()
+            last_words = " ".join(words[-2:])
+            if len(last_words) < 30:
+                selectors.append({"value": f"//*[contains(@text, '{last_words}')]", "strategy": "xpath", "count": 1})
+
+        if len(desc_lines) > 1:
+            last_desc = " ".join(desc_lines[-1].split())
+            if last_desc and len(last_desc) < 40:
+                selectors.append({"value": f"//*[contains(@content-desc, '{last_desc}')]", "strategy": "xpath", "count": 1})
+                selectors.append({"value": f"accessibility_id={last_desc}", "strategy": "accessibility_id", "count": 1})
+        elif desc_clean and len(desc_clean.split()) > 3:
+            words = desc_clean.split()
+            last_words = " ".join(words[-2:])
+            if len(last_words) < 30:
+                selectors.append({"value": f"//*[contains(@content-desc, '{last_words}')]", "strategy": "xpath", "count": 1})
+                selectors.append({"value": f"accessibility_id={last_words}", "strategy": "accessibility_id", "count": 1})
+
         # 1. Native Strategies (High Performance)
         if res_val:
             selectors.append({"value": f"id={res_val}", "strategy": "id", "count": 1})
-        if desc_val:
-            selectors.append({"value": f"accessibility_id={desc_val}", "strategy": "accessibility_id", "count": 1})
+        if desc_clean and len(desc_clean) < 40:
+            selectors.append({"value": f"accessibility_id={desc_clean}", "strategy": "accessibility_id", "count": 1})
+        elif desc_first_line and len(desc_first_line) < 40:
+            selectors.append({"value": f"accessibility_id={desc_first_line}", "strategy": "accessibility_id", "count": 1})
             
-        # 2. Universal XPath Fallback (Android + iOS)
-        # Using a unified OR clause to catch properties across platforms
-        val_to_use = text_val or desc_val or res_val or name_val or label_val
+        # 2. Universal & Contains XPath Fallback (Android + iOS)
+        if desc_first_line and '\n' in desc_val:
+            selectors.append({"value": f"//*[contains(@content-desc, '{desc_first_line}')]", "strategy": "xpath", "count": 1})
+        if text_first_line and '\n' in text_val:
+            selectors.append({"value": f"//*[contains(@text, '{text_first_line}')]", "strategy": "xpath", "count": 1})
+
+        val_to_use = text_clean or desc_clean or res_val or name_val or label_val
         if val_to_use:
-            uni_xpath = f"//*[@resource-id='{val_to_use}' or @name='{val_to_use}' or @label='{val_to_use}' or @text='{val_to_use}']"
+            uni_xpath = f"//*[@resource-id='{val_to_use}' or @name='{val_to_use}' or @label='{val_to_use}' or @text='{val_to_use}' or @content-desc='{val_to_use}']"
             selectors.append({"value": uni_xpath, "strategy": "xpath", "count": 1})
             
         if not selectors:
             selectors.append({"value": f"//{target_node.get('class', '*')}", "strategy": "xpath", "count": 1})
             
         return {"success": True, "selectors": selectors}
+
+    @classmethod
+    def ai_analyze_full_tree_and_correct(cls, session_id: str, failed_step: dict, db=None) -> dict:
+        """
+        Analyzes the full mobile DOM tree (xml_source and node list) using AI / heuristic matching
+        and returns the best matching component and selector candidates.
+        """
+        executor = _active_sessions.get(session_id)
+        if not executor or not executor._driver:
+            raise ValueError(f"Session {session_id} not found or driver disposed.")
+
+        try:
+            snapshot = cls.get_snapshot(session_id)
+            tree = snapshot.get("tree", [])
+            
+            step_type = failed_step.get("type", "tap")
+            props = failed_step.get("properties", {})
+            step_name = failed_step.get("name", "")
+            old_selector = props.get("selector", "")
+            expected_val = props.get("value", "")
+
+            target_candidates = []
+            search_tokens = [t.lower() for t in [step_name, expected_val, old_selector] if t]
+
+            for node in tree:
+                score = 0
+                n_text = (node.get("text") or "").strip()
+                n_desc = (node.get("content_desc") or "").strip()
+                n_res = (node.get("resource_id") or "").strip()
+                n_cls = (node.get("class") or "").strip()
+                n_hint = (node.get("hint") or "").strip()
+
+                # For 'type' step, prioritize editable inputs (EditText/TextField)
+                if step_type == "type" and ("edittext" in n_cls.lower() or "textfield" in n_cls.lower() or node.get("focusable") is True):
+                    score += 5
+
+                # Compare token matches (including hint/placeholder)
+                for tok in search_tokens:
+                    if tok and (tok in n_text.lower() or tok in n_desc.lower() or tok in n_res.lower() or tok in n_hint.lower()):
+                        score += 8
+                    elif tok and (n_text.lower() in tok or n_desc.lower() in tok or n_hint.lower() in tok):
+                        score += 4
+
+                if score > 0:
+                    target_candidates.append({"node": node, "score": score})
+
+            target_candidates.sort(key=lambda c: c["score"], reverse=True)
+            best = target_candidates[0]["node"] if target_candidates else (tree[0] if tree else None)
+
+            if not best:
+                return {"success": False, "error": "Unable to analyze DOM tree for correction."}
+
+            # Generate resilient selectors for the best matching node
+            res_val = (best.get("resource_id") or "").strip()
+            desc_val = (best.get("content_desc") or "").strip()
+            text_val = (best.get("text") or "").strip()
+            hint_val = (best.get("hint") or "").strip()
+            cls_val = best.get("class", "*")
+
+            desc_first = " ".join(desc_val.splitlines()[0].split()) if desc_val else ""
+            desc_clean = " ".join(desc_val.split()) if desc_val else ""
+            text_first = " ".join(text_val.splitlines()[0].split()) if text_val else ""
+            text_clean = " ".join(text_val.split()) if text_val else ""
+
+            selectors = []
+            if res_val:
+                selectors.append({"value": f"id={res_val}", "strategy": "id", "count": 1})
+                selectors.append({"value": f"//*[@resource-id='{res_val}']", "strategy": "xpath", "count": 1})
+            if desc_first:
+                selectors.append({"value": f"accessibility_id={desc_first}", "strategy": "accessibility_id", "count": 1})
+                if '\n' in desc_val:
+                    selectors.append({"value": f"//*[contains(@content-desc, '{desc_first}')]", "strategy": "xpath", "count": 1})
+                else:
+                    selectors.append({"value": f"//*[@content-desc='{desc_clean}']", "strategy": "xpath", "count": 1})
+            if text_first:
+                if '\n' in text_val:
+                    selectors.append({"value": f"//*[contains(@text, '{text_first}')]", "strategy": "xpath", "count": 1})
+                else:
+                    selectors.append({"value": f"//*[@text='{text_clean}']", "strategy": "xpath", "count": 1})
+            if hint_val and not res_val:
+                selectors.append({"value": f"//*[@hint='{hint_val}']", "strategy": "xpath", "count": 1})
+
+            # Generic class fallback — only used when no specific selector could be generated
+            if not selectors:
+                selectors.append({"value": f"//{cls_val}", "strategy": "xpath", "count": 1})
+
+            best_selector = selectors[0]["value"] if selectors else f"//{cls_val}"
+
+            return {
+                "success": True,
+                "suggested_selector": best_selector,
+                "selectors": selectors,
+                "matched_node": best
+            }
+        except Exception as e:
+            logger.error(f"AI Full Tree Analysis failed: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}

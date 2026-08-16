@@ -152,6 +152,8 @@ def execute_cicd(
     # 4. Criar Agendamento (Execução Pontual)
     from datetime import timezone
     exec_name = req.execution_name or f"CI/CD: {req.product_name} - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    if not exec_name.startswith("[PIPELINE]") and not exec_name.startswith("CI/CD"):
+        exec_name = f"[PIPELINE] {exec_name}"
     
     new_schedule = ScheduleModel(
         name=exec_name,
@@ -188,36 +190,54 @@ def execute_cicd(
     }
 
 @router.get("/status/{job_id}")
-def job_status(job_id: int, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+def job_status(job_id: str, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
     """Consulta o status e resultado de uma execução disparada via CI/CD."""
+    if job_id.startswith("{{") and job_id.endswith("}}"):
+        return {
+            "job_id": job_id, 
+            "status": "pending",
+            "message": f"Aguardando resolução da variável {job_id}..."
+        }
+
+    try:
+        numeric_job_id = int(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="job_id deve ser um número inteiro válido.")
+
     job = db.query(ScheduleModel).filter(
-        ScheduleModel.id == job_id,
+        ScheduleModel.id == numeric_job_id,
         ScheduleModel.company_id == current_user.company_id
     ).first()
     
     if not job:
         raise HTTPException(status_code=404, detail="Execução não encontrada")
 
-    # Buscamos os resultados no histórico associado a este job_id
-    results = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.schedule_id == job_id).all()
+    # Buscamos os resultados no histórico associado a este job_id (ordenado do mais recente)
+    results = db.query(ApiExecutionHistory).filter(
+        ApiExecutionHistory.schedule_id == numeric_job_id
+    ).order_by(ApiExecutionHistory.created_at.desc()).all()
     
     if not results:
         return {
-            "job_id": job_id, 
+            "job_id": numeric_job_id, 
             "status": "pending",
             "message": "Execução em fila ou processando..."
         }
     
-    # Avaliamos se houve falhas (status >= 400)
-    failed_requests = [r for r in results if r.status_code >= 400]
+    # Pegamos apenas os resultados do último lote (batch_id) para evitar somar execuções passadas
+    latest_batch_id = results[0].batch_id
+    latest_results = [r for r in results if r.batch_id == latest_batch_id]
+    
+    # Avaliamos se houve falhas verificando o error_message (fonte da verdade p/ assertion/erro)
+    failed_requests = [r for r in latest_results if bool(r.error_message)]
     any_failure = len(failed_requests) > 0
     
     return {
-        "job_id": job_id,
+        "job_id": numeric_job_id,
         "status": "completed",
         "result": "failure" if any_failure else "success",
-        "total_requests": len(results),
+        "total_requests": len(latest_results),
         "failed_count": len(failed_requests),
-        "started_at": job.run_at,
-        "finished_at": results[-1].created_at if results else None
+        "started_at": latest_results[-1].created_at if latest_results else job.run_at,
+        "finished_at": latest_results[0].created_at if latest_results else None
     }

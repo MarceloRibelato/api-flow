@@ -527,46 +527,54 @@ class SchedulerService:
 def purge_history_job():
     """
     Tiered maintenance task: 
-    1. Archive records older than HISTORY_RETENTION_DAYS (30)
-    2. Purge archived records older than HISTORY_ARCHIVE_RETENTION_DAYS (180)
+    1. Archive records older than HISTORY_RETENTION_DAYS (per company config or default)
+    2. Purge archived records older than HISTORY_ARCHIVE_RETENTION_DAYS
     """
     from app.services.history_service import HistoryService
     from app.config import settings
     from app.database import SessionLocal
+    from app.models.company_models import CompanyDB
+    from app.models.api_test_history_models import ApiExecutionHistory
+    from app.models.user_models import UserDB
+    import os
+    import shutil
     
     db = SessionLocal()
     try:
-        # Tier 1: Archive
-        retain_days = settings.HISTORY_RETENTION_DAYS
-        logger.info(f"💾 Starting history archiving (Threshold: {retain_days} days)")
-        archived_count = HistoryService.archive_old_records(db, retain_days)
-        logger.info(f"✅ Archived {archived_count} records.")
+        companies = db.query(CompanyDB).all()
+        BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        VIDEO_ROOT = os.path.join(BASE_DIR, "data", "videos")
         
-        # 🔗 Cleanup Files associated with Archived Batches
-        if archived_count > 0:
-            import os
-            import shutil
-            BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            VIDEO_ROOT = os.path.join(BASE_DIR, "data", "videos")
+        for company in companies:
+            retain_days = company.history_retention_days or settings.HISTORY_RETENTION_DAYS
+            archive_retain_days = company.history_archive_retention_days or settings.HISTORY_ARCHIVE_RETENTION_DAYS
             
-            # Use same threshold as Tier 1 Archive
+            logger.info(f"🏢 Company {company.id}: Archiving (Threshold: {retain_days} days)")
+            
+            # Find unique batch IDs that will be archived for this company
             threshold = datetime.now(timezone.utc) - timedelta(days=retain_days)
+            archived_batches = db.query(ApiExecutionHistory.batch_id).join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
+                ApiExecutionHistory.created_at < threshold,
+                UserDB.company_id == company.id
+            ).distinct().all()
             
-            # Find unique batch IDs that were archived
-            archived_batches = db.query(ApiExecutionHistory.batch_id).filter(ApiExecutionHistory.created_at < threshold).distinct().all()
-            for (batch_id,) in archived_batches:
-                if batch_id:
-                    batch_path = os.path.join(VIDEO_ROOT, batch_id)
-                    if os.path.exists(batch_path):
-                        logger.info(f"🧹 Deleting archived recording: {batch_path}")
-                        shutil.rmtree(batch_path, ignore_errors=True)
-        
-        # Tier 2: Purge
-        archive_retain_days = settings.HISTORY_ARCHIVE_RETENTION_DAYS
-        logger.info(f"🧹 Starting archive purge (Threshold: {archive_retain_days} days)")
-        purged_count = HistoryService.purge_archived_records(db, archive_retain_days)
-        logger.info(f"✨ Purge complete. Removed {purged_count} archived records.")
-        
+            archived_count = HistoryService.archive_old_records(db, retain_days, company.id)
+            logger.info(f"✅ Company {company.id}: Archived {archived_count} records.")
+            
+            # 🔗 Cleanup Files associated with Archived Batches
+            if archived_count > 0:
+                for (batch_id,) in archived_batches:
+                    if batch_id:
+                        batch_path = os.path.join(VIDEO_ROOT, batch_id)
+                        if os.path.exists(batch_path):
+                            logger.info(f"🧹 Deleting archived recording: {batch_path}")
+                            shutil.rmtree(batch_path, ignore_errors=True)
+                            
+            # Tier 2: Purge
+            logger.info(f"🧹 Company {company.id}: Starting archive purge (Threshold: {archive_retain_days} days)")
+            purged_count = HistoryService.purge_archived_records(db, archive_retain_days, company.id)
+            logger.info(f"✨ Company {company.id}: Purge complete. Removed {purged_count} archived records.")
+            
     except Exception as e:
         logger.error(f"❌ Failed to run history maintenance: {e}")
     finally:

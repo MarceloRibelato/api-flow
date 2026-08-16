@@ -24,7 +24,22 @@ class AppiumExecutorService:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self, video_dir: str = None, db=None, product_id: int = None):
+    async def start(self, video_dir: str = None, db=None, product_id: int = None):
+        import asyncio
+        return await asyncio.to_thread(self.start_sync, video_dir, db, product_id)
+
+    async def execute_step(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.execute_step_sync, step_data, capture_screenshot, db, user_id)
+
+    async def close(self):
+        import asyncio
+        return await asyncio.to_thread(self.close_sync)
+
+    async def stop(self, trace_path=None):
+        return await self.close()
+
+    def start_sync(self, video_dir: str = None, db=None, product_id: int = None):
         """Inicializa o driver mobile com as configurações do produto."""
         try:
             # Load settings from DB if available
@@ -108,7 +123,11 @@ class AppiumExecutorService:
             options.set_capability("appium:automationName", "UiAutomator2")
             options.set_capability("appium:noReset", False)
             options.set_capability("appium:newCommandTimeout", 3600)
-            options.set_capability("appium:ignoreUnimportantViews", False)
+            options.set_capability("appium:ignoreUnimportantViews", True)
+            options.set_capability("appium:disableWindowAnimation", True)
+            options.set_capability("appium:unicodeKeyboard", True)
+            options.set_capability("appium:resetKeyboard", True)
+            options.set_capability("appium:waitForIdleTimeout", 0)
 
             server_url = self._settings["server_url"]
             
@@ -121,6 +140,11 @@ class AppiumExecutorService:
                 command_executor=server_url,
                 options=options
             )
+            self._driver.implicitly_wait(0)
+            try:
+                self._driver.update_settings({"waitForIdleTimeout": 0})
+            except Exception:
+                pass
             logger.info(f"📱 [Appium] Connected to local server at {server_url}")
 
         except ImportError:
@@ -164,7 +188,11 @@ class AppiumExecutorService:
             options.set_capability("appium:automationName", "UiAutomator2")
             options.set_capability("appium:noReset", False)
             options.set_capability("appium:newCommandTimeout", 3600)
-            options.set_capability("appium:ignoreUnimportantViews", False)
+            options.set_capability("appium:ignoreUnimportantViews", True)
+            options.set_capability("appium:disableWindowAnimation", True)
+            options.set_capability("appium:unicodeKeyboard", True)
+            options.set_capability("appium:resetKeyboard", True)
+            options.set_capability("appium:waitForIdleTimeout", 0)
 
             # Cloud-specific extras
             if self._provider == "browserstack":
@@ -188,7 +216,12 @@ class AppiumExecutorService:
                 command_executor=hub_url,
                 options=options
             )
-            logger.info(f"📱 [{self._provider}] Cloud session started — device: {s['device_name']}")
+            self._driver.implicitly_wait(0)
+            try:
+                self._driver.update_settings({"waitForIdleTimeout": 0})
+            except Exception:
+                pass
+            logger.info(f"📱 [Appium] Connected to cloud provider '{self._provider}' Cloud session started — device: {s['device_name']}")
 
         except ImportError:
             raise RuntimeError("Appium-Python-Client not installed")
@@ -213,69 +246,308 @@ class AppiumExecutorService:
         self._captured_requests = []
         return ret
 
-    def _get_platform_selector(self, props: dict) -> str:
+    def _get_platform_selector(self, props: dict, allow_value_fallback: bool = False) -> str:
+        logger.info(f"🔍 [Appium] _get_platform_selector props: {props}")
         if not self._driver:
-            return props.get('selector') or props.get('value', '')
+            return props.get('selector') or (props.get('value', '') if allow_value_fallback else '')
         
         platform = str(self._driver.capabilities.get('platformName', 'android')).lower()
+        logger.info(f"🔍 [Appium] detected platformName: {platform}")
+        
         if platform == 'ios':
-            return props.get('ios_selector') or props.get('selector') or props.get('value', '')
+            selected = props.get('ios_selector') or props.get('selector') or (props.get('value', '') if allow_value_fallback else '')
+            logger.info(f"🔍 [Appium] selected iOS selector: {selected}")
+            return selected
         else:
-            return props.get('android_selector') or props.get('selector') or props.get('value', '')
+            selected = props.get('android_selector') or props.get('selector') or (props.get('value', '') if allow_value_fallback else '')
+            logger.info(f"🔍 [Appium] selected Android selector: {selected}")
+            return selected
 
-    def execute_step(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
+    def _save_screenshot(self, b64_data: str, prefix: str = "mobile") -> str:
+        if not b64_data:
+            return None
+        import os
+        import uuid
+        import base64
+        from app.main import VIDEO_DIR
+        SCREENSHOT_DIR = os.path.join(os.path.dirname(VIDEO_DIR), "screenshots")
+        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+        filename = f"{prefix}_{uuid.uuid4().hex[:8]}.png"
+        path = os.path.join(SCREENSHOT_DIR, filename)
+        try:
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(b64_data))
+            return f"/screenshots/{filename}"
+        except Exception as e:
+            logger.error(f"Failed to save Appium screenshot: {e}")
+            return None
+
+    def execute_step_sync(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
         """Executa um passo nativo no Appium/Cloud."""
         step_type = step_data.get('type')
         props = step_data.get('properties', {})
         step_name = step_data.get('name', step_type)
 
+        step_warning = None
+
         logger.info(f"📱 [{self._provider or 'appium'}] Executing step: {step_type} — {step_name}")
 
         try:
             # Log current screen state for debugging physical device mismatches
+            if not self._driver:
+                logger.warning("📱 No active Appium driver — step cannot be executed.")
+                return {
+                    "status": 400,
+                    "reason": "No Driver",
+                    "text": f"Step '{step_type}' failed: No active Appium driver session."
+                }
             try:
                 window_size = self._driver.get_window_size()
                 logger.info(f"📱 [Appium] Screen resolution: {window_size['width']}x{window_size['height']}")
             except: pass
-            if not self._driver:
-                logger.warning("📱 No active Appium driver — step simulated.")
-                time.sleep(0.5)
-                return {
-                    "status": 200,
-                    "reason": "OK (simulated)",
-                    "text": f"[SIMULATED] Step '{step_type}' — driver not connected."
-                }
 
             if step_type == 'tap':
-                selector = self._get_platform_selector(props)
+                selector = self._get_platform_selector(props, allow_value_fallback=False)
                 x = props.get('x')
                 y = props.get('y')
                 if x is not None: x = int(x)
                 if y is not None: y = int(y)
                 timeout = int(props.get('timeout', 5000))
+                target_text = props.get('target_text') or props.get('target_label')
+                use_vision_ai = props.get('use_vision_ai', False)
                 
-                el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
-                if el:
-                    # Robust Click: Get element location and tap the center
-                    # el.click() often fails silently on some Android builds
-                    loc = el.location
-                    size = el.size
-                    cx = loc['x'] + (size['width'] // 2)
-                    cy = loc['y'] + (size['height'] // 2)
-                    logger.info(f"📍 [Appium] Tapping element center: ({cx}, {cy})")
-                    self._driver.tap([(cx, cy)])
-                elif x is not None and y is not None:
-                    logger.info(f"📍 [Appium] Selector '{selector}' failed. Falling back to explicit coordinates ({x}, {y})")
-                    self._driver.tap([(x, y)])
-                else:
-                    raise Exception(f"Element '{selector}' not found for click and no coordinates available as fallback.")
+                tapped = False
+                if not selector and not target_text and (x is None or x <= 0):
+                    raise Exception("No identifier, target_text or coordinates provided for click.")
+
+                # Strategy 0: Explicit Vision AI requested (or plain text target without DOM selector)
+                if use_vision_ai:
+                    logger.info(f"🎨 [Vision AI] Explicit Vision AI requested for target '{target_text or selector}'")
+                    vision_coords = self.detect_button_coordinates_from_screenshot(target_text=target_text or selector)
+                    if vision_coords:
+                        cx, cy = vision_coords
+                        step_warning = (
+                            "⚠️ Alerta de Boas Práticas: A automação utilizou Visão Computacional na captura de tela em tempo de execução para calcular o ponto de clique."
+                        )
+                        logger.info(f"🎨 [Vision AI] Screenshot button coordinates generated: ({cx}, {cy})")
+                        try:
+                            self._driver.execute_script('mobile: clickGesture', {'x': cx, 'y': cy})
+                            tapped = True
+                        except Exception:
+                            try:
+                                self._driver.tap([(cx, cy)])
+                                tapped = True
+                            except Exception: pass
+
+                if not tapped:
+                    try:
+                        el = self._find_element(selector or target_text, timeout_ms=timeout, step_data=step_data)
+                        if el:
+                            loc = el.location
+                            size = el.size
+
+                            orig_loc = loc
+                            orig_size = size
+                            orig_cx = orig_loc['x'] + (orig_size['width'] // 2)
+                            orig_cy = orig_loc['y'] + (orig_size['height'] // 2)
+
+                            # Auto-promote non-clickable target (e.g., inner TextView inside a modal button) to its clickable container
+                            try:
+                                if el.get_attribute("clickable") != "true":
+                                    ancestors = el.find_elements(AppiumBy.XPATH, "./ancestor::*[@clickable='true']")
+                                    if ancestors:
+                                        # Pick nearest clickable parent that is not a giant modal dialog or screen container (> 400px height)
+                                        small_ancestors = [a for a in ancestors if a.size.get('height', 9999) <= max(350, orig_size['height'] * 3)]
+                                        best_ancestor = small_ancestors[-1] if small_ancestors else ancestors[-1]
+                                        
+                                        # Only replace target coordinates if the ancestor is small/button wrapper
+                                        anc_size = best_ancestor.size
+                                        if anc_size.get('height', 9999) <= 400:
+                                            logger.info(f"🎯 [Appium] Target element is non-clickable ({el.tag_name}); upgrading tap target to parent container: {best_ancestor.tag_name}")
+                                            el = best_ancestor
+                                            loc = el.location
+                                            size = el.size
+                                        else:
+                                            logger.info(f"🎯 [Appium] Target element is non-clickable ({el.tag_name}); keeping target coordinates ({orig_cx}, {orig_cy}) from inner element")
+                            except Exception as parent_err:
+                                logger.debug(f"Parent clickable check skipped: {parent_err}")
+
+                            # Check if the element is targeted using a strong unique identifier (resource-id, content-desc, accessibility-id, testID)
+                            sel_str = str(selector or '').lower()
+                            has_unique_identifier = False
+                            if sel_str:
+                                if '@content-desc' in sel_str or '@resource-id' in sel_str or '@name' in sel_str or '@accessibility-id' in sel_str or '@id' in sel_str or '@testid' in sel_str:
+                                    has_unique_identifier = True
+                                elif not sel_str.startswith('/') and not sel_str.startswith('.'):
+                                    # Direct Accessibility ID or Resource ID string (e.g. welcome_button, btn_login_entrarEntrar)
+                                    has_unique_identifier = True
+
+                            is_compound_container = size.get('height', 0) > 180 and not has_unique_identifier
+
+                            if not has_unique_identifier:
+                                # Calculate dynamic runtime coordinates for elements without explicit IDs
+                                vision_coords = self.detect_button_coordinates_from_screenshot(
+                                    container_bounds={'x': loc['x'], 'y': loc['y'], 'width': size['width'], 'height': size['height']},
+                                    target_text=target_text
+                                )
+
+                                if vision_coords:
+                                    cx, cy = vision_coords
+                                    step_warning = (
+                                        "⚠️ Alerta de Boas Práticas: Este elemento não possui um identificador exclusivo (ex: resource-id, accessibility-id ou testID) "
+                                        "configurado pelo time de desenvolvimento. A automação utilizou Visão Computacional em tempo de execução para interagir."
+                                    )
+                                    logger.info(f"🎨 [Vision AI] Runtime button coordinates generated for current device: ({cx}, {cy})")
+                                elif is_compound_container:
+                                    cx = loc['x'] + (size['width'] // 2)
+                                    cy = loc['y'] + int(size['height'] * 0.88)
+                                    step_warning = (
+                                        "⚠️ Alerta de Boas Práticas: O botão está dentro de um container composto sem ID exclusivo. "
+                                        "A automação utilizou cálculo inteligente de região de ação."
+                                    )
+                                    logger.info(f"💡 [Appium] Compound Modal Container detected ({size['width']}x{size['height']}px). Dynamic bottom action target: ({cx}, {cy})")
+                                elif isinstance(step_data, dict) and step_data.get('_used_fallback'):
+                                    cx = loc['x'] + (size['width'] // 2)
+                                    cy = loc['y'] + (size['height'] // 2)
+                                    step_warning = (
+                                        "⚠️ Alerta de Boas Práticas: O elemento não possui um identificador exclusivo (resource-id/testID). "
+                                        "A automação utilizou Fallback por Texto para localizá-lo."
+                                    )
+                                else:
+                                    cx = loc['x'] + (size['width'] // 2)
+                                    cy = loc['y'] + (size['height'] // 2)
+                                    logger.info(f"🎯 [Appium] Dynamic runtime element center target: ({cx}, {cy})")
+                            else:
+                                cx = loc['x'] + (size['width'] // 2)
+                                cy = loc['y'] + (size['height'] // 2)
+                                logger.info(f"🎯 [Appium] Element with unique identifier '{selector}' targeted directly at ({cx}, {cy}). No warning needed.")
+
+                            platform = str(self._driver.capabilities.get('platformName', 'android')).lower()
+
+                            target_el = el
+
+                            if platform == 'ios':
+                                # iOS Strategy 1: Direct native element click (XCUITest synthesizes real touch tap)
+                                try:
+                                    target_el.click()
+                                    tapped = True
+                                    logger.info(f"🎯 [Appium iOS] Direct native target_el.click() succeeded for '{selector}'")
+                                except Exception as click_err:
+                                    logger.warning(f"⚠️ [Appium iOS] Direct native target_el.click() failed ({click_err}), trying coordinate fallback")
+
+                                # iOS Strategy 2: Physical W3C coordinate tap at (cx, cy)
+                                if not tapped:
+                                    try:
+                                        self._driver.tap([(cx, cy)])
+                                        tapped = True
+                                        logger.info(f"📍 [Appium iOS] Physical W3C tap at ({cx}, {cy}) succeeded for '{selector}'")
+                                    except Exception as tap_err:
+                                        logger.warning(f"⚠️ [Appium iOS] Physical W3C tap failed: {tap_err}")
+                            else:
+                                # Android Strategy 1: Direct Native Accessibility Element Click (target_el.click())
+                                # Invokes native Android AccessibilityNodeInfo ACTION_CLICK directly on target element.
+                                try:
+                                    target_el.click()
+                                    tapped = True
+                                    logger.info(f"🎯 [Appium Android] Direct native target_el.click() succeeded for '{selector}'")
+                                except Exception as click_err:
+                                    logger.warning(f"⚠️ [Appium Android] Direct native target_el.click() failed: {click_err}")
+
+                                # Android Strategy 2: Appium 2.x Native Touch Gesture on Element ID
+                                if not tapped:
+                                    try:
+                                        self._driver.execute_script('mobile: clickGesture', {'elementId': target_el.id})
+                                        tapped = True
+                                        logger.info(f"🎯 [Appium Android] mobile: clickGesture on elementId succeeded for '{selector}'")
+                                    except Exception as g_id_err:
+                                        logger.warning(f"⚠️ [Appium Android] mobile: clickGesture on elementId failed: {g_id_err}")
+
+                                # Android Strategy 3: Original element click (if target_el was upgraded from el)
+                                if not tapped and target_el != el:
+                                    try:
+                                        el.click()
+                                        tapped = True
+                                        logger.info(f"🎯 [Appium Android] Original el.click() fallback succeeded for '{selector}'")
+                                    except Exception:
+                                        pass
+
+                                # Android Strategy 4: Physical Hardware Touch Tap (mobile: clickGesture) at Center Coordinates (cx, cy)
+                                if not tapped:
+                                    try:
+                                        self._driver.execute_script('mobile: clickGesture', {'x': cx, 'y': cy})
+                                        tapped = True
+                                        logger.info(f"📍 [Appium Android] Physical touch tap (mobile: clickGesture) at ({cx}, {cy}) succeeded for '{selector}'")
+                                    except Exception as g_err:
+                                        logger.warning(f"⚠️ [Appium Android] Physical clickGesture at ({cx}, {cy}) failed: {g_err}")
+
+                                # Android Strategy 5: W3C Hardware Touch Tap at (cx, cy)
+                                if not tapped:
+                                    try:
+                                        self._driver.tap([(cx, cy)])
+                                        tapped = True
+                                        logger.info(f"📍 [Appium Android] W3C hardware tap at ({cx}, {cy}) succeeded for '{selector}'")
+                                    except Exception as tap_err:
+                                        logger.warning(f"⚠️ [Appium Android] W3C hardware tap at ({cx}, {cy}) failed: {tap_err}")
+
+                            # 6. Fallback: Recorded static coordinates (x, y)
+                            if not tapped and x is not None and y is not None and x > 0 and y > 0:
+                                try:
+                                    logger.info(f"📍 [Appium] Trying static recorded coordinates ({x}, {y}) as fallback")
+                                    self._driver.execute_script('mobile: clickGesture', {'x': int(x), 'y': int(y)})
+                                    tapped = True
+                                except Exception:
+                                    try:
+                                        self._driver.tap([(int(x), int(y))])
+                                        tapped = True
+                                    except Exception:
+                                        pass
+
+                            # 7. Fallback: Check for inner clickable child nodes inside container
+                            if not tapped:
+                                try:
+                                    inner_buttons = el.find_elements(AppiumBy.XPATH, ".//android.widget.Button | .//*[@clickable='true']")
+                                    if inner_buttons:
+                                        inner_buttons[-1].click()
+                                        tapped = True
+                                        logger.info("🎯 [Appium] Clicked inner clickable child element inside container")
+                                except Exception:
+                                    pass
+                    except Exception as sel_err:
+                        logger.warning(f"⚠️ [Appium] Element '{selector}' not found in DOM ({sel_err}). Trying Vision AI screenshot calculation...")
+                        # Vision AI Fallback on Screenshot when DOM lookup fails
+                        if not tapped:
+                            query_target = target_text
+                            if not query_target and selector:
+                                raw_s = str(selector)
+                                q_matches = re.findall(r"['\"]([^'\"]+)['\"]", raw_s)
+                                query_target = " ".join(q_matches) if q_matches else raw_s
+                                query_target = re.sub(r'Guia \d+ de \d+|Tab \d+ of \d+', '', query_target, flags=re.IGNORECASE).strip()
+                                query_target = " ".join(query_target.split())
+
+                            vision_coords = self.detect_button_coordinates_from_screenshot(target_text=query_target)
+                            if vision_coords:
+                                cx, cy = vision_coords
+                                step_warning = (
+                                    "⚠️ Alerta de Boas Práticas: O elemento não foi encontrado no DOM. A automação utilizou Visão Computacional na captura de tela para clicar."
+                                )
+                                logger.info(f"🎨 [Vision AI Fallback] Screenshot tap executed at ({cx}, {cy}) for '{query_target}'")
+                                try:
+                                    self._driver.execute_script('mobile: clickGesture', {'x': cx, 'y': cy})
+                                    tapped = True
+                                except Exception:
+                                    try:
+                                        self._driver.tap([(cx, cy)])
+                                        tapped = True
+                                    except Exception: pass
+
+                if not tapped:
+                    raise Exception(f"Element with identifier '{selector}' not found on device.")
                 
-                # Small wait for UI response
-                time.sleep(0.5)
+                time.sleep(0.05)
 
             elif step_type == 'long_press':
                 from appium.webdriver.common.touch_action import TouchAction
-                selector = self._get_platform_selector(props)
+                selector = self._get_platform_selector(props, allow_value_fallback=False)
                 duration_ms = int(props.get('duration', 2000))
                 timeout = int(props.get('timeout', 5000))
                 el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
@@ -283,54 +555,211 @@ class AppiumExecutorService:
                     action = TouchAction(self._driver)
                     action.long_press(el, duration=duration_ms).release().perform()
                 else:
-                    raise Exception(f"Element '{selector}' not found for long_press after {timeout}ms")
+                    raise Exception(f"Element '{selector}' not found for long_press.")
 
             elif step_type == 'type':
-                selector = self._get_platform_selector(props)
-                value = props.get('value', '')
-                x = props.get('x')
-                y = props.get('y')
-                if x is not None: x = int(x)
-                if y is not None: y = int(y)
+                selector = self._get_platform_selector(props, allow_value_fallback=False)
+                raw_value = str(props.get('value', ''))
+                
+                # Resolve variables ({{BOMBA_ID}}, {{env.BOMBA_CODE}}, Faker, etc.)
+                variables = step_data.get('variables', {}) if isinstance(step_data, dict) else {}
+                try:
+                    from app.services.variable_resolver import replace_vars
+                    value = replace_vars(raw_value, variables)
+                except Exception as var_err:
+                    logger.warning(f"⚠️ [Appium] Variable resolution skipped for '{raw_value}': {var_err}")
+                    value = raw_value
+
                 timeout = int(props.get('timeout', 5000))
                 
+                if not selector:
+                    raise Exception("No identifier or selector provided for type.")
+
                 el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
-                success = False
-                
-                if el:
+                if not el:
+                    raise Exception(f"Element with identifier '{selector}' not found for typing.")
+
+                # If located element is a container (ViewGroup, View, etc.), search for inner editable EditText/TextField
+                try:
+                    from appium.webdriver.common.appiumby import AppiumBy
+                    tag_or_cls = (el.tag_name or el.get_attribute('className') or '').lower()
+                    if 'edittext' not in tag_or_cls and 'textfield' not in tag_or_cls:
+                        inner_inputs = el.find_elements(AppiumBy.XPATH, ".//android.widget.EditText | .//XCUIElementTypeTextField | .//XCUIElementTypeSecureTextField | .//*[@class='android.widget.EditText']")
+                        if inner_inputs:
+                            el = inner_inputs[0]
+                            logger.info(f"🎯 [Appium] Extracted inner editable input element from container '{selector}'")
+                except Exception as inner_err:
+                    logger.debug(f"Inner input search skipped: {inner_err}")
+
+                def is_typed_successfully():
+                    clean_val = value.strip()
+                    if not clean_val:
+                        return True
                     try:
-                        # 1. Fast Path: Try direct input (works for standard EditText)
-                        el.send_keys(value)
-                        success = True
-                        logger.info(f"⌨️ [Appium] Direct input success")
+                        now_text = (el.text or el.get_attribute('text') or el.get_attribute('value') or '').strip()
+                        act_text = ''
+                        try:
+                            active_el = self._driver.switch_to.active_element
+                            if active_el:
+                                act_text = (active_el.text or active_el.get_attribute('text') or active_el.get_attribute('value') or '').strip()
+                        except Exception:
+                            pass
+
+                        # Strict match: clean_val must be contained in now_text or act_text (case-sensitive)
+                        if clean_val in now_text or clean_val in act_text:
+                            return True
+                        
+                        # Match digits ONLY if the input value is purely numeric (e.g. CPF / CNPJ / phone)
+                        # If value contains letters (like passwords or names), strict case match is required.
+                        has_letters = any(c.isalpha() for c in clean_val)
+                        if not has_letters:
+                            digits_val = ''.join(c for c in clean_val if c.isdigit())
+                            if len(digits_val) >= 3:
+                                digits_now = ''.join(c for c in now_text if c.isdigit())
+                                digits_act = ''.join(c for c in act_text if c.isdigit())
+                                if digits_val in digits_now or digits_val in digits_act:
+                                    return True
                     except Exception:
-                        # 2. Robust Fallback: Tap center then type (works for Flutter/Hybrid)
-                        try:
-                            loc = el.location
-                            size = el.size
-                            cx = loc['x'] + (size['width'] // 2)
-                            cy = loc['y'] + (size['height'] // 2)
-                            self._driver.tap([(cx, cy)])
-                            time.sleep(0.4)
-                            self._driver.execute_script('mobile: type', {'text': value})
-                            success = True
-                            logger.info(f"⌨️ [Appium] Enhanced type success (Tap+Type)")
-                        except Exception as e:
-                            logger.warning(f"⚠️ [Appium] Fast and Enhanced type failed: {e}")
-                
-                if not success:
-                    if x is not None and y is not None:
-                        logger.info(f"📍 [Appium] Falling back to coordinate type at ({x}, {y})")
-                        self._driver.tap([(x, y)])
-                        time.sleep(0.8) # Wait for focus/keyboard
-                        try:
-                            self._driver.execute_script('mobile: type', {'text': value})
-                            success = True
-                        except Exception as e2:
-                            logger.error(f"❌ [Appium] Global type failed: {e2}")
-                            raise e2
-                    else:
-                        raise Exception(f"Element '{selector}' cannot receive text and no coordinates available as fallback.")
+                        pass
+                    return False
+
+                # Hardware Keycode Typing Helper (Forces React Native / Android to trigger onChangeText and render visual text)
+                def type_hardware_keycodes(val_str):
+                    for char in val_str:
+                        kc = None
+                        metastate = 0
+                        if char.isdigit():
+                            kc = 7 + int(char)
+                        elif 'a' <= char <= 'z':
+                            kc = 29 + (ord(char) - ord('a'))
+                        elif 'A' <= char <= 'Z':
+                            kc = 29 + (ord(char.lower()) - ord('a'))
+                            metastate = 1  # META_SHIFT_ON for uppercase letters
+                        elif char == ' ':
+                            kc = 62
+                        elif char == '@':
+                            kc = 77
+                        elif char == '.':
+                            kc = 56
+                        elif char == '-':
+                            kc = 69
+                        
+                        if kc is not None:
+                            try:
+                                if metastate > 0:
+                                    self._driver.press_keycode(kc, metastate)
+                                else:
+                                    self._driver.press_keycode(kc)
+                                time.sleep(0.03)
+                            except Exception:
+                                pass
+
+                # Focus the element by tapping center
+                try:
+                    loc = el.location
+                    size = el.size
+                    cx = loc['x'] + (size['width'] // 2)
+                    cy = loc['y'] + (size['height'] // 2)
+                    self._driver.tap([(cx, cy)])
+                except Exception:
+                    try:
+                        el.click()
+                    except Exception:
+                        pass
+                time.sleep(0.2)
+
+                typed_success = False
+
+                # Strategy 1: Hardware Keycode Events (triggers React Native / Android onChangeText visual render)
+                try:
+                    type_hardware_keycodes(value)
+                    time.sleep(0.25)
+                    if is_typed_successfully():
+                        typed_success = True
+                        logger.info(f"⌨️ [Appium] Hardware Keycode typing verified for '{selector}'")
+                except Exception as ekc:
+                    logger.warning(f"⚠️ [Appium] Hardware Keycode typing failed on '{selector}': {ekc}")
+
+                # Strategy 2: Direct send_keys
+                if not typed_success:
+                    try:
+                        el.send_keys(value)
+                        time.sleep(0.25)
+                        if is_typed_successfully():
+                            typed_success = True
+                            logger.info(f"⌨️ [Appium] Direct send_keys verified for '{selector}'")
+                    except Exception as e1:
+                        logger.warning(f"⚠️ [Appium] Direct send_keys failed on '{selector}': {e1}")
+
+                # Strategy 3: set_value / set_text
+                if not typed_success:
+                    try:
+                        if hasattr(el, 'set_value'):
+                            el.set_value(value)
+                        elif hasattr(self._driver, 'set_value'):
+                            self._driver.set_value(el, value)
+                        time.sleep(0.25)
+                        if is_typed_successfully():
+                            typed_success = True
+                            logger.info(f"⌨️ [Appium] set_value verified for '{selector}'")
+                    except Exception as e2:
+                        logger.warning(f"⚠️ [Appium] set_value failed: {e2}")
+
+                # Strategy 4: Selenium ActionChains
+                if not typed_success:
+                    try:
+                        from selenium.webdriver.common.action_chains import ActionChains
+                        actions = ActionChains(self._driver)
+                        actions.click(el)
+                        for char in value:
+                            actions.send_keys(char)
+                            actions.pause(0.02)
+                        actions.perform()
+                        time.sleep(0.25)
+                        if is_typed_successfully():
+                            typed_success = True
+                            logger.info(f"⌨️ [Appium] ActionChains character send_keys verified for '{selector}'")
+                    except Exception as e3:
+                        logger.warning(f"⚠️ [Appium] ActionChains failed: {e3}")
+
+                # Strategy 5: Active element send_keys
+                if not typed_success:
+                    try:
+                        active_el = self._driver.switch_to.active_element
+                        if active_el:
+                            active_el.send_keys(value)
+                            time.sleep(0.25)
+                            if is_typed_successfully():
+                                typed_success = True
+                                logger.info(f"⌨️ [Appium] Active element send_keys verified for '{selector}'")
+                    except Exception as e4:
+                        logger.warning(f"⚠️ [Appium] Active element send_keys failed: {e4}")
+
+                # Strategy 6: Mobile shell ADB input text (Android)
+                if not typed_success:
+                    try:
+                        adb_value = value.replace(' ', '%s')
+                        self._driver.execute_script('mobile: shell', {'command': 'input text', 'args': [adb_value]})
+                        time.sleep(0.25)
+                        if is_typed_successfully():
+                            typed_success = True
+                            logger.info(f"⌨️ [Appium] ADB shell input text verified for '{selector}'")
+                    except Exception as e5:
+                        logger.warning(f"⚠️ [Appium] ADB shell input text failed: {e5}")
+
+                if not typed_success:
+                    now_val = ''
+                    try:
+                        now_val = (el.text or el.get_attribute('text') or el.get_attribute('value') or '')
+                    except Exception:
+                        pass
+                    raise Exception(f"Falha ao digitar '{value}' no elemento '{selector}'. O texto do campo permaneceu '{now_val}'.")
+
+                # Force React Native / Flutter component visual refresh
+                try:
+                    self._driver.execute_script('mobile: performEditorAction', {'action': 'normal'})
+                except Exception:
+                    pass
 
             elif step_type == 'clear_field':
                 selector = self._get_platform_selector(props)
@@ -541,11 +970,16 @@ class AppiumExecutorService:
             elif step_type == 'screenshot':
                 if self._driver:
                     screenshot_b64 = self._driver.get_screenshot_as_base64()
-                    return {
-                        "status": 200,
-                        "reason": "OK",
-                        "text": f"[Screenshot captured: {len(screenshot_b64)} bytes]"
-                    }
+                    s_url = self._save_screenshot(screenshot_b64, "manual")
+                    if s_url:
+                        return {
+                            "status": 200,
+                            "reason": "OK",
+                            "text": f"Screenshot captured [Screenshot: {s_url}]",
+                            "screenshot_b64": screenshot_b64
+                        }
+                    else:
+                        raise Exception("Failed to save screenshot.")
 
             elif step_type == 'install_app':
                 apk_path = props.get('apk_path', '')
@@ -635,6 +1069,17 @@ class AppiumExecutorService:
                 except Exception:
                     logger.warning("Face ID simulation not supported on this driver.")
 
+            elif step_type == 'wait':
+                ms = int(props.get('value', 1000) or 1000)
+                time.sleep(ms / 1000.0)
+                logger.info(f"⏳ [Appium] Paused execution for {ms}ms")
+                return {
+                    "status": 200,
+                    "reason": "OK",
+                    "text": f"Aguardou {ms}ms",
+                    "duration": ms
+                }
+
             else:
                 logger.warning(f"📱 Unsupported step type: {step_type}")
 
@@ -643,46 +1088,63 @@ class AppiumExecutorService:
             if capture_screenshot:
                 try:
                     # Small grace period for UI stabilization before screenshot
-                    time.sleep(0.2)
+                    time.sleep(0.05)
                     screenshot_b64 = self._driver.get_screenshot_as_base64()
                 except Exception:
                     pass
 
+            text_res = f"Step '{step_type}' executed successfully."
+            if step_warning:
+                text_res += f" [{step_warning}]"
+            if screenshot_b64:
+                s_url = self._save_screenshot(screenshot_b64, f"live_{step_type}")
+                if s_url:
+                    text_res += f" [Screenshot: {s_url}]"
+
             return {
                 "status": 200,
                 "reason": "OK",
-                "text": f"Step '{step_type}' executed successfully.",
+                "text": text_res,
+                "warning": step_warning,
                 "screenshot_b64": screenshot_b64
             }
 
         except AssertionError as ae:
             # — Screenshot on Assertion Failure (Grupo 3)
             failure_screenshot = None
+            text_res = str(ae)
             if self._driver:
                 try:
                     failure_screenshot = self._driver.get_screenshot_as_base64()
                     logger.info("📸 [Appium] Screenshot on failure captured.")
+                    s_url = self._save_screenshot(failure_screenshot, "error_assert")
+                    if s_url:
+                        text_res += f"\\n[Screenshot: {s_url}]"
                 except Exception:
                     pass
             return {
                 "status": 400,
                 "reason": "Assertion Error",
-                "text": str(ae),
+                "text": text_res,
                 "screenshot_b64": failure_screenshot,
             }
         except Exception as e:
             logger.error(f"📱 Step Failed: {e}")
             # — Screenshot on Unexpected Error
             failure_screenshot = None
+            text_res = str(e)
             if self._driver:
                 try:
                     failure_screenshot = self._driver.get_screenshot_as_base64()
+                    s_url = self._save_screenshot(failure_screenshot, "error_fatal")
+                    if s_url:
+                        text_res += f"\\n[Screenshot: {s_url}]"
                 except Exception:
                     pass
             return {
                 "status": 500,
                 "reason": "Appium Error",
-                "text": str(e),
+                "text": text_res,
                 "screenshot_b64": failure_screenshot,
             }
 
@@ -699,7 +1161,7 @@ class AppiumExecutorService:
             wait = WebDriverWait(self._driver, timeout_s)
             
             # Detect proper locator strategy
-            if selector.startswith('/') or selector.startswith('//'):
+            if selector.startswith('/') or selector.startswith('('):
                 locator = (AppiumBy.XPATH, selector)
             elif ':id/' in selector or '/' in selector:
                 locator = (AppiumBy.ID, selector)
@@ -734,52 +1196,73 @@ class AppiumExecutorService:
         
         logger.warning(f"🩹 [Self-Healing] Element not found: '{original_selector}'. Attempting auto-heal for step '{step_name}'.")
         try:
-            page_source = self._driver.page_source
             import xml.etree.ElementTree as ET
+            import difflib
+            import re
+            
+            page_source = self._driver.page_source
             root = ET.fromstring(page_source.encode('utf-8'))
             
             best_node = None
             keywords = []
+            
+            if original_selector:
+                sel_tokens = [t.lower() for t in re.split(r'[_:\-\s/]+', str(original_selector)) if len(t) >= 3]
+                keywords.extend(sel_tokens)
+
             if step_name: keywords.extend(step_name.lower().split())
             if step_desc: keywords.extend(step_desc.lower().split())
             
-            stopwords = ['tap', 'click', 'type', 'assert', 'the', 'on', 'in', 'button', 'input', 'field']
-            keywords = [k for k in keywords if k not in stopwords and len(k) > 2]
+            stopwords = ['tap', 'click', 'type', 'assert', 'the', 'on', 'in', 'button', 'input', 'field', 'em', 'no', 'na']
+            keywords = [k for k in keywords if k not in stopwords and len(k) >= 3]
             
             if not keywords:
                 return None
                 
-            highest_score = 0
+            highest_score = 0.0
+            orig_sel_clean = str(original_selector).lower()
+
             for element in root.iter():
                 text = element.attrib.get('text', '').lower()
                 desc = element.attrib.get('content-desc', '').lower()
                 res_id = element.attrib.get('resource-id', '').lower()
                 
-                score = 0
+                node_texts = [t for t in [text, desc, res_id] if t]
+                if not node_texts:
+                    continue
+
+                score = 0.0
                 for kw in keywords:
-                    if kw in text: score += 2
-                    if kw in desc: score += 2
-                    if kw in res_id: score += 1
+                    for target in node_texts:
+                        if kw in target:
+                            score += 2.0
+                        ratio = difflib.SequenceMatcher(None, kw, target).ratio()
+                        if ratio > 0.75:
+                            score += (ratio * 2.0)
+                        
+                        full_ratio = difflib.SequenceMatcher(None, orig_sel_clean, target).ratio()
+                        if full_ratio > 0.7:
+                            score += (full_ratio * 3.0)
                     
                 if score > highest_score:
                     highest_score = score
                     best_node = element
                     
-            if best_node is not None and highest_score > 0:
+            if best_node is not None and highest_score >= 1.5:
                 text_val = best_node.attrib.get('text', '')
                 desc_val = best_node.attrib.get('content-desc', '')
                 res_val = best_node.attrib.get('resource-id', '')
                 
                 healed_selector = None
                 if res_val:
-                    healed_selector = f"//*[@resource-id='{res_val}' or @name='{res_val}' or @label='{res_val}']"
+                    healed_selector = f"//*[@resource-id='{res_val}']"
                 elif desc_val:
-                    healed_selector = f"//*[@content-desc='{desc_val}' or @name='{desc_val}' or @label='{desc_val}']"
+                    healed_selector = f"//*[@content-desc='{desc_val}']"
                 elif text_val:
-                    healed_selector = f"//*[@text='{text_val}' or @name='{text_val}' or @label='{text_val}']"
+                    healed_selector = f"//*[@text='{text_val}']"
                     
                 if healed_selector:
-                    logger.info(f"✨ [Self-Healing] Universal XPath Healed selector found: {healed_selector} (Score: {highest_score})")
+                    logger.info(f"✨ [Self-Healing] Universal Healed selector found: {healed_selector} (Score: {highest_score:.2f})")
                     return healed_selector
                     
         except Exception as e:
@@ -788,118 +1271,415 @@ class AppiumExecutorService:
         return None
 
     def _find_element(self, selector: str, timeout_ms: int = 5000, step_data: dict = None):
-        """Localiza elemento por ID, accessibility id, xpath ou text usando timeout explícito e fallback."""
+        """Dynamic multi-strategy element locator with polling until timeout_ms expires."""
         if not self._driver or not selector:
             return None
+        
         try:
             from appium.webdriver.common.appiumby import AppiumBy
             from selenium.webdriver.support.ui import WebDriverWait
             from selenium.webdriver.support import expected_conditions as EC
+            import time
+            import re
             
-            # --- 0. Normalize Selector (Handle multi-line or extra spaces) ---
-            # Remove newlines and trim to increase match chances on physical devices
-            clean_selector = " ".join(selector.split()) 
+            clean_selector = " ".join(str(selector).split()) 
+            if not clean_selector:
+                return None
+
+            start_time = time.time()
+            max_duration = max(1.0, timeout_ms / 1000.0)
+            deadline = start_time + max_duration
             
-            timeout_s = max(0.5, timeout_ms / 1000.0)
-            wait = WebDriverWait(self._driver, timeout_s)
-            
-            # 1. Detect proper locator strategy
-            if selector.startswith('/') or selector.startswith('//'):
-                locator = (AppiumBy.XPATH, selector)
-            elif ':id/' in selector or '/' in selector:
-                # Common Android resource-id pattern
-                locator = (AppiumBy.ID, selector)
-            else:
-                # Default to accessibility ID (content-desc)
-                locator = (AppiumBy.ACCESSIBILITY_ID, selector)
-                
-            try:
-                # Tentativa primária: visibility (mais segura para taps e interações)
-                el = wait.until(EC.visibility_of_element_located(locator))
-                logger.info(f"🎯 [Appium] Found visible element with primary strategy {locator[0]}")
-                return el
-            except Exception:
+            fast_wait = WebDriverWait(self._driver, 0.4)
+
+            scrolled_attempt = False
+            while time.time() < deadline:
+                # If element not found in first 40% of timeout duration, perform gentle scroll down to expose off-screen elements
+                if (time.time() - start_time) > (max_duration * 0.4) and not scrolled_attempt:
+                    scrolled_attempt = True
+                    try:
+                        size = self._driver.get_window_size()
+                        cx_scr, h_scr = size['width'] // 2, size['height']
+                        self._driver.swipe(cx_scr, int(h_scr * 0.7), cx_scr, int(h_scr * 0.35), 350)
+                        time.sleep(0.25)
+                    except Exception:
+                        pass
+
+                # 0. Accessibility ID Primary (Direct lookup for Accessibility IDs like 'welcome_button', 'Abastecer')
                 try:
-                    # Fallback: presence (pode estar na tela mas não considerado 'visível' ainda pelo Appium)
-                    el = wait.until(EC.presence_of_element_located(locator))
-                    logger.info(f"🎯 [Appium] Found present element with primary strategy {locator[0]}")
+                    el = fast_wait.until(EC.presence_of_element_located((AppiumBy.ACCESSIBILITY_ID, clean_selector)))
+                    logger.info(f"🎯 [Appium] Found element with ACCESSIBILITY_ID: {clean_selector}")
                     return el
                 except Exception:
-                    # Fallback: if ID/AccessibilityID fails, try the other one briefly
-                    fallback_timeout = 1.5
-                    short_wait = WebDriverWait(self._driver, fallback_timeout)
-                    
-                    # If we tried ID, try Accessibility ID now
-                    if locator[0] == AppiumBy.ID:
-                        try: 
-                            el = short_wait.until(EC.presence_of_element_located((AppiumBy.ACCESSIBILITY_ID, selector)))
-                            logger.info(f"🎯 [Appium] Found with fallback: Accessibility ID")
-                            return el
-                        except: pass
-                    # If we tried Accessibility ID, try ID now
-                    elif locator[0] == AppiumBy.ACCESSIBILITY_ID:
-                        try: 
-                            el = short_wait.until(EC.presence_of_element_located((AppiumBy.ID, selector)))
-                            logger.info(f"🎯 [Appium] Found with fallback: ID")
-                            return el
-                        except: pass
-                    
-                    # 3. Final fallback strategy: Combined attribute search (High Performance)
-                    # Instead of looping through strategies, we use a single broad XPath search
-                    # to reduce network round-trips between the backend and Appium.
+                    pass
 
-                    partial_text = clean_selector[:30] if len(clean_selector) > 30 else clean_selector
-                    
-                    # Combine multiple possible locations in one query
-                    combined_xpath = (
-                        f"//*[@text='{selector}' or @content-desc='{selector}' or "
-                        f"contains(@text, '{partial_text}') or contains(@content-desc, '{partial_text}') or "
-                        f"@hint='{selector}' or @placeholder='{selector}']"
-                    )
-
+                # 1. Check if selector is a Mobile Class Name (EditText, Button, android.widget.EditText, etc.)
+                is_class_name = (
+                    clean_selector in ('EditText', 'Button', 'TextView', 'ImageView', 'View', 'ViewGroup', 'CheckBox', 'RadioButton', 'ImageButton') or
+                    clean_selector.startswith('android.widget.') or
+                    clean_selector.startswith('android.view.') or
+                    clean_selector.startswith('XCUIElementType')
+                )
+                if is_class_name:
+                    class_target = clean_selector if ('.' in clean_selector or clean_selector.startswith('XCUI')) else f"android.widget.{clean_selector}"
                     try:
-                        el = short_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, combined_xpath)))
-                        logger.info(f"🎯 [Appium] Found with combined adaptive XPath")
+                        el = fast_wait.until(EC.presence_of_element_located((AppiumBy.CLASS_NAME, class_target)))
+                        logger.info(f"🎯 [Appium] Found element with Class Name strategy: {class_target}")
                         return el
-                    except:
-                        # Final attempt: UIAutomator (sometimes more reliable than XPath on Android)
+                    except Exception:
                         try:
-                            uia_strategy = f'new UiSelector().textContains("{partial_text}")'
-                            el = short_wait.until(EC.presence_of_element_located((AppiumBy.ANDROID_UIAUTOMATOR, uia_strategy)))
-                            logger.info(f"🎯 [Appium] Found with UIAutomator fallback")
+                            el = fast_wait.until(EC.presence_of_element_located((AppiumBy.CLASS_NAME, clean_selector)))
+                            logger.info(f"🎯 [Appium] Found element with Class Name strategy: {clean_selector}")
                             return el
-                        except:
+                        except Exception:
                             pass
-                    
-            # Se chegamos aqui sem retornar, é porque falhou tudo
-            if step_data:
-                healed_sel = self._attempt_self_healing(selector, step_data)
-                if healed_sel:
-                    try:
-                        if healed_sel.startswith('/') or healed_sel.startswith('//'):
-                            heal_loc = (AppiumBy.XPATH, healed_sel)
-                        elif ':id/' in healed_sel or '/' in healed_sel:
-                            heal_loc = (AppiumBy.ID, healed_sel)
-                        else:
-                            heal_loc = (AppiumBy.ACCESSIBILITY_ID, healed_sel)
-                        el = short_wait.until(EC.presence_of_element_located(heal_loc))
-                        logger.info(f"🎉 [Self-Healing] Successfully found element with healed selector: {healed_sel}")
-                        return el
-                    except Exception as e2:
-                        logger.error(f"🩹 [Self-Healing] Failed to apply healed selector: {e2}")
 
-            # Re-raise if all fail
-            raise Exception(f"Element '{selector}' not found.")
-                
+                # 2. Explicit XPath (starts with / or ()
+                # IMPORTANT: if selector is an XPath expression, ONLY use XPath strategy.
+                # Strategies 3-7 embed the raw selector as literal text/ID which corrupts complex
+                # XPath expressions (e.g. from TextActionModal with translate/contains) and can
+                # produce false-positive matches against unrelated screen elements.
+                raw_selector = str(selector)
+                clean_selector = " ".join(raw_selector.split())
+                is_xpath_expr = clean_selector.startswith('/') or clean_selector.startswith('(')
+                if is_xpath_expr:
+                    # 2.0: Try exact raw XPath as passed
+                    try:
+                        el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, raw_selector)))
+                        logger.info(f"🎯 [Appium] Found element with exact raw XPath: {raw_selector}")
+                        return el
+                    except Exception:
+                        pass
+
+                    # 2.1: Try collapsed single-space XPath
+                    try:
+                        if clean_selector != raw_selector:
+                            el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, clean_selector)))
+                            logger.info(f"🎯 [Appium] Found element with collapsed XPath: {clean_selector}")
+                            return el
+                    except Exception:
+                        pass
+
+                    # 2.2: Extract attribute value & try normalize-space and sub-tokens
+                    try:
+                        match = re.search(r"@(content-desc|text|label|name|resource-id)=['\"]([^'\"]+)['\"]", raw_selector)
+                        if not match:
+                            match = re.search(r"@(content-desc|text|label|name|resource-id)=['\"]([^'\"]+)['\"]", clean_selector)
+
+                        if match:
+                            attr_name, val = match.groups()
+                            val_clean = " ".join(val.split())
+                            val_no_tab = re.sub(r'Guia \d+ de \d+|Tab \d+ of \d+', '', val_clean, flags=re.IGNORECASE).strip()
+
+                            # 2.2.a: normalize-space exact match (handles multiple spaces, tabs & newlines in attributes)
+                            norm_xpath = f"//*[normalize-space(@{attr_name})='{val_clean}']"
+                            try:
+                                el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, norm_xpath)))
+                                logger.info(f"🎯 [Appium] Found element with normalize-space XPath: {norm_xpath}")
+                                return el
+                            except Exception:
+                                pass
+
+                            # 2.2.b: normalize-space without tab suffix ('Guia 2 de 2')
+                            if val_no_tab and val_no_tab != val_clean:
+                                norm_notab_xpath = f"//*[contains(normalize-space(@{attr_name}), '{val_no_tab}') or contains(normalize-space(@text), '{val_no_tab}')]"
+                                try:
+                                    el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, norm_notab_xpath)))
+                                    logger.info(f"🎯 [Appium] Found element with normalize-space no-tab XPath: {norm_notab_xpath}")
+                                    return el
+                                except Exception:
+                                    pass
+
+                            # 2.2.c: Case-insensitive normalize-space contains match
+                            search_val = val_no_tab if val_no_tab else val_clean
+                            search_lower = search_val.lower()
+                            ci_xpath = f"//*[contains(translate(normalize-space(@{attr_name}), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{search_lower}') or contains(translate(normalize-space(@text), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{search_lower}')]"
+                            try:
+                                el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, ci_xpath)))
+                                logger.info(f"🎯 [Appium] Found element with case-insensitive normalize-space XPath: {ci_xpath}")
+                                return el
+                            except Exception:
+                                pass
+
+                            # 2.2.d: Sub-word token fallback if multiple words present
+                            words = [w for w in re.split(r'\s+', search_val) if len(w) >= 3 and w.lower() not in ('guia', 'tab', 'de', 'of')]
+                            if words:
+                                first_word = words[0].lower()
+                                word_xpath = f"//*[contains(translate(normalize-space(@{attr_name}), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{first_word}') or contains(translate(normalize-space(@text), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{first_word}')]"
+                                try:
+                                    el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, word_xpath)))
+                                    logger.info(f"🎯 [Appium] Found element with sub-word normalize-space XPath: {word_xpath}")
+                                    return el
+                                except Exception:
+                                    pass
+                    except Exception as e_norm:
+                        logger.debug(f"Normalize space fallback error: {e_norm}")
+
+                    # 2.3: Extract quoted string and try ACCESSIBILITY_ID or combined XPath
+                    try:
+                        m2 = re.search(r"['\"]([^'\"]{2,})['\"]", clean_selector)
+                        if m2:
+                            val2 = m2.group(1)
+                            val2_no_tab = re.sub(r'Guia \d+ de \d+|Tab \d+ of \d+', '', val2, flags=re.IGNORECASE).strip()
+                            try:
+                                el = fast_wait.until(EC.presence_of_element_located((AppiumBy.ACCESSIBILITY_ID, val2_no_tab or val2)))
+                                logger.info(f"🎯 [Appium] Found element via extracted XPath quote Accessibility ID: '{val2_no_tab or val2}'")
+                                return el
+                            except Exception:
+                                combo = f"//*[@content-desc='{val2_no_tab}' or @text='{val2_no_tab}' or contains(normalize-space(@content-desc), '{val2_no_tab}') or contains(normalize-space(@text), '{val2_no_tab}')]"
+                                el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, combo)))
+                                logger.info(f"🎯 [Appium] Found element via extracted XPath quote combined: {combo}")
+                                return el
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                    continue  # Skip all non-XPath strategies below; keep polling until timeout
+
+                # 3. Package Resource ID (contains :id/ or /)
+                if ':id/' in clean_selector or '/' in clean_selector:
+                    try:
+                        return fast_wait.until(EC.presence_of_element_located((AppiumBy.ID, clean_selector)))
+                    except Exception:
+                        pass
+
+                # 4. Adaptive Combined XPath (Matches @content-desc, @text, @label, @name, @resource-id, @hint)
+                combined_xpath = (
+                    f"//*[@content-desc='{clean_selector}' or @text='{clean_selector}' or @label='{clean_selector}' or @name='{clean_selector}' or @resource-id='{clean_selector}' or "
+                    f"contains(@content-desc, '{clean_selector}') or contains(@text, '{clean_selector}') or contains(@label, '{clean_selector}') or contains(@resource-id, '{clean_selector}') or "
+                    f"@hint='{clean_selector}' or @placeholder='{clean_selector}']"
+                )
+                try:
+                    el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, combined_xpath)))
+                    logger.info(f"🎯 [Appium] Found element with adaptive combined XPath: {combined_xpath}")
+                    return el
+                except Exception:
+                    pass
+
+                # 4.1 Sub-Token Extraction for identifiers with underscores/hyphens (e.g. wellcome_button -> wellcome)
+                if '_' in clean_selector or '-' in clean_selector:
+                    sub_tokens = [t for t in re.split(r'[_:\-]+', clean_selector) if len(t) >= 3 and t.lower() not in ('btn', 'button', 'txt', 'text', 'lbl', 'label')]
+                    for sub in sub_tokens:
+                        sub_xpath = f"//*[contains(@resource-id, '{sub}') or contains(@content-desc, '{sub}') or contains(@text, '{sub}') or contains(@name, '{sub}')]"
+                        try:
+                            el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, sub_xpath)))
+                            logger.info(f"🎯 [Appium] Found element via sub-token XPath: {sub_xpath}")
+                            return el
+                        except Exception:
+                            pass
+
+                # 5. Short Resource ID
+                try:
+                    return fast_wait.until(EC.presence_of_element_located((AppiumBy.ID, clean_selector)))
+                except Exception:
+                    pass
+
+                # 6. Dynamic Multiline & Token Fallback Strategy (Strips accessibility tab suffixes like 'Guia 1 de 2')
+                try:
+                    raw_sel = str(selector)
+                    clean_no_tab = re.sub(r'Guia \d+ de \d+|Tab \d+ of \d+', '', raw_sel, flags=re.IGNORECASE).strip()
+                    lines = [l.strip() for l in clean_no_tab.replace(r'\n', '\n').split('\n') if l.strip()]
+                    
+                    candidates = []
+                    if lines:
+                        last_line = " ".join(lines[-1].split())
+                        first_line = " ".join(lines[0].split())
+                        first_two = " ".join(" ".join(lines[:2]).split())
+                        if len(last_line) >= 2 and last_line not in candidates:
+                            candidates.append(last_line)
+                        if len(first_two) >= 3 and first_two not in candidates:
+                            candidates.append(first_two)
+                        if len(first_line) >= 3 and first_line not in candidates:
+                            candidates.append(first_line)
+                    
+                    for candidate in candidates:
+                        token_xpath = f"//*[contains(@content-desc, '{candidate}') or contains(@text, '{candidate}') or contains(@label, '{candidate}') or contains(@name, '{candidate}')]"
+                        try:
+                            el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, token_xpath)))
+                            logger.info(f"🎯 [Appium] Found element with multiline/tab fallback token XPath: {token_xpath}")
+                            return el
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # 7. UIAutomator fallback for Android (plain-text selectors only)
+                # Skip if selector looks like an XPath or resource-id to avoid corrupt UiSelector queries
+                if not (':id/' in clean_selector or '/' in clean_selector):
+                    try:
+                        partial_text = clean_selector[:30]
+                        uia_strategy = f'new UiSelector().textContains("{partial_text}")'
+                        return fast_wait.until(EC.presence_of_element_located((AppiumBy.ANDROID_UIAUTOMATOR, uia_strategy)))
+                    except Exception:
+                        pass
+
+                time.sleep(0.3)  # Poll every 300ms until timeout_ms expires
+
+            # 8. Self-Healing fallback activated automatically when exact lookups fail
+            healed_sel = self._attempt_self_healing(clean_selector, step_data)
+            if healed_sel:
+                try:
+                    heal_loc = (AppiumBy.XPATH, healed_sel) if (healed_sel.startswith('/') or healed_sel.startswith('(')) else (AppiumBy.ACCESSIBILITY_ID, healed_sel)
+                    el = WebDriverWait(self._driver, 1.5).until(EC.presence_of_element_located(heal_loc))
+                    logger.info(f"🎉 [Self-Healing] Successfully found element with healed selector: {healed_sel}")
+                    return el
+                except Exception:
+                    pass
+
+            # 9. Step-based Dynamic Token Extraction (Extracted directly from step name/description)
+            try:
+                if step_data:
+                    step_props = step_data.get('properties', {})
+                    step_name = step_data.get('name', '')
+                    step_desc = step_data.get('description', '')
+                    
+                    # Priority: use target_text from properties (set by TextActionModal) for direct match
+                    target_text = step_props.get('target_text', '')
+                    if target_text:
+                        target_lower = target_text.lower()
+                        target_xpath = (
+                            f"//*[contains(translate(@text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{target_lower}') or "
+                            f"contains(translate(@content-desc, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{target_lower}') or "
+                            f"contains(translate(@label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{target_lower}')]"
+                        )
+                        try:
+                            el = WebDriverWait(self._driver, 1.5).until(EC.presence_of_element_located((AppiumBy.XPATH, target_xpath)))
+                            logger.info(f"🎯 [Target Text Fallback] Found element matching target_text='{target_text}'")
+                            if isinstance(step_data, dict): step_data['_used_fallback'] = True
+                            return el
+                        except Exception:
+                            pass
+                        # Also try UIAutomator for Android with exact target_text
+                        try:
+                            uia = f'new UiSelector().textContains("{target_text}")'
+                            el = WebDriverWait(self._driver, 1.0).until(EC.presence_of_element_located((AppiumBy.ANDROID_UIAUTOMATOR, uia)))
+                            logger.info(f"🎯 [Target Text Fallback] Found element via UIAutomator textContains='{target_text}'")
+                            if isinstance(step_data, dict): step_data['_used_fallback'] = True
+                            return el
+                        except Exception:
+                            pass
+
+                    # Fallback: tokenize step name/description, strip punctuation to avoid XPath syntax errors
+                    combined_text = f"{step_name} {step_desc}"
+                    words = [re.sub(r'[^\w]', '', w) for w in re.split(r'[\s_\-/\"\']+', combined_text)]
+                    words = [w for w in words if len(w) >= 3]
+                    stopwords = {'tap', 'click', 'clique', 'toque', 'button', 'botao', 'btn', 'element', 'elemento',
+                                 'the', 'em', 'no', 'na', 'para', 'type', 'digitar', 'assert', 'verificar'}
+                    dynamic_keywords = [w for w in words if w.lower() not in stopwords]
+                    for kw in dynamic_keywords:
+                        kw_xpath = f"//*[@clickable='true' and (contains(translate(@text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{kw.lower()}') or contains(translate(@content-desc, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{kw.lower()}'))]"
+                        try:
+                            el = fast_wait.until(EC.presence_of_element_located((AppiumBy.XPATH, kw_xpath)))
+                            logger.info(f"🚀 [Step Keyword Fallback] Found element dynamically matching step keyword '{kw}'")
+                            if isinstance(step_data, dict): step_data['_used_fallback'] = True
+                            return el
+                        except Exception:
+                            pass
+            except Exception as fb_err:
+                logger.warning(f"⚠️ [Step Keyword Fallback] Failed: {fb_err}")
+
+            # Element definitively not found — raise to propagate error correctly
+            raise Exception(f"Element '{clean_selector}' not found after {timeout_ms}ms.")
+
         except Exception as e:
             logger.warning(f"📱 Element not found: {selector} after {timeout_ms}ms — {e}")
+            raise
+
+    # ------------------------------------------------------------------
+    # Vision AI Button Detection
+    # ------------------------------------------------------------------
+
+    def detect_button_coordinates_from_screenshot(self, screenshot_bytes: bytes = None, container_bounds: dict = None, target_text: str = None) -> tuple[int, int] | None:
+        """
+        Analisa a captura de tela (PNG) e detecta visualmente o contorno do botão
+        (retângulo preenchido de cor destacada dentro do container).
+        Calcula as coordenadas (x, y) exatas dinamicamente para qualquer aparelho e resolução.
+        """
+        if not self._driver and not screenshot_bytes:
             return None
+
+        try:
+            import io
+            from PIL import Image
+            import numpy as np
+
+            if not screenshot_bytes and self._driver:
+                screenshot_bytes = self._driver.get_screenshot_as_png()
+
+            if not screenshot_bytes:
+                return None
+
+            image = Image.open(io.BytesIO(screenshot_bytes)).convert('RGB')
+            img_w, img_h = image.size
+
+            if container_bounds:
+                cx0 = max(0, int(container_bounds.get('x', 0)))
+                cy0 = max(0, int(container_bounds.get('y', 0)))
+                cw = int(container_bounds.get('width', img_w))
+                ch = int(container_bounds.get('height', img_h))
+                cx1 = min(img_w, cx0 + cw)
+                cy1 = min(img_h, cy0 + ch)
+            else:
+                cx0, cy0, cx1, cy1 = 0, 0, img_w, img_h
+
+            cropped = image.crop((cx0, cy0, cx1, cy1))
+            crop_w, crop_h = cropped.size
+            if crop_w <= 10 or crop_h <= 10:
+                return None
+
+            # Estratégia 1: OpenCV Contour Analysis (Se opencv-python estiver disponível)
+            try:
+                import cv2
+                np_img = np.array(cropped)
+                gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                edges = cv2.Canny(blurred, 30, 150)
+                contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                candidate_buttons = []
+                for cnt in contours:
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    aspect_ratio = w / float(h) if h > 0 else 0
+                    if 1.2 <= aspect_ratio <= 12.0 and (crop_w * 0.20) <= w <= (crop_w * 0.98) and 25 <= h <= 140:
+                        # Pontua candidatos que estão localizados no terço/metade inferior do container (padrão de botões de ação)
+                        score = (y + h / 2) + (w * h * 0.05)
+                        candidate_buttons.append((score, x, y, w, h))
+
+                if candidate_buttons:
+                    candidate_buttons.sort(key=lambda item: item[0], reverse=True)
+                    _, bx, by, bw, bh = candidate_buttons[0]
+                    target_x = cx0 + bx + (bw // 2)
+                    target_y = cy0 + by + (bh // 2)
+                    return target_x, target_y
+            except Exception:
+                pass
+
+            # Estratégia 2: Varredura de baixa variância de cor (Faixa de botão sólido usando Numpy + Pillow)
+            np_img = np.array(cropped)
+            start_row = int(crop_h * 0.5)
+            row_scores = []
+            for r in range(start_row, crop_h - 10):
+                row_pixels = np_img[r, int(crop_w * 0.15):int(crop_w * 0.85)]
+                if len(row_pixels) > 0:
+                    var = np.var(row_pixels, axis=0).mean()
+                    row_scores.append((var, r))
+            
+            if row_scores:
+                row_scores.sort(key=lambda item: item[0])
+                best_r = row_scores[0][1]
+                target_x = cx0 + (crop_w // 2)
+                target_y = cy0 + best_r
+                return target_x, target_y
+
+        except Exception as e:
+            logger.warning(f"⚠️ [Vision AI] Exceção ao detectar botão na screenshot: {e}")
+
+        return None
 
     # ------------------------------------------------------------------
     # Close
     # ------------------------------------------------------------------
 
-    def close(self):
+    def close_sync(self):
         if self._driver:
             try:
                 self._driver.quit()

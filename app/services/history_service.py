@@ -24,6 +24,17 @@ class HistoryService:
         # Filtro de variáveis: Salva apenas as que realmente aparecem no request
         filtered_vars = HistoryService._filter_variables(history)
 
+        # Resolvendo Origem do Gatilho
+        trigger_origin = history.trigger_origin or "manual"
+        if trigger_origin == "manual" and history.schedule_id:
+            from app.models.schedule_models import ScheduleModel
+            sched = db.query(ScheduleModel).filter(ScheduleModel.id == history.schedule_id).first()
+            if sched:
+                if sched.name and (sched.name.startswith("CI/CD") or sched.name.startswith("[PIPELINE]")):
+                    trigger_origin = "pipeline"
+                else:
+                    trigger_origin = "schedule"
+
         db_history = ApiExecutionHistory(
             execution_id=execution_id,
             batch_id=history.batch_id,
@@ -57,6 +68,7 @@ class HistoryService:
             video_url=history.video_url,
             healed_selector=history.healed_selector,
             execution_type=history.execution_type or "api",
+            trigger_origin=trigger_origin,
         )
 
         db.add(db_history)
@@ -86,6 +98,8 @@ class HistoryService:
             "mobile": MobileHistoryDetails
         }
         
+        schedule_origin_cache = {}
+        
         for i, history in enumerate(histories):
             # Generate unique ID for each item in batch
             execution_id = f"exec_{uuid.uuid4().hex[:10]}_{timestamp}_{i}"
@@ -95,6 +109,20 @@ class HistoryService:
             exec_type = history.execution_type or "api"
             ModelClass = model_map.get(exec_type, ApiExecutionHistory)
             
+            trigger_origin = history.trigger_origin or "manual"
+            if trigger_origin == "manual" and history.schedule_id:
+                if history.schedule_id not in schedule_origin_cache:
+                    from app.models.schedule_models import ScheduleModel
+                    sched = db.query(ScheduleModel).filter(ScheduleModel.id == history.schedule_id).first()
+                    if sched:
+                        if sched.name and (sched.name.startswith("CI/CD") or sched.name.startswith("[PIPELINE]")):
+                            schedule_origin_cache[history.schedule_id] = "pipeline"
+                        else:
+                            schedule_origin_cache[history.schedule_id] = "schedule"
+                    else:
+                        schedule_origin_cache[history.schedule_id] = "manual"
+                trigger_origin = schedule_origin_cache[history.schedule_id]
+
             db_history = ModelClass(
                 execution_id=execution_id,
                 batch_id=history.batch_id,
@@ -126,6 +154,7 @@ class HistoryService:
                 video_url=history.video_url,
                 healed_selector=history.healed_selector,
                 execution_type=history.execution_type or "api",
+                trigger_origin=trigger_origin,
             )
             db_objects.append(db_history)
 
@@ -406,10 +435,13 @@ class HistoryService:
         return [{"method": r.method, "url": r.url} for r in results]
 
     @staticmethod
-    def archive_old_records(db: Session, days: int):
+    def archive_old_records(db: Session, days: int, company_id: Optional[int] = None):
         threshold = datetime.utcnow() - timedelta(days=days)
         try:
-            records = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.created_at < threshold).all()
+            query = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.created_at < threshold)
+            if company_id is not None:
+                query = query.join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(UserDB.company_id == company_id)
+            records = query.all()
             if not records: return 0
             archive_objects = [
                 ApiExecutionHistoryArchive(
@@ -424,7 +456,14 @@ class HistoryService:
                 ) for r in records
             ]
             db.bulk_save_objects(archive_objects)
-            db.query(ApiExecutionHistory).filter(ApiExecutionHistory.id.in_([r.id for r in records])).delete(synchronize_session=False)
+            
+            if company_id is not None:
+                ids = [r.id for r in records]
+                if not ids: return 0
+                db.query(ApiExecutionHistory).filter(ApiExecutionHistory.id.in_(ids)).delete(synchronize_session=False)
+            else:
+                query.delete(synchronize_session=False)
+                
             db.commit()
             return len(records)
         except Exception as e:
@@ -432,10 +471,18 @@ class HistoryService:
             raise e
 
     @staticmethod
-    def purge_archived_records(db: Session, days: int):
+    def purge_archived_records(db: Session, days: int, company_id: Optional[int] = None):
         threshold = datetime.utcnow() - timedelta(days=days)
         try:
-            delete_query = db.query(ApiExecutionHistoryArchive).filter(ApiExecutionHistoryArchive.created_at < threshold)
+            query = db.query(ApiExecutionHistoryArchive).filter(ApiExecutionHistoryArchive.created_at < threshold)
+            if company_id is not None:
+                query = query.join(UserDB, ApiExecutionHistoryArchive.user_id == UserDB.id).filter(UserDB.company_id == company_id)
+                ids = [r[0] for r in query.with_entities(ApiExecutionHistoryArchive.id).all()]
+                if not ids: return 0
+                delete_query = db.query(ApiExecutionHistoryArchive).filter(ApiExecutionHistoryArchive.id.in_(ids))
+            else:
+                delete_query = query
+                
             count = delete_query.count()
             if count > 0:
                 delete_query.delete(synchronize_session=False)

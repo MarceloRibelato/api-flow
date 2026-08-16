@@ -13,22 +13,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class SessionStartPayload(BaseModel):
+    session_id: Optional[str] = None
     steps: Optional[List[Dict[str, Any]]] = None
 
 @router.post("/session/start")
-def start_inspector_session(product_id: int, payload: SessionStartPayload = None, db: Session = Depends(get_db)):
+def start_inspector_session(product_id: int, payload: SessionStartPayload = None, session_id: Optional[str] = None, db: Session = Depends(get_db)):
     """
     Start an interactive Appium Inspector session.
     Returns: { "session_id": "...", "image_b64": "...", "tree": [...] }
     """
-    session_id = str(uuid.uuid4())
+    sid = session_id or (payload.session_id if payload else None) or str(uuid.uuid4())
     try:
         steps = payload.steps if payload else None
-        snapshot = AppiumInspectorService.start_session(session_id, db, product_id, steps=steps)
-        return {"session_id": session_id, **snapshot}
+        snapshot = AppiumInspectorService.start_session(sid, db, product_id, steps=steps)
+        return {"session_id": sid, **snapshot}
     except Exception as e:
         logger.error(f"Failed to start inspector session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/session/{session_id}/progress")
+def get_inspector_progress(session_id: str):
+    """Returns current step replay progress for an active Appium session."""
+    return AppiumInspectorService.get_progress(session_id)
 
 @router.delete("/session/{session_id}")
 def stop_inspector_session(session_id: str):
@@ -94,4 +100,17 @@ def generate_selectors(session_id: str, payload: dict):
         return result
     except Exception as e:
         logger.error(f"Generate selectors failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+@router.post("/session/{session_id}/ai-autocorrect")
+def ai_autocorrect_step(session_id: str, payload: dict, db: Session = Depends(get_db)):
+    """
+    Analyzes the full mobile DOM tree for a failed step using AI and returns the optimal component selector.
+    """
+    try:
+        failed_step = payload.get("failed_step", {})
+        result = AppiumInspectorService.ai_analyze_full_tree_and_correct(session_id, failed_step, db=db)
+        return result
+    except Exception as e:
+        logger.error(f"AI AutoCorrect endpoint failed: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class SessionStartPayload(BaseModel):
+    session_id: Optional[str] = None
     steps: Optional[List[Dict[str, Any]]] = None
 
 @router.websocket("/session/ws/{session_id}")
@@ -98,21 +99,26 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         logger.error(f"🔴 [WebSocket] connection error for session {session_id}: {e}")
 
 @router.post("/session/start")
-async def start_web_session(payload: SessionStartPayload = None, initial_url: str = None):
+async def start_web_session(payload: SessionStartPayload = None, initial_url: str = None, session_id: str = None):
     """Starts a live web session."""
-    session_id = str(uuid.uuid4())
+    final_session_id = session_id or (payload.session_id if payload else None) or str(uuid.uuid4())
     try:
         import base64
         steps = payload.steps if payload else None
-        snapshot, image_bytes = await WebInspectorService.start_session(session_id, initial_url, steps=steps)
+        snapshot, image_bytes = await WebInspectorService.start_session(final_session_id, initial_url, steps=steps)
         if image_bytes:
             snapshot["image_b64"] = base64.b64encode(image_bytes).decode("utf-8")
-        return {"session_id": session_id, **snapshot}
+        return {"session_id": final_session_id, **snapshot}
     except Exception as e:
         logger.error(f"Failed to start web session: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/session/{session_id}/progress")
+async def get_web_session_progress(session_id: str):
+    """Returns the real-time execution progress of step replay for a web session."""
+    return WebInspectorService.get_progress(session_id)
 
 @router.delete("/session/{session_id}")
 async def stop_web_session(session_id: str):

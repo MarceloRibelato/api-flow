@@ -6,6 +6,7 @@ from app.services.product_service import ProductService
 from app.schemas.product_schemas import ProductCreate, ProductResponse, ProductMobileSettingsCreate, ProductMobileSettingsResponse
 from pydantic import BaseModel
 from typing import Optional
+import requests
 
 router = APIRouter(
     prefix="/products",
@@ -34,6 +35,12 @@ class MobileDeviceResponse(MobileDeviceCreate):
     product_id: int
     class Config:
         from_attributes = True
+
+class MobilePingPayload(BaseModel):
+    server_url: Optional[str] = None
+    provider: Optional[str] = None
+    auth_user: Optional[str] = None
+    auth_token: Optional[str] = None
 
 # ... (router def)
 
@@ -147,8 +154,90 @@ def update_product_mobile_settings(
     return ProductService.update_mobile_settings(db, product_id, settings_data)
 
 # ─────────────────────────────────────────────────────────
-# Device Matrix Routes
+# Device Matrix & Utilities
 # ─────────────────────────────────────────────────────────
+
+@router.post("/mobile-ping")
+def ping_mobile_server(
+    payload: MobilePingPayload,
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Test Appium / Mobile Server connectivity from the backend.
+    """
+    try:
+        url = payload.server_url or "http://localhost:4723"
+        url = url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+        
+        # Adjust URL to point to /status
+        if url.endswith("/wd/hub"):
+            url = url[:-7]
+        elif url.endswith("/wd/hub/"):
+            url = url[:-8]
+            
+        url = url.rstrip("/")
+        status_url = url + "/status"
+        
+        auth = None
+        if payload.provider in ("browserstack", "saucelabs") and payload.auth_user and payload.auth_token:
+            auth = (payload.auth_user, payload.auth_token)
+            
+        res = requests.get(status_url, auth=auth, timeout=5)
+        if res.status_code not in (200, 304, 301, 302):
+            return {"status": "error", "message": f"HTTP {res.status_code}"}
+            
+        # If local appium, attempt to capture device by starting a temporary session
+        captured_device = None
+        warning_msg = None
+        if payload.provider == 'appium_local':
+            try:
+                session_url = url + "/session"
+                session_payload = {
+                    "capabilities": {
+                        "alwaysMatch": {
+                            "platformName": "Android",
+                            "appium:automationName": "UiAutomator2"
+                        }
+                    }
+                }
+                session_res = requests.post(session_url, json=session_payload, timeout=10)
+                if session_res.status_code == 200:
+                    data = session_res.json()
+                    session_id = data.get("value", {}).get("sessionId")
+                    caps = data.get("value", {}).get("capabilities", {})
+                    
+                    device_name = caps.get("deviceName") or caps.get("deviceUDID") or caps.get("deviceModel")
+                    platform_version = caps.get("platformVersion")
+                    
+                    if device_name:
+                        captured_device = {
+                            "device_name": device_name,
+                            "platform_version": platform_version or ""
+                        }
+                    
+                    # Delete the temporary session
+                    if session_id:
+                        requests.delete(f"{session_url}/{session_id}", timeout=5)
+                else:
+                    # Appium returned an error when creating the session
+                    try:
+                        error_data = session_res.json()
+                        error_msg = error_data.get("value", {}).get("message", session_res.text)
+                        warning_msg = f"Appium está online, mas falhou ao tentar obter o dispositivo: {error_msg}"
+                    except:
+                        warning_msg = f"Appium está online, mas falhou ao tentar obter o dispositivo (HTTP {session_res.status_code})"
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to capture device info during ping: {e}")
+                warning_msg = f"Erro ao tentar capturar dispositivo: {str(e)}"
+
+        return {
+            "status": "ok",
+            "captured_device": captured_device,
+            "warning": warning_msg
+        }
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "message": str(e)}
 
 @router.get("/{product_id}/mobile-devices", response_model=List[MobileDeviceResponse])
 def list_mobile_devices(

@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # Global session management
 _session_lock = asyncio.Lock()
 _active_sessions: Dict[str, Any] = {}
+_session_progress: Dict[str, Dict[str, Any]] = {}
 _playwright_instance = None  # Persistent playwright instance
 _last_cleanup_time = 0
 
@@ -309,6 +310,15 @@ class _WebInspectorServiceImpl:
                     failed_step_index = None
                     failed_step_error = None
                     for i, step in enumerate(steps):
+                        step_name = step.get("name") or step.get("type") or f"Passo {i + 1}"
+                        node_name = step.get("_sourceNodeName") or step.get("nodeName") or "Nó Atual"
+                        _session_progress[session_id] = {
+                            "current_index": i,
+                            "total_steps": len(steps),
+                            "step_name": step_name,
+                            "node_name": node_name,
+                            "status": "running"
+                        }
                         try:
                             # Use skip_tree=True and return_snapshot=False for intermediate steps to speed up execution
                             is_last = (i == len(steps) - 1)
@@ -318,8 +328,13 @@ class _WebInspectorServiceImpl:
                             failed_step_index = i
                             failed_step_error = str(step_err).split('\n')[0]  # first line only
                             logger.error(f"🌐 [WebInspector] Pre-existing step {i} ({step.get('type')}) failed: {step_err}")
+                            if session_id in _session_progress:
+                                _session_progress[session_id]["status"] = "failed"
                             # Stop execution but do not crash the session so user can debug
                             break
+                    
+                    if failed_step_index is None and session_id in _session_progress:
+                        _session_progress[session_id]["status"] = "completed"
                 else:
                     failed_step_index = None
                     failed_step_error = None
@@ -348,6 +363,7 @@ class _WebInspectorServiceImpl:
     async def stop_session(cls, session_id: str):
         """Cleans up the playwright session."""
         async with _session_lock:
+            _session_progress.pop(session_id, None)
             session = _active_sessions.pop(session_id, None)
             if session:
                 logger.info(f"🌐 [WebInspector] Stopping session {session_id}.")
@@ -357,6 +373,14 @@ class _WebInspectorServiceImpl:
                     await session["browser"].close()
                 except Exception as e:
                     logger.warning(f"🌐 [WebInspector] Error during cleanup: {e}")
+
+    @classmethod
+    def get_progress(cls, session_id: str) -> dict:
+        """Returns current step-replay execution progress for a session."""
+        progress = _session_progress.get(session_id)
+        if not progress:
+            return {"status": "idle"}
+        return progress
 
     @classmethod
     async def _cleanup_zombie_sessions(cls):

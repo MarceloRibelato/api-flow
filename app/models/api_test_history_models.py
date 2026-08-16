@@ -59,6 +59,7 @@ class ApiExecutionHistory(Base):
     video_url = Column(String(500), nullable=True) # Added for E2E recordings
     healed_selector = Column(String(500), nullable=True) # Added for Drift Detection
     execution_type = Column(String(50), index=True, default="api")  # 'api' or 'web'
+    trigger_origin = Column(String(50), default="manual", index=True) # 'manual', 'pipeline', 'schedule'
 
 
     # Timestamps
@@ -149,6 +150,7 @@ class ApiExecutionHistoryArchive(Base):
     video_url = Column(String(500), nullable=True) # Added for E2E recordings
     healed_selector = Column(String(500), nullable=True) # Added for Drift Detection
     execution_type = Column(String(50), index=True, default="api")  # 'api' or 'web'
+    trigger_origin = Column(String(50), default="manual", index=True) # 'manual', 'pipeline', 'schedule'
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
