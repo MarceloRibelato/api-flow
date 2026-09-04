@@ -60,6 +60,8 @@ class ApiExecutionHistory(Base):
     healed_selector = Column(String(500), nullable=True) # Added for Drift Detection
     execution_type = Column(String(50), index=True, default="api")  # 'api' or 'web'
     trigger_origin = Column(String(50), default="manual", index=True) # 'manual', 'pipeline', 'schedule'
+    retry_count = Column(Integer, default=0, nullable=False)
+
 
 
     # Timestamps
@@ -151,6 +153,8 @@ class ApiExecutionHistoryArchive(Base):
     healed_selector = Column(String(500), nullable=True) # Added for Drift Detection
     execution_type = Column(String(50), index=True, default="api")  # 'api' or 'web'
     trigger_origin = Column(String(50), default="manual", index=True) # 'manual', 'pipeline', 'schedule'
+    retry_count = Column(Integer, default=0, nullable=False)
+
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

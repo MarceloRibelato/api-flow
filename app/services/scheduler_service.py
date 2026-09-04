@@ -29,11 +29,11 @@ def get_db():
     finally:
         db.close()
 
-def execute_job_logic(schedule_id: int):
+def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
     """
     Original callback function now executed by Celery worker.
     """
-    logger.info(f"Executing scheduled job logic: {schedule_id}")
+    logger.info(f"Executing scheduled job logic: {schedule_id}, failed_item_ids={failed_item_ids}")
     db = SessionLocal()
     
     success_count = 0
@@ -59,6 +59,31 @@ def execute_job_logic(schedule_id: int):
                   logger.info(f"Marking one-time schedule {schedule_id} as running")
         
         db.commit()
+
+        # Audit log for scheduled execution
+        if schedule.company_id and schedule.cron_expression:
+            try:
+                from app.services.audit_service import AuditService
+                AuditService.log_action(
+                    db=db,
+                    company_id=schedule.company_id,
+                    user=None, # System execution
+                    action="RUN_SCHEDULED_EXECUTION",
+                    resource_type="schedule",
+                    resource_id=str(schedule.id),
+                    resource_name=schedule.name or f"Agendamento #{schedule.id}",
+                    details={
+                        "schedule_id": schedule.id,
+                        "type": schedule.type,
+                        "flow_type": getattr(schedule, 'flow_type', 'api'),
+                        "target_id": schedule.target_id,
+                        "project_id": schedule.target_id if schedule.type == 'feature' else None,
+                        "feature_id": schedule.target_id if schedule.type == 'feature' else None,
+                        "automated": True
+                    }
+                )
+            except Exception as audit_err:
+                logger.error(f"Failed to log scheduled execution audit: {audit_err}")
 
         # Import services locally
         from app.services.feature_service import FeatureService
@@ -211,7 +236,8 @@ def execute_job_logic(schedule_id: int):
                     capture_video=getattr(schedule, 'capture_video', False),
                     capture_screenshot=getattr(schedule, 'capture_screenshot', False),
                     visible_execution=getattr(schedule, 'visible_execution', False),
-                    dataset_row=row
+                    dataset_row=row,
+                    failed_item_ids=failed_item_ids
                 )
                 s += row_s
                 f += row_f
@@ -240,7 +266,8 @@ def execute_job_logic(schedule_id: int):
                     capture_video=getattr(schedule, 'capture_video', False),
                     capture_screenshot=getattr(schedule, 'capture_screenshot', False),
                     visible_execution=getattr(schedule, 'visible_execution', False),
-                    dataset_row=row
+                    dataset_row=row,
+                    failed_item_ids=failed_item_ids
                 )
                 s += row_s
                 f += row_f
@@ -273,7 +300,8 @@ def execute_job_logic(schedule_id: int):
                     capture_video=getattr(schedule, 'capture_video', False),
                     capture_screenshot=getattr(schedule, 'capture_screenshot', False),
                     visible_execution=getattr(schedule, 'visible_execution', False),
-                    dataset_row=row
+                    dataset_row=row,
+                    failed_item_ids=failed_item_ids
                 )
                 s += row_s
                 f += row_f

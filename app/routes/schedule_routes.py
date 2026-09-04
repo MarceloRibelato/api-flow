@@ -7,6 +7,7 @@ from datetime import datetime
 from app.database import get_db
 from app.models.schedule_models import ScheduleModel
 from app.services.scheduler_service import scheduler_service
+from app.services.audit_service import AuditService
 from app.auth import get_current_user
 from app.models.user_models import UserDB
 
@@ -85,6 +86,26 @@ def create_schedule(schedule_in: ScheduleCreate, db: Session = Depends(get_db), 
     
     # Register in scheduler
     scheduler_service.add_job(db_schedule, db)
+
+    sch_name = db_schedule.name or f"Agendamento #{db_schedule.id}"
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="CREATE_SCHEDULE",
+        resource_type="schedule",
+        resource_id=str(db_schedule.id),
+        resource_name=sch_name,
+        details={
+            "schedule_id": db_schedule.id,
+            "type": db_schedule.type,
+            "flow_type": db_schedule.flow_type,
+            "target_id": db_schedule.target_id,
+            "project_id": db_schedule.target_id if db_schedule.type == 'feature' else None,
+            "feature_id": db_schedule.target_id if db_schedule.type == 'feature' else None,
+            "cron_expression": db_schedule.cron_expression
+        }
+    )
     
     return db_schedule
 
@@ -124,10 +145,33 @@ def delete_schedule(schedule_id: int, db: Session = Depends(get_db), current_use
     schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id, ScheduleModel.company_id == current_user.company_id).first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
+
+    sch_name = schedule.name or f"Agendamento #{schedule.id}"
+    sch_type = schedule.type
+    target_id = schedule.target_id
+    flow_type = schedule.flow_type
         
     scheduler_service.remove_job(schedule_id)
     db.delete(schedule)
     db.commit()
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="DELETE_SCHEDULE",
+        resource_type="schedule",
+        resource_id=str(schedule_id),
+        resource_name=sch_name,
+        details={
+            "schedule_id": schedule_id,
+            "type": sch_type,
+            "flow_type": flow_type,
+            "target_id": target_id,
+            "project_id": target_id if sch_type == 'feature' else None,
+            "feature_id": target_id if sch_type == 'feature' else None
+        }
+    )
     return {"message": "Schedule deleted"}
 
 @router.post("/{schedule_id}/pause")
@@ -139,6 +183,24 @@ def pause_schedule(schedule_id: int, db: Session = Depends(get_db), current_user
     schedule.status = "paused"
     scheduler_service.remove_job(schedule_id) # Remove from active jobs
     db.commit()
+
+    sch_name = schedule.name or f"Agendamento #{schedule.id}"
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="PAUSE_SCHEDULE",
+        resource_type="schedule",
+        resource_id=str(schedule_id),
+        resource_name=sch_name,
+        details={
+            "schedule_id": schedule_id,
+            "type": schedule.type,
+            "status": "paused",
+            "project_id": schedule.target_id if schedule.type == 'feature' else None,
+            "feature_id": schedule.target_id if schedule.type == 'feature' else None
+        }
+    )
     return {"message": "Schedule paused"}
 
 @router.post("/{schedule_id}/resume")
@@ -150,4 +212,22 @@ def resume_schedule(schedule_id: int, db: Session = Depends(get_db), current_use
     schedule.status = "active"
     scheduler_service.add_job(schedule, db) # Add back to scheduler
     db.commit()
+
+    sch_name = schedule.name or f"Agendamento #{schedule.id}"
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="RESUME_SCHEDULE",
+        resource_type="schedule",
+        resource_id=str(schedule_id),
+        resource_name=sch_name,
+        details={
+            "schedule_id": schedule_id,
+            "type": schedule.type,
+            "status": "active",
+            "project_id": schedule.target_id if schedule.type == 'feature' else None,
+            "feature_id": schedule.target_id if schedule.type == 'feature' else None
+        }
+    )
     return {"message": "Schedule resumed"}

@@ -35,9 +35,13 @@ from app.routes.company_routes import router as company_router
 from app.routes.appium_inspector_routes import router as appium_inspector_router
 from app.routes.web_inspector_routes import router as web_inspector_router
 from app.routes.hitl_routes import router as hitl_router
+from app.routes.audit_routes import router as audit_router
+from app.routes.mock_routes import router as mock_router
 
 # Ensure models are loaded for create_all
 import app.models.hitl_models
+import app.models.audit_models
+import app.models.mock_models
 
 # ===== CONFIGURAÇÃO DE LOGGING =====
 setup_logging()
@@ -88,6 +92,9 @@ async def lifespan(app: FastAPI):
                 with engine.begin() as conn:
                     conn.execute(text("ALTER TABLE api_test_execution_history ADD COLUMN IF NOT EXISTS trigger_origin VARCHAR(50) DEFAULT 'manual';"))
                     conn.execute(text("ALTER TABLE api_test_execution_history_archive ADD COLUMN IF NOT EXISTS trigger_origin VARCHAR(50) DEFAULT 'manual';"))
+                    conn.execute(text("ALTER TABLE api_test_execution_history ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;"))
+                    conn.execute(text("ALTER TABLE api_test_execution_history_archive ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;"))
+
                     
                     # Fix previously misclassified schedules (one-time manual schedules were saved as pipeline)
                     conn.execute(text("""
@@ -101,6 +108,29 @@ async def lifespan(app: FastAPI):
                     """))
             except Exception as e:
                 logger.info(f"Erro trigger_origin: {e}")
+
+            # Auto-repair for companies table retention columns
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS default_notification_urls VARCHAR(500);"))
+                    conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS history_retention_days INTEGER;"))
+                    conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS history_archive_retention_days INTEGER;"))
+            except Exception as e:
+                logger.info(f"Erro companies columns: {e}")
+
+            # Auto-repair for users table columns
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS company_id INTEGER;"))
+                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'admin';"))
+                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER DEFAULT 1;"))
+                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';"))
+                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS accepted_terms BOOLEAN DEFAULT FALSE;"))
+                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP;"))
+                    conn.execute(text("UPDATE users SET status = 'active' WHERE status IS NULL OR status = 'pending';"))
+                    conn.execute(text("UPDATE users SET role = 'admin' WHERE id = 1 OR role IS NULL;"))
+            except Exception as e:
+                logger.info(f"Erro users columns: {e}")
 
             logger.info("Colunas dinâmicas processadas.")
             
@@ -221,31 +251,56 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": exc.errors()},
     )
 
-# Incluir rotas
+# Incluir rotas (com suporte para prefixo normal e /api para evitar 404 via proxy/direto)
 app.include_router(admin_router)
+app.include_router(admin_router, prefix="/api")
 app.include_router(auth_router)
+app.include_router(auth_router, prefix="/api")
 app.include_router(product_router)
+app.include_router(product_router, prefix="/api")
 app.include_router(flow_router)
+app.include_router(flow_router, prefix="/api")
 app.include_router(feature_router)
+app.include_router(feature_router, prefix="/api")
 app.include_router(history_router)
+app.include_router(history_router, prefix="/api")
 app.include_router(environment_router)
+app.include_router(environment_router, prefix="/api")
 app.include_router(variable_router)
+app.include_router(variable_router, prefix="/api")
 app.include_router(schedule_router, prefix="/schedules")
+app.include_router(schedule_router, prefix="/api/schedules")
 app.include_router(capture_router)
+app.include_router(capture_router, prefix="/api")
 app.include_router(analysis_router)
+app.include_router(analysis_router, prefix="/api")
 app.include_router(agent_router)
+app.include_router(agent_router, prefix="/api")
 app.include_router(execution_router)
+app.include_router(execution_router, prefix="/api")
 app.include_router(import_router)
+app.include_router(import_router, prefix="/api")
 app.include_router(cicd_router)
+app.include_router(cicd_router, prefix="/api")
 app.include_router(skill_router)
+app.include_router(skill_router, prefix="/api")
 app.include_router(appium_inspector_router, prefix="/mobile-inspector", tags=["Mobile Inspector"])
+app.include_router(appium_inspector_router, prefix="/api/mobile-inspector", tags=["Mobile Inspector"])
 app.include_router(web_inspector_router, prefix="/web-inspector", tags=["Web Studio"])
+app.include_router(web_inspector_router, prefix="/api/web-inspector", tags=["Web Studio"])
 app.include_router(hitl_router)
+app.include_router(hitl_router, prefix="/api")
 app.include_router(company_router)
+app.include_router(company_router, prefix="/api")
+app.include_router(audit_router)
+app.include_router(audit_router, prefix="/api")
+app.include_router(mock_router)
+app.include_router(mock_router, prefix="/api")
 
 # Dashboard Router
 from app.routes.dashboard_routes import router as dashboard_router
 app.include_router(dashboard_router)
+app.include_router(dashboard_router, prefix="/api")
 
 # Proxy Router for bypassing CORS
 from app.routes.proxy_routes import router as proxy_router

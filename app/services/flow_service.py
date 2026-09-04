@@ -78,17 +78,108 @@ class FlowService:
                 user_id=user_id
             )
             db.add(flow)
-            db.flush()
+            db.flush()        # 2. Sync Logic (Proper Deletion Order to avoid FK Violations)
+        # Collect existing nodes and card names before deletion to detect node removal/edits for Audit Trail
+        existing_cards = db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow.id).all()
+        card_names = {str(c.node_id): str(c.name) for c in existing_cards if c.node_id and c.name}
 
-        # 2. Sync Logic (Proper Deletion Order to avoid FK Violations)
+        existing_nodes = db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == flow.id).all()
+        existing_node_map = {}
+        for n in existing_nodes:
+            if not n.client_id:
+                continue
+            n_data = n.data if isinstance(n.data, dict) else {}
+            n_name = card_names.get(str(n.client_id)) or n_data.get("name") or n_data.get("label") or str(n.client_id)
+            existing_node_map[str(n.client_id)] = str(n_name)
+
+        new_node_ids = {str(n.id) for n in (data.nodes or [])}
+        existing_node_ids = set(existing_node_map.keys())
+
+        real_existing_node_ids = {nid for nid in existing_node_ids if str(nid) not in ("start", "startNode")}
+        real_new_node_ids = {nid for nid in new_node_ids if str(nid) not in ("start", "startNode")}
+
+        deleted_ids = real_existing_node_ids - real_new_node_ids
+        deleted_node_names = [str(existing_node_map[nid]) for nid in deleted_ids if nid in existing_node_map and existing_node_map[nid] is not None]
+
+        added_ids = real_new_node_ids - real_existing_node_ids
+        added_node_names = []
+        if real_existing_node_ids and added_ids:
+            for n in (data.nodes or []):
+                nid_str = str(n.id)
+                if nid_str in added_ids:
+                    n_data = n.data
+                    if hasattr(n_data, 'model_dump'): n_data = n_data.model_dump()
+                    elif hasattr(n_data, 'dict'): n_data = n_data.dict()
+                    elif not isinstance(n_data, dict): n_data = {}
+                    
+                    c_name = None
+                    if data.cardData and nid_str in data.cardData:
+                        card_item = data.cardData[nid_str]
+                        if hasattr(card_item, 'name'):
+                            c_name = card_item.name
+                        elif isinstance(card_item, dict):
+                            c_name = card_item.get('name')
+                            
+                    name = c_name or n_data.get("name") or n_data.get("label") or nid_str
+                    if name is not None:
+                        added_node_names.append(str(name))
+
+        # Detect modified nodes (nodes present both before and after save)
+        common_ids = real_existing_node_ids & real_new_node_ids
+        modified_node_names = []
+        if real_existing_node_ids and common_ids:
+            for n in (data.nodes or []):
+                nid_str = str(n.id)
+                if nid_str not in common_ids:
+                    continue
+
+                old_name = existing_node_map.get(nid_str)
+                old_card = next((c for c in existing_cards if str(c.node_id) == nid_str), None)
+
+                n_data = n.data
+                if hasattr(n_data, 'model_dump'): n_data = n_data.model_dump()
+                elif hasattr(n_data, 'dict'): n_data = n_data.dict()
+                elif not isinstance(n_data, dict): n_data = {}
+
+                c_name = None
+                new_card = None
+                if data.cardData and nid_str in data.cardData:
+                    new_card = data.cardData[nid_str]
+                    if hasattr(new_card, 'name'):
+                        c_name = new_card.name
+                    elif isinstance(new_card, dict):
+                        c_name = new_card.get('name')
+
+                new_name = c_name or n_data.get("name") or n_data.get("label") or nid_str
+
+                is_changed = False
+                if old_name and new_name and str(old_name) != str(new_name):
+                    is_changed = True
+                elif old_card and new_card:
+                    old_desc = old_card.description or ""
+                    old_api_cnt = len(old_card.api_calls or [])
+                    old_db_cnt = len(old_card.db_queries or [])
+                    old_mq_cnt = len(old_card.message_queues or [])
+                    old_e2e_cnt = db.query(FlowE2EStepDB).filter(FlowE2EStepDB.card_db_id == old_card.db_id).count()
+
+                    new_desc = getattr(new_card, 'description', '') if hasattr(new_card, 'description') else (new_card.get('description', '') if isinstance(new_card, dict) else '')
+                    new_api_cnt = len(getattr(new_card, 'apiCalls', []) or []) if hasattr(new_card, 'apiCalls') else (len(new_card.get('apiCalls', []) or []) if isinstance(new_card, dict) else 0)
+                    new_db_cnt = len(getattr(new_card, 'dbQueries', []) or []) if hasattr(new_card, 'dbQueries') else (len(new_card.get('dbQueries', []) or []) if isinstance(new_card, dict) else 0)
+                    new_mq_cnt = len(getattr(new_card, 'messageQueues', []) or []) if hasattr(new_card, 'messageQueues') else (len(new_card.get('messageQueues', []) or []) if isinstance(new_card, dict) else 0)
+                    new_e2e_cnt = len(getattr(new_card, 'e2eSteps', []) or []) if hasattr(new_card, 'e2eSteps') else (len(new_card.get('e2eSteps', []) or []) if isinstance(new_card, dict) else 0)
+
+                    if (old_desc != new_desc) or (old_api_cnt != new_api_cnt) or (old_db_cnt != new_db_cnt) or (old_mq_cnt != new_mq_cnt) or (old_e2e_cnt != new_e2e_cnt):
+                        is_changed = True
+
+                if is_changed:
+                    display_label = f"{old_name} → {new_name}" if (old_name and new_name and str(old_name) != str(new_name)) else str(new_name or old_name)
+                    modified_node_names.append(display_label)
+
         # We delete all children (steps) first, then parents (cards, nodes, edges)
-        # Using a subquery for steps ensures we catch all references even if the session is out of sync
-        db.query(FlowE2EStepDB).filter(
-            FlowE2EStepDB.card_db_id.in_(
-                db.query(FlowCardDataDB.db_id).filter(FlowCardDataDB.flow_id == flow.id)
-            )
-        ).delete(synchronize_session=False)
-        
+        card_db_ids = [c.db_id for c in existing_cards]
+        if card_db_ids:
+            db.query(FlowE2EStepDB).filter(FlowE2EStepDB.card_db_id.in_(card_db_ids)).delete(synchronize_session=False)
+
         db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == flow.id).delete(synchronize_session=False)
         db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == flow.id).delete(synchronize_session=False)
         db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == flow.id).delete(synchronize_session=False)
@@ -171,35 +262,90 @@ class FlowService:
             e2e_steps_list = getattr(c, 'e2eSteps', [])
             if e2e_steps_list:
                 for idx, step in enumerate(e2e_steps_list):
+                    if hasattr(step, 'model_dump'):
+                        step_dict = step.model_dump()
+                    elif hasattr(step, 'dict'):
+                        step_dict = step.dict()
+                    elif isinstance(step, dict):
+                        step_dict = step
+                    else:
+                        step_dict = {}
+
                     e2e_steps_list_db.append(FlowE2EStepDB(
                         card_db_id=card_db.db_id,
-                        client_id=step.get('id', str(idx)),
-                        type=step.get('type', 'action'),
-                        name=step.get('name', f'Step {idx}'),
-                        properties=step.get('properties', {}),
+                        client_id=str(step_dict.get('id', idx)),
+                        type=str(step_dict.get('type', 'action')),
+                        name=str(step_dict.get('name', f'Step {idx}')),
+                        properties=step_dict.get('properties', {}) if isinstance(step_dict.get('properties'), dict) else {},
                         order=idx
                     ))
 
         if e2e_steps_list_db:
             db.add_all(e2e_steps_list_db)
 
+        # Collect all active node names currently saved in the flow
+        current_node_names = []
+        for n in (data.nodes or []):
+            nid_str = str(n.id)
+            if nid_str in ("start", "startNode"):
+                continue
+            n_data = n.data
+            if hasattr(n_data, 'model_dump'): n_data = n_data.model_dump()
+            elif hasattr(n_data, 'dict'): n_data = n_data.dict()
+            elif not isinstance(n_data, dict): n_data = {}
+            
+            c_name = None
+            if data.cardData and nid_str in data.cardData:
+                card_item = data.cardData[nid_str]
+                if hasattr(card_item, 'name'):
+                    c_name = card_item.name
+                elif isinstance(card_item, dict):
+                    c_name = card_item.get('name')
+            name = c_name or n_data.get("name") or n_data.get("label") or f"Card #{nid_str}"
+            current_node_names.append(str(name))
+
         flow.updated_at = datetime.utcnow()
-        db.commit()
-        return {"id": flow.id, "project_id": flow.project_id, "status": "saved"}
+        return {
+            "id": flow.id, 
+            "project_id": flow.project_id, 
+            "status": "saved", 
+            "deleted_nodes": deleted_node_names, 
+            "added_nodes": added_node_names,
+            "modified_nodes": modified_node_names,
+            "current_nodes": current_node_names,
+            "previous_nodes_count": len(real_existing_node_ids),
+            "current_nodes_count": len(current_node_names)
+        }
 
     @staticmethod
-    def load(db: Session, project_id: int, company_id: int, flow_id: int = None, flow_type: str = "api"):
-        query = db.query(FlowDB).filter(FlowDB.project_id == project_id)
+    def load(db: Session, project_id: int = None, company_id: int = None, flow_id: int = None, flow_type: str = None):
+        query = db.query(FlowDB)
         if flow_id:
             query = query.filter(FlowDB.id == flow_id)
+        elif project_id:
+            query = query.filter(FlowDB.project_id == project_id)
+            if flow_type:
+                query = query.filter(FlowDB.flow_type == flow_type)
+            query = query.order_by(FlowDB.updated_at.desc())
         else:
-            query = query.filter(FlowDB.flow_type == flow_type).order_by(FlowDB.updated_at.desc())
-            
+            return {"project_id": project_id, "nodes": [], "edges": [], "cardData": {}, "flow_type": flow_type or "api"}
+
+        if company_id:
+            query = query.filter(FlowDB.company_id == company_id)
+
         flow = query.first()
+        if not flow and project_id and not flow_id and not flow_type:
+            # Fallback only when flow_type is not specified: get latest flow for this project_id regardless of flow_type
+            fallback_query = db.query(FlowDB).filter(FlowDB.project_id == project_id)
+            if company_id:
+                fallback_query = fallback_query.filter(FlowDB.company_id == company_id)
+            flow = fallback_query.order_by(FlowDB.updated_at.desc()).first()
+
         if not flow:
-            return {"project_id": project_id, "nodes": [], "edges": [], "cardData": {}, "flow_type": flow_type}
+            return {"project_id": project_id, "nodes": [], "edges": [], "cardData": {}, "flow_type": flow_type or "api"}
 
         # Reconstruct JSON
+        node_type_map = {n.client_id: (n.data.get('nodeType') if isinstance(n.data, dict) else None) for n in flow.flow_nodes}
         nodes = [{
             "id": n.client_id,
             "type": n.type,
@@ -227,9 +373,18 @@ class FlowService:
                     "properties": s.properties
                 } for s in sorted(c.e2e_steps_rel, key=lambda x: x.order)]
             
+            node_type = node_type_map.get(c.node_id)
+            if not node_type:
+                if flow.flow_type == "mobile": node_type = "mobile"
+                elif flow.flow_type in ("web", "e2e", "frontend"): node_type = "e2e"
+                elif c.db_queries: node_type = "database"
+                elif c.message_queues: node_type = "queue"
+                else: node_type = "api"
+
             cardData[c.node_id] = {
                 "name": c.name,
                 "color": c.color,
+                "nodeType": node_type,
                 "description": c.description,
                 "bddScenarios": c.bdd_scenarios or [],
                 "apiCalls": c.api_calls or [],
@@ -277,6 +432,10 @@ class FlowService:
             return False
         
         for f in flows:
+            # 0. Delete AgentMemoryDB associated with this flow
+            from app.models.agent_models import AgentMemoryDB
+            db.query(AgentMemoryDB).filter(AgentMemoryDB.flow_id == f.id).delete(synchronize_session=False)
+
             # 1. Delete E2E steps first (child of flow_card_data) using a subquery
             db.query(FlowE2EStepDB).filter(
                 FlowE2EStepDB.card_db_id.in_(
@@ -336,6 +495,21 @@ class FlowService:
                 # fallback for legacy data if any
                 steps = c.e2e_steps
 
+            node_type = None
+            if c.flow and c.flow.flow_nodes:
+                for fn in c.flow.flow_nodes:
+                    if fn.client_id == c.node_id and isinstance(fn.data, dict):
+                        node_type = fn.data.get('nodeType')
+                        break
+
+            if not node_type or node_type not in ('database', 'queue', 'mobile', 'e2e', 'web', 'api'):
+                if c.db_queries and len(c.db_queries) > 0:
+                    node_type = "database"
+                elif c.message_queues and len(c.message_queues) > 0:
+                    node_type = "queue"
+                else:
+                    node_type = "mobile" if f_type == "mobile" else ("e2e" if f_type == "web" else "api")
+
             inventory_cards.append({
                 "id": c.db_id,
                 "node_id": c.node_id,
@@ -343,8 +517,11 @@ class FlowService:
                 "name": c.name,
                 "description": c.description,
                 "color": c.color,
+                "nodeType": node_type,
                 "bddScenarios": c.bdd_scenarios,
                 "apiCalls": c.api_calls,
+                "dbQueries": c.db_queries or [],
+                "messageQueues": c.message_queues or [],
                 "e2eSteps": steps,
                 "envData": c.env_data,
                 "flowType": f_type,

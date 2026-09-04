@@ -928,6 +928,86 @@ class _WebInspectorServiceImpl:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @classmethod
+    async def ai_analyze_full_tree_and_correct(cls, session_id: str, failed_step: dict) -> dict:
+        """
+        Analyzes the full web DOM tree for a failed step using smart attribute/text scoring
+        and generates optimal replacement selectors.
+        """
+        session = _active_sessions.get(session_id)
+        if not session:
+            return {"success": False, "error": f"Session {session_id} not found."}
+
+        try:
+            snapshot, _ = await cls.get_snapshot(session_id, skip_tree=False)
+            tree = snapshot.get("tree", [])
+            if not tree:
+                return {"success": False, "error": "DOM tree is empty."}
+
+            step_type = (failed_step.get("type") or "click").lower()
+            props = failed_step.get("properties", {})
+            step_name = (failed_step.get("name") or "").strip()
+            old_selector = (props.get("selector") or "").strip()
+            expected_val = str(props.get("value") or "").strip()
+
+            search_tokens = [t.lower() for t in [step_name, expected_val, old_selector] if t]
+
+            candidates = []
+            for node in tree:
+                score = 0
+                n_text = (node.get("text") or "").strip()
+                n_selector = (node.get("selector") or "").strip()
+                n_tag = (node.get("tagName") or "").strip().upper()
+                n_placeholder = (node.get("placeholder") or "").strip()
+                n_name = (node.get("nameAttr") or "").strip()
+                n_id = (node.get("idAttr") or "").strip()
+
+                # Tag match
+                if step_type in ("type", "fill") and n_tag in ("INPUT", "TEXTAREA", "SELECT"):
+                    score += 4
+                elif step_type in ("click", "tap") and n_tag in ("BUTTON", "A", "INPUT"):
+                    score += 4
+
+                # Token match
+                for tok in search_tokens:
+                    if tok and (tok in n_text.lower() or tok in n_placeholder.lower() or tok in n_name.lower() or tok in n_id.lower()):
+                        score += 8
+                    elif n_text and tok and (tok in n_text.lower() or n_text.lower() in tok):
+                        score += 5
+
+                if old_selector and n_selector and old_selector == n_selector:
+                    score += 6
+
+                if score > 0:
+                    candidates.append({"node": node, "score": score})
+
+            candidates.sort(key=lambda c: c["score"], reverse=True)
+            best = candidates[0]["node"] if candidates else None
+
+            if not best:
+                return {"success": False, "error": "No matching DOM element found for step correction."}
+
+            lws_id = best.get("id")
+            sel_res = await cls.generate_selectors_for_element(session_id, lws_id=lws_id)
+
+            best_selector = None
+            if sel_res.get("success") and sel_res.get("selectors"):
+                selectors = sel_res.get("selectors")
+                unique = [s for s in selectors if s.get("count") == 1]
+                best_selector = unique[0]["value"] if unique else selectors[0]["value"]
+
+            if not best_selector:
+                best_selector = best.get("selector") or f"//{best.get('tagName', 'div')}"
+
+            return {
+                "success": True,
+                "suggested_selector": best_selector,
+                "matched_node": best
+            }
+        except Exception as e:
+            logger.error(f"AI AutoCorrect web analysis failed: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
 import threading
 _playwright_loop = asyncio.new_event_loop()
 def _run_playwright_loop():
@@ -972,3 +1052,7 @@ class WebInspectorService:
     @classmethod
     async def generate_selectors_for_element(cls, *args, **kwargs):
         return await cls._dispatch(_WebInspectorServiceImpl.generate_selectors_for_element(*args, **kwargs))
+
+    @classmethod
+    async def ai_analyze_full_tree_and_correct(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.ai_analyze_full_tree_and_correct(*args, **kwargs))

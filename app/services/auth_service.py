@@ -59,12 +59,8 @@ class AuthService:
         company_id = None
         
         # Default Role/Status
-        if is_first_user:
-            role = "admin"
-            status = "active"
-        else:
-            role = "viewer"
-            status = "pending"
+        role = "admin"
+        status = "active"
 
         if user.company:
             from app.models.company_models import CompanyDB
@@ -72,10 +68,6 @@ class AuthService:
             
             if existing_company:
                 company_id = existing_company.id
-                # If not first user, keeping default role (viewer/pending)
-                # Unless we want to auto-approve joining existing companies? 
-                # User request: "as outra devem gerar uma aprovação para o ADM aprovar e escolher o perfil"
-                # So stays pending.
             else:
                 # Create new company
                 new_company = CompanyDB(
@@ -85,14 +77,6 @@ class AuthService:
                 db.add(new_company)
                 db.flush() # Get ID
                 company_id = new_company.id
-                # Even if creating a company, if not first user, stays pending?
-                # Usually if you create a company you are admin of it. 
-                # But requirement says "First account created is ADM, others need approval".
-                # Let's stick to strict requirement: First User = System Admin. Others = Pending.
-                
-        if not is_first_user:
-                     role = "viewer"  # Will be "admin" of company eventually, but needs approval? 
-                     # Let's assume strict First User rule for now.
         
         # Enforce Terms Acceptance
         if not user.accepted_terms:

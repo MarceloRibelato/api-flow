@@ -79,12 +79,16 @@ class FeatureService:
             from app.models.flow_models import FlowDB
             from app.services.flow_service import FlowService
             
-            # Clean up Flow associated with this feature
-            flow = db.query(FlowDB).filter(FlowDB.project_id == feature_id).first()
-            if flow:
-                # Clean up Execution History Orphaned by flow
-                db.query(ApiExecutionHistory).filter(ApiExecutionHistory.flow_id == str(flow.id)).delete(synchronize_session=False)
-                FlowService.delete(db, feature_id, company_id)
+            # Clean up Flows and Execution History associated with this feature
+            flows = db.query(FlowDB).filter(FlowDB.project_id == feature_id).all()
+            for flow in flows:
+                db.query(ApiExecutionHistory).filter(
+                    (ApiExecutionHistory.flow_id == str(flow.id)) | 
+                    (ApiExecutionHistory.project_id == feature_id)
+                ).delete(synchronize_session=False)
+
+            # Delete all flows using FlowService
+            FlowService.delete(db, feature_id, company_id)
                 
             # Clean up Schedules Orphaned
             db.query(ScheduleModel).filter(ScheduleModel.target_id == feature_id, ScheduleModel.type == 'feature').delete(synchronize_session=False)

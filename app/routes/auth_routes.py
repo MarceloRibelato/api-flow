@@ -39,7 +39,7 @@ def login(
         logger.warning(f"Login failed: Incorrect password for user '{login_data.username}'.")
         raise InvalidCredentialsError()
 
-    if user.status != 'active':
+    if user.status and user.status not in ['active', 'approved']:
         logger.warning(f"Login failed: User '{login_data.username}' is in status '{user.status}'.")
         raise AccountPendingError()
 

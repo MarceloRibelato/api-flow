@@ -69,6 +69,7 @@ class HistoryService:
             healed_selector=history.healed_selector,
             execution_type=history.execution_type or "api",
             trigger_origin=trigger_origin,
+            retry_count=getattr(history, 'retry_count', 0) or 0,
         )
 
         db.add(db_history)
@@ -155,6 +156,7 @@ class HistoryService:
                 healed_selector=history.healed_selector,
                 execution_type=history.execution_type or "api",
                 trigger_origin=trigger_origin,
+                retry_count=getattr(history, 'retry_count', 0) or 0,
             )
             db_objects.append(db_history)
 
@@ -264,7 +266,7 @@ class HistoryService:
             ApiExecutionHistory.node_name, ApiExecutionHistory.api_name, ApiExecutionHistory.error_message,
             ApiExecutionHistory.assertions, ApiExecutionHistory.node_id, ApiExecutionHistory.batch_id,
             ApiExecutionHistory.video_url, ApiExecutionHistory.execution_type, ApiExecutionHistory.response_body,
-            ApiExecutionHistory.flow_id, ApiExecutionHistory.api_id
+            ApiExecutionHistory.flow_id, ApiExecutionHistory.api_id, ApiExecutionHistory.retry_count
         ))
 
         return {
@@ -291,8 +293,8 @@ class HistoryService:
         from app.models.product_models import ProductModel
         from app.models.schedule_models import ScheduleModel
         
-        # Regex to strip _path... from batch_id
-        clean_batch_expr = func.regexp_replace(ApiExecutionHistory.batch_id, '_path.*$', '')
+        # Regex to strip _path... or _retry... from batch_id
+        clean_batch_expr = func.regexp_replace(ApiExecutionHistory.batch_id, '(_retry|_path).*$', '')
         
         query = db.query(
             clean_batch_expr.label('batch_id'),

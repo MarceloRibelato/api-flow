@@ -33,7 +33,19 @@ def create_variable(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
-    return VariableService.create(db, var)
+    from app.services.audit_service import AuditService
+    res = VariableService.create(db, var)
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="CREATE_VARIABLE",
+        resource_type="variable",
+        resource_id=str(res.id),
+        resource_name=res.name,
+        details={"environment_id": res.environment_id, "project_id": res.project_id}
+    )
+    return res
 
 
 @router.post("/variables/bulk", response_model=List[VariableResponse])
@@ -42,7 +54,18 @@ def bulk_create_variables(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
-    return VariableService.bulk_create(db, vars)
+    from app.services.audit_service import AuditService
+    res = VariableService.bulk_create(db, vars)
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="BULK_CREATE_VARIABLES",
+        resource_type="variable",
+        resource_name=f"{len(res)} Variáveis",
+        details={"count": len(res)}
+    )
+    return res
 
 
 @router.put("/variables/{var_id}", response_model=VariableResponse)
@@ -52,10 +75,21 @@ def update_variable(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
+    from app.services.audit_service import AuditService
     try:
         updated_var = VariableService.update(db, var_id, var)
         if not updated_var:
             raise HTTPException(status_code=404, detail="Variable not found")
+        AuditService.log_action(
+            db=db,
+            company_id=current_user.company_id,
+            user=current_user,
+            action="UPDATE_VARIABLE",
+            resource_type="variable",
+            resource_id=str(updated_var.id),
+            resource_name=updated_var.name,
+            details={"environment_id": updated_var.environment_id}
+        )
         return updated_var
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal Error: {str(e)}")
@@ -67,9 +101,20 @@ def delete_variable(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
+    from app.services.audit_service import AuditService
     success = VariableService.delete(db, var_id)
     if not success:
         raise HTTPException(status_code=404, detail="Variable not found")
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="DELETE_VARIABLE",
+        resource_type="variable",
+        resource_id=str(var_id),
+        resource_name=f"Variável #{var_id}"
+    )
 
     return {"message": "Deleted successfully"}
 

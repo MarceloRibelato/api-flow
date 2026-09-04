@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     
     # License & AI Manager Integration
-    LICENSE_MANAGER_URL: str = ""
+    LICENSE_MANAGER_URL: str = "http://flow-license-manager:8001"
     QA_FLOW_LICENSE_KEY: str = ""
     
     # SMTP Settings

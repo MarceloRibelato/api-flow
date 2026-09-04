@@ -114,6 +114,7 @@ class ProductService:
         settings.device_name = settings_data.device_name
         settings.platform_version = settings_data.platform_version
         settings.app_identifier = settings_data.app_identifier
+        settings.custom_capabilities = settings_data.custom_capabilities
         
         db.commit()
         db.refresh(settings)

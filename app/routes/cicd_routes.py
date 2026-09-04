@@ -15,6 +15,7 @@ from app.models.environment_model import Environment
 from app.models.schedule_models import ScheduleModel
 from app.models.api_test_history_models import ApiExecutionHistory
 from app.services.scheduler_service import execute_job
+from app.services.audit_service import AuditService
 from pydantic import BaseModel
 
 router = APIRouter(
@@ -83,6 +84,17 @@ def create_token(req: TokenCreate, db: Session = Depends(get_db), current_user: 
         db.commit()
         db.refresh(new_token)
         
+        AuditService.log_action(
+            db=db,
+            company_id=company_id,
+            user=current_user,
+            action="CREATE_SERVICE_TOKEN",
+            resource_type="service_token",
+            resource_id=str(new_token.id),
+            resource_name=new_token.name,
+            details={"token_id": new_token.id, "token_name": new_token.name}
+        )
+
         print(f"DEBUG: Token created successfully. ID: {new_token.id}")
         return {
             "id": new_token.id,
@@ -107,8 +119,21 @@ def delete_token(token_id: int, db: Session = Depends(get_db), current_user: Use
     if not token:
         raise HTTPException(status_code=404, detail="Token não encontrado")
         
+    token_name = token.name
     db.delete(token)
     db.commit()
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="DELETE_SERVICE_TOKEN",
+        resource_type="service_token",
+        resource_id=str(token_id),
+        resource_name=token_name,
+        details={"token_id": token_id, "token_name": token_name}
+    )
+
     return {"message": "Token revogado com sucesso"}
 
 # --- CI/CD Execution ---
@@ -174,6 +199,25 @@ def execute_cicd(
     db.add(new_schedule)
     db.commit()
     db.refresh(new_schedule)
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="EXECUTE_PIPELINE",
+        resource_type="execution",
+        resource_id=str(new_schedule.id),
+        resource_name=exec_name,
+        details={
+            "product_name": req.product_name,
+            "feature_name": req.feature_name,
+            "environment_name": req.environment_name,
+            "flow_type": req.flow_type,
+            "schedule_id": new_schedule.id,
+            "product_id": product.id,
+            "project_id": product.id
+        }
+    )
 
     # 5. Disparar Execução
     # Nota: Usamos o scheduler_service para manter consistência com execuções manuais/agendadas

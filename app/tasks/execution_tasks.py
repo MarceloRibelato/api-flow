@@ -6,17 +6,17 @@ from app.database import SessionLocal
 logger = logging.getLogger(__name__)
 
 @celery_app.task(bind=True, max_retries=3)
-def celery_execute_job(self, schedule_id: int):
+def celery_execute_job(self, schedule_id: int, failed_item_ids: list = None):
     """
     Celery task that executes a scheduled flow/suite/feature.
     """
-    logger.info(f"Celery worker received schedule execution task: {schedule_id}")
+    logger.info(f"Celery worker received schedule execution task: {schedule_id}, failed_item_ids: {failed_item_ids}")
     
     # Import locally to avoid circular dependencies during Celery initialization
     from app.services.scheduler_service import execute_job_logic
     
     try:
-        execute_job_logic(schedule_id)
+        execute_job_logic(schedule_id, failed_item_ids=failed_item_ids)
     except Exception as e:
         logger.error(f"Celery Task celery_execute_job failed for schedule {schedule_id}: {e}")
         # Retry with exponential backoff if desired, though typical test executions are idempotent

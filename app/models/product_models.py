@@ -42,6 +42,7 @@ class ProductMobileSettingsDB(Base):
     device_name = Column(String(100), nullable=True)
     platform_version = Column(String(50), nullable=True)
     app_identifier = Column(String(255), nullable=True) # Usually the path or BS app id
+    custom_capabilities = Column(Text, nullable=True) # JSON string of custom capabilities
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -69,6 +70,7 @@ class ProductMobileDeviceDB(Base):
     auth_user = Column(String(100), nullable=True)
     auth_token = Column(String(255), nullable=True)
     app_identifier = Column(String(255), nullable=True)
+    custom_capabilities = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

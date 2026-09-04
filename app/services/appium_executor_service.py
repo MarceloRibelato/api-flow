@@ -19,6 +19,8 @@ class AppiumExecutorService:
         self._captured_requests = []
         self._provider = None
         self._settings = {}
+        self._video_dir = None
+        self._is_recording = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -54,6 +56,7 @@ class AppiumExecutorService:
                     "device_name": settings_obj.device_name or "Android Emulator",
                     "platform_version": settings_obj.platform_version or "",
                     "app_identifier": settings_obj.app_identifier or "",
+                    "custom_capabilities": getattr(settings_obj, "custom_capabilities", None) or "",
                 }
                 self._provider = self._settings["provider"]
                 logger.info(f"📱 [Appium] Loaded settings for product {product_id}: "
@@ -66,8 +69,11 @@ class AppiumExecutorService:
                     "device_name": "Android Emulator",
                     "platform_version": "",
                     "app_identifier": "",
+                    "custom_capabilities": "",
                 }
                 logger.warning("📱 [Appium] No DB/product_id passed — using fallback defaults.")
+
+            self._video_dir = video_dir
 
             # BrowserStack or SauceLabs: attach credentials to URL
             if self._provider in ("browserstack", "saucelabs"):
@@ -77,9 +83,37 @@ class AppiumExecutorService:
             else:
                 self._start_appium_local()
 
+            if self._video_dir:
+                self._start_screen_recording()
+
         except Exception as e:
             logger.error(f"📱 [Appium] Failed to start executor: {e}")
             raise
+
+    def _apply_custom_capabilities(self, options):
+        """Mescla capabilities customizadas definidas pelo usuário na sessão Appium."""
+        custom_caps = self._settings.get("custom_capabilities")
+        if not custom_caps:
+            return
+        
+        parsed = None
+        if isinstance(custom_caps, dict):
+            parsed = custom_caps
+        elif isinstance(custom_caps, str):
+            custom_caps = custom_caps.strip()
+            if custom_caps:
+                try:
+                    parsed = json.loads(custom_caps)
+                except Exception as e:
+                    logger.warning(f"⚠️ [Appium] Failed to parse custom_capabilities JSON string: {e}")
+        
+        if isinstance(parsed, dict):
+            for cap_key, cap_val in parsed.items():
+                try:
+                    options.set_capability(cap_key, cap_val)
+                    logger.info(f"📱 [Appium] Applied custom capability '{cap_key}': {cap_val}")
+                except Exception as cap_err:
+                    logger.warning(f"⚠️ [Appium] Failed to set custom capability '{cap_key}': {cap_err}")
 
     def _start_appium_local(self):
         """Conecta ao servidor Appium local via webdriver.Remote."""
@@ -128,6 +162,9 @@ class AppiumExecutorService:
             options.set_capability("appium:unicodeKeyboard", True)
             options.set_capability("appium:resetKeyboard", True)
             options.set_capability("appium:waitForIdleTimeout", 0)
+
+            # Apply custom capabilities (overrides default options if specified)
+            self._apply_custom_capabilities(options)
 
             server_url = self._settings["server_url"]
             
@@ -193,6 +230,9 @@ class AppiumExecutorService:
             options.set_capability("appium:unicodeKeyboard", True)
             options.set_capability("appium:resetKeyboard", True)
             options.set_capability("appium:waitForIdleTimeout", 0)
+
+            # Apply custom capabilities (overrides default options if specified)
+            self._apply_custom_capabilities(options)
 
             # Cloud-specific extras
             if self._provider == "browserstack":
@@ -281,6 +321,39 @@ class AppiumExecutorService:
         except Exception as e:
             logger.error(f"Failed to save Appium screenshot: {e}")
             return None
+
+    def _clear_element_text(self, el):
+        """Robustly erases text from a mobile input element."""
+        if not el:
+            return
+        logger.info("🧹 [Appium] Clearing input element text...")
+        try:
+            el.clear()
+            time.sleep(0.15)
+        except Exception as e:
+            logger.warning(f"⚠️ [Appium] el.clear() failed: {e}")
+
+        # Verify if text was erased; if text remains, execute backspace keycode loop
+        try:
+            current_text = (el.text or el.get_attribute('text') or el.get_attribute('value') or '').strip()
+            hint_text = (el.get_attribute('hint') or '').strip()
+            if current_text and current_text != hint_text:
+                logger.info(f"🧹 [Appium] Text '{current_text}' remains after clear(). Executing backspace keycode loop...")
+                try:
+                    el.click()
+                    time.sleep(0.1)
+                except Exception:
+                    pass
+
+                text_len = len(current_text)
+                for _ in range(text_len + 5):
+                    try:
+                        self._driver.press_keycode(67)  # KEYCODE_DEL
+                        time.sleep(0.02)
+                    except Exception:
+                        break
+        except Exception as err:
+            logger.warning(f"⚠️ [Appium] Backspace keycode clear fallback error: {err}")
 
     def execute_step_sync(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
         """Executa um passo nativo no Appium/Cloud."""
@@ -591,6 +664,11 @@ class AppiumExecutorService:
                 except Exception as inner_err:
                     logger.debug(f"Inner input search skipped: {inner_err}")
 
+                # Clear text first if clear_first / clear_before_type property is requested
+                if props.get('clear_first') or props.get('clear_before_type'):
+                    logger.info("🧹 [Appium] clear_first flag set: clearing field before typing...")
+                    self._clear_element_text(el)
+
                 def is_typed_successfully():
                     clean_val = value.strip()
                     if not clean_val:
@@ -766,7 +844,7 @@ class AppiumExecutorService:
                 timeout = int(props.get('timeout', 5000))
                 el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
                 if el:
-                    el.clear()
+                    self._clear_element_text(el)
                 else:
                     raise Exception(f"Element '{selector}' not found for clear_field after {timeout}ms")
 
@@ -1676,11 +1754,47 @@ class AppiumExecutorService:
         return None
 
     # ------------------------------------------------------------------
+    # Video Recording Helpers
+    # ------------------------------------------------------------------
+
+    def _start_screen_recording(self):
+        """Inicia a gravação da tela do dispositivo móvel via Appium."""
+        if not self._driver or not self._video_dir:
+            return
+        try:
+            self._driver.start_recording_screen()
+            self._is_recording = True
+            logger.info("🎥 [Appium] Gravação de vídeo de tela iniciada com sucesso.")
+        except Exception as e:
+            self._is_recording = False
+            logger.warning(f"⚠️ [Appium] Não foi possível iniciar a gravação de tela: {e}")
+
+    def _stop_screen_recording(self):
+        """Para a gravação da tela do dispositivo móvel e salva como MP4."""
+        if not self._driver or not self._is_recording or not self._video_dir:
+            return
+        try:
+            import base64
+            import os
+            raw_b64 = self._driver.stop_recording_screen()
+            self._is_recording = False
+            if raw_b64:
+                os.makedirs(self._video_dir, exist_ok=True)
+                video_path = os.path.join(self._video_dir, "mobile_execution.mp4")
+                with open(video_path, "wb") as f:
+                    f.write(base64.b64decode(raw_b64))
+                logger.info(f"🎥 [Appium] Vídeo de gravação salvo com sucesso em: {video_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ [Appium] Erro ao parar ou salvar vídeo de gravação: {e}")
+
+    # ------------------------------------------------------------------
     # Close
     # ------------------------------------------------------------------
 
     def close_sync(self):
         if self._driver:
+            if self._is_recording:
+                self._stop_screen_recording()
             try:
                 self._driver.quit()
             except Exception:

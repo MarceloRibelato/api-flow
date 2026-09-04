@@ -65,6 +65,8 @@ def save_flow(
 ):
     """Salva o fluxo completo"""
     from app.exceptions import InsufficientPermissionsError, ValidationError
+    from app.services.audit_service import AuditService
+    from app.models.feature_models import FeatureModel
     
     if current_user.role == 'viewer':
         raise InsufficientPermissionsError()
@@ -73,7 +75,116 @@ def save_flow(
         raise ValidationError(detail="projectId deve ser um número positivo")
 
     try:
-        return FlowService.save(db, data, company_id=current_user.company_id, user_id=current_user.id)
+        res = FlowService.save(db, data, company_id=current_user.company_id, user_id=current_user.id)
+        deleted_nodes = res.get("deleted_nodes", []) if isinstance(res, dict) else []
+        added_nodes = res.get("added_nodes", []) if isinstance(res, dict) else []
+
+        feature = db.query(FeatureModel).filter(FeatureModel.id == data.projectId).first()
+        feat_name = feature.name if feature else f"Funcionalidade #{data.projectId}"
+        prod_name = feature.product.name if (feature and feature.product) else "Projeto Geral"
+
+        deleted_nodes = res.get("deleted_nodes", []) if isinstance(res, dict) else []
+        added_nodes = res.get("added_nodes", []) if isinstance(res, dict) else []
+        modified_nodes = res.get("modified_nodes", []) if isinstance(res, dict) else []
+        current_nodes_list = [str(n) for n in res.get("current_nodes", [])] if isinstance(res, dict) and res.get("current_nodes") else []
+        
+        clean_deleted_nodes = [str(n) for n in deleted_nodes if n is not None]
+        clean_added_nodes = [str(n) for n in added_nodes if n is not None]
+        clean_modified_nodes = [str(n) for n in modified_nodes if n is not None]
+
+        if clean_deleted_nodes:
+            AuditService.log_action(
+                db=db,
+                company_id=current_user.company_id,
+                user=current_user,
+                action="DELETE_NODE",
+                resource_type="node",
+                resource_id=str(res.get("id")) if isinstance(res, dict) else str(data.projectId),
+                resource_name=", ".join(clean_deleted_nodes),
+                details={
+                    "project_id": data.projectId,
+                    "feature_name": feat_name,
+                    "project_name": prod_name,
+                    "flow_type": data.flow_type,
+                    "deleted_nodes": clean_deleted_nodes,
+                    "added_nodes": clean_added_nodes,
+                    "modified_nodes": clean_modified_nodes,
+                    "current_nodes": current_nodes_list,
+                    "previous_nodes_count": res.get("previous_nodes_count", 0) if isinstance(res, dict) else 0,
+                    "current_nodes_count": res.get("current_nodes_count", 0) if isinstance(res, dict) else 0,
+                    "nodes_count": res.get("current_nodes_count", 0) if isinstance(res, dict) else 0
+                }
+            )
+
+        if clean_added_nodes:
+            AuditService.log_action(
+                db=db,
+                company_id=current_user.company_id,
+                user=current_user,
+                action="ADD_NODE",
+                resource_type="node",
+                resource_id=str(res.get("id")) if isinstance(res, dict) else str(data.projectId),
+                resource_name=", ".join(clean_added_nodes),
+                details={
+                    "project_id": data.projectId,
+                    "feature_name": feat_name,
+                    "project_name": prod_name,
+                    "flow_type": data.flow_type,
+                    "added_nodes": clean_added_nodes,
+                    "deleted_nodes": clean_deleted_nodes,
+                    "modified_nodes": clean_modified_nodes,
+                    "current_nodes": current_nodes_list,
+                    "previous_nodes_count": res.get("previous_nodes_count", 0) if isinstance(res, dict) else 0,
+                    "current_nodes_count": res.get("current_nodes_count", 0) if isinstance(res, dict) else 0,
+                    "nodes_count": res.get("current_nodes_count", 0) if isinstance(res, dict) else 0
+                }
+            )
+
+        if clean_modified_nodes:
+            AuditService.log_action(
+                db=db,
+                company_id=current_user.company_id,
+                user=current_user,
+                action="UPDATE_NODE",
+                resource_type="node",
+                resource_id=str(res.get("id")) if isinstance(res, dict) else str(data.projectId),
+                resource_name=", ".join(clean_modified_nodes),
+                details={
+                    "project_id": data.projectId,
+                    "feature_name": feat_name,
+                    "project_name": prod_name,
+                    "flow_type": data.flow_type,
+                    "modified_nodes": clean_modified_nodes,
+                    "deleted_nodes": clean_deleted_nodes,
+                    "added_nodes": clean_added_nodes,
+                    "current_nodes": current_nodes_list,
+                    "previous_nodes_count": res.get("previous_nodes_count", 0) if isinstance(res, dict) else 0,
+                    "current_nodes_count": res.get("current_nodes_count", 0) if isinstance(res, dict) else 0,
+                    "nodes_count": res.get("current_nodes_count", 0) if isinstance(res, dict) else 0
+                }
+            )
+
+        if not clean_deleted_nodes and not clean_added_nodes and not clean_modified_nodes:
+            AuditService.log_action(
+                db=db,
+                company_id=current_user.company_id,
+                user=current_user,
+                action="SAVE_FLOW",
+                resource_type="flow",
+                resource_id=str(res.get("id")) if isinstance(res, dict) else str(data.projectId),
+                resource_name=data.name or f"Fluxo {data.flow_type.upper()}",
+                details={
+                    "project_id": data.projectId,
+                    "feature_name": feat_name,
+                    "project_name": prod_name,
+                    "flow_type": data.flow_type,
+                    "current_nodes": current_nodes_list,
+                    "previous_nodes_count": res.get("previous_nodes_count", 0) if isinstance(res, dict) else 0,
+                    "current_nodes_count": res.get("current_nodes_count", 0) if isinstance(res, dict) else 0,
+                    "nodes_count": res.get("current_nodes_count", 0) if isinstance(res, dict) else 0
+                }
+            )
+        return res
     except ValueError as e:
         raise ValidationError(detail=str(e))
     except Exception as e:
@@ -91,6 +202,7 @@ def delete_flow(
 ):
     """Remove o fluxo de um projeto"""
     from app.exceptions import InsufficientPermissionsError, NotFoundError
+    from app.services.audit_service import AuditService
     
     if current_user.role == 'viewer':
         raise InsufficientPermissionsError()
@@ -98,6 +210,17 @@ def delete_flow(
     success = FlowService.delete(db, project_id, company_id=current_user.company_id)
     if not success:
         raise NotFoundError(resource="Fluxo do projeto")
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="DELETE_FLOW",
+        resource_type="flow",
+        resource_id=str(project_id),
+        resource_name=f"Fluxo Projeto #{project_id}",
+        details={"project_id": project_id}
+    )
 
     return {
         "status": "deleted",
@@ -158,8 +281,19 @@ def heal_flow_step(
     current_user: UserDB = Depends(get_current_user)
 ):
     """Aplica uma correção de auto-healing ao fluxo persistido"""
+    from app.services.audit_service import AuditService
     try:
         updated_flow = FlowService.apply_healing(db, data.project_id, current_user.company_id, data.flow_id, data.node_id, data.old_selector, data.new_selector)
+        AuditService.log_action(
+            db=db,
+            company_id=current_user.company_id,
+            user=current_user,
+            action="HEAL_STEP",
+            resource_type="flow_step",
+            resource_id=str(data.node_id),
+            resource_name=f"Nó {data.node_id}",
+            details={"project_id": data.project_id, "flow_id": data.flow_id, "old_selector": data.old_selector, "new_selector": data.new_selector}
+        )
         return {"status": "success", "message": "Healing applied successfully", "flow": updated_flow}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

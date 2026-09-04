@@ -88,9 +88,27 @@ def trigger_execution(
     db.refresh(new_schedule)
 
     from app.tasks.execution_tasks import celery_execute_job
+    from app.services.audit_service import AuditService
 
     # 3. Trigger Async Execution via Celery
     celery_execute_job.delay(new_schedule.id)
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="RUN_EXECUTION",
+        resource_type="execution",
+        resource_id=str(new_schedule.id),
+        resource_name=new_schedule.name,
+        details={
+            "flow_type": req.flow_type,
+            "environment_id": req.environment_id,
+            "product_id": req.product_id,
+            "feature_id": req.feature_id,
+            "visible_execution": req.visible_execution
+        }
+    )
 
     return {
         "message": "Execution started",
@@ -137,3 +155,174 @@ def get_e2e_execution_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=e2e_report_{schedule_id}.pdf"}
     )
+
+
+from app.models.api_test_history_models import ApiExecutionHistory
+
+class RetryExecutionRequest(BaseModel):
+    schedule_id: Optional[int] = None
+    batch_id: Optional[str] = None
+    product_id: Optional[int] = None
+    feature_id: Optional[Union[int, str]] = None
+    environment_id: Optional[int] = None
+    failed_item_ids: Optional[List[Union[int, str]]] = None
+    flow_type: Optional[str] = 'api'
+
+
+@router.post("/retry")
+def retry_execution(
+    req: RetryExecutionRequest, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Triggers re-execution of failed tests for a given schedule, batch, or list of failed item IDs.
+    """
+    schedule_id = req.schedule_id
+    if not schedule_id and req.batch_id:
+        try:
+            schedule_id = int(req.batch_id.split('_')[0])
+        except (ValueError, IndexError):
+            pass
+
+    existing_schedule = None
+    if schedule_id:
+        existing_schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
+
+    hist_record = None
+    if not existing_schedule:
+        if req.batch_id:
+            hist_record = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.batch_id == req.batch_id).first()
+        if not hist_record and req.failed_item_ids:
+            clean_ids = [int(x) for x in req.failed_item_ids if str(x).isdigit()]
+            if clean_ids:
+                hist_record = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.id.in_(clean_ids)).first()
+        if not hist_record and schedule_id:
+            hist_record = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.schedule_id == schedule_id).first()
+
+        if hist_record and hist_record.schedule_id:
+            existing_schedule = db.query(ScheduleModel).filter(ScheduleModel.id == hist_record.schedule_id).first()
+
+    target_schedule = None
+    if existing_schedule:
+        resolved_flow_type = req.flow_type or existing_schedule.flow_type or 'api'
+        existing_schedule.status = 'active'
+        existing_schedule.last_run_status = 'running'
+        if req.flow_type:
+            existing_schedule.flow_type = resolved_flow_type
+        if req.environment_id:
+            existing_schedule.environment_id = req.environment_id
+        db.commit()
+        db.refresh(existing_schedule)
+        target_schedule = existing_schedule
+    elif hist_record:
+        if hist_record.flow_id:
+            try:
+                target_id = int(hist_record.flow_id)
+            except (ValueError, TypeError):
+                target_id = 0
+            sched_type = 'flow'
+        elif hist_record.project_id:
+            try:
+                target_id = int(hist_record.project_id)
+            except (ValueError, TypeError):
+                target_id = 0
+            sched_type = 'feature'
+        else:
+            target_id = req.product_id or 0
+            sched_type = 'suite'
+
+        resolved_flow_type = req.flow_type or hist_record.execution_type or 'api'
+        target_schedule = ScheduleModel(
+            name=f"Retry - {hist_record.feature_name or 'Execution'}",
+            type=sched_type,
+            target_id=target_id,
+            environment_id=req.environment_id or hist_record.environment_id or 1,
+            user_id=current_user.id,
+            status='active',
+            last_run_status='running',
+            flow_type=resolved_flow_type,
+            capture_video=True if resolved_flow_type in ['e2e', 'mobile'] else False,
+            capture_screenshot=True if resolved_flow_type in ['e2e', 'mobile'] else False,
+            company_id=current_user.company_id
+        )
+        db.add(target_schedule)
+        db.commit()
+        db.refresh(target_schedule)
+    elif req.product_id:
+        target_id = req.product_id
+        sched_type = 'suite'
+        if req.feature_id and str(req.feature_id).lower() != 'all':
+            sched_type = 'feature'
+            try:
+                target_id = int(req.feature_id)
+            except ValueError:
+                pass
+        
+        resolved_flow_type = req.flow_type or 'api'
+        target_schedule = ScheduleModel(
+            name="Retry Execution",
+            type=sched_type,
+            target_id=target_id,
+            environment_id=req.environment_id or 1,
+            user_id=current_user.id,
+            status='active',
+            last_run_status='running',
+            flow_type=resolved_flow_type,
+            capture_video=True if resolved_flow_type in ['e2e', 'mobile'] else False,
+            capture_screenshot=True if resolved_flow_type in ['e2e', 'mobile'] else False,
+            company_id=current_user.company_id
+        )
+        db.add(target_schedule)
+        db.commit()
+        db.refresh(target_schedule)
+    else:
+        raise HTTPException(status_code=400, detail="Must provide schedule_id, batch_id, or failed_item_ids for retry.")
+
+    # Auto-resolve failed_item_ids if not explicitly provided
+    if not req.failed_item_ids:
+        query = db.query(ApiExecutionHistory.id)
+        if existing_schedule:
+            query = query.filter(ApiExecutionHistory.schedule_id == existing_schedule.id)
+        elif req.batch_id:
+            query = query.filter(ApiExecutionHistory.batch_id == req.batch_id)
+        elif hist_record and hist_record.schedule_id:
+            query = query.filter(ApiExecutionHistory.schedule_id == hist_record.schedule_id)
+        elif hist_record and hist_record.batch_id:
+            query = query.filter(ApiExecutionHistory.batch_id == hist_record.batch_id)
+
+        failed_rows = query.filter(
+            (ApiExecutionHistory.status_code >= 400) | 
+            (ApiExecutionHistory.status_code == 0) |
+            (ApiExecutionHistory.status_code.is_(None)) |
+            ((ApiExecutionHistory.error_message.isnot(None)) & (ApiExecutionHistory.error_message != ''))
+        ).all()
+        if failed_rows:
+            req.failed_item_ids = [r[0] for r in failed_rows]
+
+    from app.tasks.execution_tasks import celery_execute_job
+    celery_execute_job.delay(target_schedule.id, failed_item_ids=req.failed_item_ids)
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="RETRY_EXECUTION",
+        resource_type="execution",
+        resource_id=str(target_schedule.id),
+        resource_name=target_schedule.name or "Retry Execution",
+        details={
+            "schedule_id": target_schedule.id,
+            "batch_id": req.batch_id,
+            "failed_item_count": len(req.failed_item_ids) if req.failed_item_ids else 0,
+            "flow_type": req.flow_type
+        }
+    )
+
+    return {
+        "message": "Retry execution started",
+        "schedule_id": target_schedule.id,
+        "status": "running"
+    }
+
+

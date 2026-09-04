@@ -47,6 +47,8 @@ class ExecutionHistoryBase(BaseModel):
     healed_selector: Optional[str] = None # Added for Drift Detection
     execution_type: Optional[str] = "api"  # 'api' or 'web'
     trigger_origin: Optional[str] = "manual"  # 'manual', 'pipeline', 'schedule'
+    retry_count: Optional[int] = 0
+
 
     @field_validator('request_headers', 'request_params', 'response_headers', 'variables_used', mode='before')
     @classmethod
@@ -132,6 +134,8 @@ class ExecutionHistorySummary(BaseModel):
     healed_selector: Optional[str] = None # Added for Drift Detection
     execution_type: Optional[str] = "api"  # 'api' or 'web'
     trigger_origin: Optional[str] = "manual"  # 'manual', 'pipeline', 'schedule'
+    retry_count: Optional[int] = 0
+
     
     model_config = ConfigDict(from_attributes=True)
 

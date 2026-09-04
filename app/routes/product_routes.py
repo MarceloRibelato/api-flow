@@ -16,6 +16,7 @@ router = APIRouter(
 
 from app.auth import get_current_user
 from app.models.user_models import UserDB
+from app.services.audit_service import AuditService
 
 # --- Schemas inline for Device Matrix ---
 class MobileDeviceCreate(BaseModel):
@@ -29,6 +30,7 @@ class MobileDeviceCreate(BaseModel):
     auth_user: Optional[str] = None
     auth_token: Optional[str] = None
     app_identifier: Optional[str] = None
+    custom_capabilities: Optional[str] = None
 
 class MobileDeviceResponse(MobileDeviceCreate):
     id: int
@@ -68,7 +70,22 @@ def create_product(
     if current_user.role == 'viewer':
          raise HTTPException(status_code=403, detail="Sem permissão para criar produtos")
          
-    return ProductService.create(db, product, company_id=current_user.company_id)
+    created = ProductService.create(db, product, company_id=current_user.company_id)
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="CREATE_PRODUCT",
+        resource_type="product",
+        resource_id=str(created.id),
+        resource_name=created.name,
+        details={
+            "product_id": created.id,
+            "product_name": created.name,
+            "description": created.description
+        }
+    )
+    return created
 
 @router.get("/{product_id}", response_model=ProductResponse)
 def get_product(
@@ -100,6 +117,21 @@ def update_product(
     db_product = ProductService.update(db, product_id, product, company_id=current_user.company_id)
     if not db_product:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="UPDATE_PRODUCT",
+        resource_type="product",
+        resource_id=str(db_product.id),
+        resource_name=db_product.name,
+        details={
+            "product_id": db_product.id,
+            "product_name": db_product.name,
+            "description": db_product.description
+        }
+    )
     return db_product
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -114,9 +146,26 @@ def delete_product(
     if current_user.role != 'admin':
          raise HTTPException(status_code=403, detail="Apenas administradores podem deletar produtos")
 
+    db_product = ProductService.get(db, product_id, company_id=current_user.company_id)
+    prod_name = db_product.name if db_product else str(product_id)
+
     success = ProductService.delete(db, product_id, company_id=current_user.company_id)
     if not success:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="DELETE_PRODUCT",
+        resource_type="product",
+        resource_id=str(product_id),
+        resource_name=prod_name,
+        details={
+            "product_id": product_id,
+            "product_name": prod_name
+        }
+    )
     return 
 
 @router.get("/{product_id}/mobile-settings", response_model=ProductMobileSettingsResponse)
@@ -151,7 +200,21 @@ def update_product_mobile_settings(
     if not db_product:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
 
-    return ProductService.update_mobile_settings(db, product_id, settings_data)
+    updated_settings = ProductService.update_mobile_settings(db, product_id, settings_data)
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="UPDATE_PRODUCT_MOBILE_SETTINGS",
+        resource_type="product",
+        resource_id=str(product_id),
+        resource_name=db_product.name,
+        details={
+            "product_id": product_id,
+            "product_name": db_product.name
+        }
+    )
+    return updated_settings
 
 # ─────────────────────────────────────────────────────────
 # Device Matrix & Utilities

@@ -84,6 +84,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         result = await WebInspectorService.generate_selectors_for_element(session_id, text, lws_id)
                         await websocket.send_json({"messageId": message_id, "success": True, "data": result})
                 
+                elif action_type == "ai-autocorrect":
+                    failed_step = payload.get("failed_step", {})
+                    result = await WebInspectorService.ai_analyze_full_tree_and_correct(session_id, failed_step)
+                    await websocket.send_json({"messageId": message_id, "success": True, "data": result})
+                
                 else:
                     await websocket.send_json({"messageId": message_id, "success": False, "error": f"Unknown action type: {action_type}"})
                     
@@ -191,4 +196,17 @@ async def generate_selectors(session_id: str, payload: dict):
     except Exception as e:
         logger.error(f"Generate selectors failed: {e}")
         traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+@router.post("/session/{session_id}/ai-autocorrect")
+async def ai_autocorrect_step(session_id: str, payload: dict):
+    """
+    Analyzes the full DOM tree for a failed step using AI/smart heuristics and returns the optimal component selector.
+    """
+    try:
+        failed_step = payload.get("failed_step", {})
+        result = await WebInspectorService.ai_analyze_full_tree_and_correct(session_id, failed_step)
+        return result
+    except Exception as e:
+        logger.error(f"AI AutoCorrect endpoint failed: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

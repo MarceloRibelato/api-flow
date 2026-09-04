@@ -21,9 +21,9 @@ class UserDB(Base):
 
     # New Multi-Tenant Fields
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
-    role = Column(String(50), default="viewer") # admin, editor, viewer
+    role = Column(String(50), default="admin") # admin, editor, viewer
     token_version = Column(Integer, default=1, nullable=False) # Invalidate tokens on change
-    status = Column(String(20), default="pending") # active, pending, blocked
+    status = Column(String(20), default="active") # active, pending, blocked
     
     # Terms of Use
     accepted_terms = Column(Boolean, default=False)

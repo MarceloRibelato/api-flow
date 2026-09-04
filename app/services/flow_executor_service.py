@@ -49,7 +49,7 @@ class FlowExecutorService:
         return _is_blocked_domain(url)
 
     @staticmethod
-    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False, dataset_row: dict = None):
+    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
         # (imports now at top of file)
 
         # Resolve fallback env if none provided
@@ -63,8 +63,11 @@ class FlowExecutorService:
         global_timeout_ms = None
         global_retry_actions = None
         global_retry_test = 0
+        current_session_retry_count = 0
         if schedule_id:
             from app.models.schedule_models import ScheduleModel
+            from app.models.api_test_history_models import ApiExecutionHistory
+            from sqlalchemy import func
             schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
             if schedule:
                 if schedule.duration_seconds:
@@ -74,7 +77,35 @@ class FlowExecutorService:
                 if schedule.ramp_up_seconds is not None:
                     global_retry_test = schedule.ramp_up_seconds
 
-        base_batch_id = f"sched_{uuid.uuid4().hex}"
+            max_retry = db.query(func.max(ApiExecutionHistory.retry_count)).filter(ApiExecutionHistory.schedule_id == schedule_id).scalar()
+            hist_count = db.query(func.count(ApiExecutionHistory.id)).filter(ApiExecutionHistory.schedule_id == schedule_id).scalar()
+            if hist_count and hist_count > 0:
+                current_session_retry_count = (max_retry or 0) + 1
+
+        existing_batch_id = None
+        if schedule_id:
+            first_hist = db.query(ApiExecutionHistory.batch_id).filter(ApiExecutionHistory.schedule_id == schedule_id).order_by(ApiExecutionHistory.id.desc()).first()
+            if first_hist and first_hist[0]:
+                existing_batch_id = first_hist[0]
+        elif failed_item_ids:
+            clean_ids = []
+            for item in failed_item_ids:
+                try:
+                    clean_ids.append(int(item))
+                except (ValueError, TypeError):
+                    pass
+            if clean_ids:
+                first_hist = db.query(ApiExecutionHistory.batch_id).filter(ApiExecutionHistory.id.in_(clean_ids)).first()
+                if first_hist and first_hist[0]:
+                    existing_batch_id = first_hist[0]
+
+        if existing_batch_id:
+            import re
+            base_prefix = re.sub(r'(_path|_retry).*$', '', existing_batch_id)
+            base_batch_id = base_prefix
+        else:
+            base_batch_id = f"sched_{uuid.uuid4().hex}"
+
         history_buffer = []
         flow_success_count = 0
         flow_fail_count = 0
@@ -95,8 +126,11 @@ class FlowExecutorService:
             cards = flow_data.get('cardData', {})
             nodes = flow_data.get('nodes', [])
             edges = flow_data.get('edges', [])
+
+            # Resolve effective flow type robustly
+            effective_flow_type = flow_type if flow_type in ['mobile', 'e2e', 'web'] else (flow_data.get('flow_type') or flow_meta.get('flow_type') or 'api')
             
-            logger.info(f"📊 [execute_flow_logic] Loaded Flow ID: {f_id} - {len(nodes)} nodes, {len(edges)} edges")
+            logger.info(f"📊 [execute_flow_logic] Loaded Flow ID: {f_id} ({effective_flow_type}) - {len(nodes)} nodes, {len(edges)} edges")
             if not nodes:
                 logger.warning(f"⚠️ No nodes found in flow data (Flow ID: {f_id})!")
             
@@ -156,16 +190,95 @@ class FlowExecutorService:
             # Deduplicate paths (prevent redundant execution if graph has multiple identical paths)
             all_paths = list(dict.fromkeys(tuple(p) for p in all_paths))
             all_paths = [list(p) for p in all_paths]
+            path_entries = [(idx + 1, path) for idx, path in enumerate(all_paths)]
             
-            logger.info(f"   Found {len(all_paths)} unique paths to execute.")
+            # Retry Filtering: Filter scenario paths containing failed nodes/batches if this is a retry execution
+            failed_node_ids = set()
+            failed_path_numbers = set()
+            if failed_item_ids:
+                clean_failed_item_ids = []
+                for item in failed_item_ids:
+                    item_str = str(item).strip()
+                    if item_str:
+                        failed_node_ids.add(item_str)
+                    try:
+                        clean_failed_item_ids.append(int(item))
+                    except (ValueError, TypeError):
+                        pass
+
+                if clean_failed_item_ids:
+                    failed_recs = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.id.in_(clean_failed_item_ids)).all()
+                    
+                    target_recs = []
+                    f_id = flow_data.get('id') or flow_data.get('flow_id') or flow_meta.get('id') or flow_meta.get('flow_id')
+                    p_id = flow_data.get('project_id') or flow_meta.get('project_id') or flow_meta.get('projectId')
+                    for fr in failed_recs:
+                        if fr.flow_id and f_id and str(fr.flow_id) == str(f_id):
+                            target_recs.append(fr)
+                        elif fr.project_id and p_id and str(fr.project_id) == str(p_id):
+                            target_recs.append(fr)
+                        elif not fr.flow_id and not fr.project_id:
+                            target_recs.append(fr)
+
+                    if not target_recs:
+                        target_recs = failed_recs
+
+                    import re
+                    for fr in target_recs:
+                        if fr.node_id:
+                            failed_node_ids.add(str(fr.node_id))
+                        if fr.node_name:
+                            failed_node_ids.add(str(fr.node_name))
+                        if fr.batch_id:
+                            match = re.search(r'_path_(\d+)', str(fr.batch_id))
+                            if match:
+                                failed_path_numbers.add(int(match.group(1)))
+                        if fr.api_id and cards:
+                            for n_id, card_data in cards.items():
+                                e2e_steps = card_data.get('e2eSteps', []) or []
+                                api_calls = card_data.get('apiCalls', []) or []
+                                all_step_ids = [str(s.get('id')) for s in (e2e_steps + api_calls) if isinstance(s, dict) and s.get('id')]
+                                if str(fr.api_id) in all_step_ids:
+                                    failed_node_ids.add(str(n_id))
+
+            selected_path_entries = path_entries
+            if failed_path_numbers:
+                filtered_entries = [pe for pe in path_entries if pe[0] in failed_path_numbers]
+                if filtered_entries:
+                    logger.info(f"🎯 [RETRY FILTER] Isolating exact failed path numbers {failed_path_numbers}: {len(filtered_entries)} of {len(path_entries)} path(s) selected.")
+                    selected_path_entries = filtered_entries
+            elif failed_node_ids:
+                leaf_matched = [
+                    pe for pe in path_entries
+                    if str(pe[1][-1]) in failed_node_ids or (cards and cards.get(str(pe[1][-1]), {}).get('name') in failed_node_ids)
+                ]
+                if leaf_matched:
+                    selected_path_entries = leaf_matched
+                    logger.info(f"🎯 [RETRY FILTER] Isolating scenario paths ending in failed node(s) {failed_node_ids}: {len(selected_path_entries)} of {len(path_entries)} path(s) selected.")
+                else:
+                    filtered_entries = [
+                        pe for pe in path_entries 
+                        if any(
+                            str(nid) in failed_node_ids 
+                            or (cards and cards.get(str(nid), {}).get('name') in failed_node_ids) 
+                            for nid in pe[1]
+                        )
+                    ]
+                    if filtered_entries:
+                        selected_path_entries = filtered_entries
+                        logger.info(f"🎯 [RETRY FILTER] Isolating scenario paths containing failed node(s) {failed_node_ids}: {len(selected_path_entries)} of {len(path_entries)} path(s) selected.")
+                    else:
+                        logger.info(f"⚠️ [RETRY FILTER] Could not match failed node(s) {failed_node_ids} to path nodes; executing all paths.")
+
+            logger.info(f"   Found {len(selected_path_entries)} unique path(s) to execute out of {len(path_entries)} total.")
             async def run_paths():
                 nonlocal flow_success_count, flow_fail_count, e2e_executor, final_variables, history_buffer
                 path_cache = {}
-                for path_index, path_nodes in enumerate(all_paths):
-                    logger.info(f"🛣️ === Executing Scenario Path {path_index + 1}/{len(all_paths)} === 🛣️")
+                for path_number, path_nodes in selected_path_entries:
+                    logger.info(f"🛣️ === Executing Scenario Path {path_number} === 🛣️")
                     
-                    # Each path is a separate logical execution batch
-                    batch_id = f"{base_batch_id}_path_{path_index+1}"
+                    # Each path is a separate logical execution batch, preserving original path_number
+                    batch_id = f"{base_batch_id}_path_{path_number}"
                     video_dir = f"/app/data/videos/{batch_id}"
                     os.makedirs(video_dir, exist_ok=True)
                     
@@ -191,26 +304,46 @@ class FlowExecutorService:
                     if cached_state:
                         logger.info(f"⏭️ [CACHE HIT] Puling {longest_prefix_len} nodes! Injecting saved state from prefix {prefix}")
                         current_path_vars = copy.deepcopy(cached_state["vars"])
-                        is_e2e_flow = flow_type in ['e2e', 'mobile'] or flow_meta.get('flow_type') in ['e2e', 'mobile']
+                        is_e2e_flow = effective_flow_type in ['e2e', 'mobile', 'web']
                         if is_e2e_flow:
-                            from app.services.playwright_executor_service import PlaywrightExecutorService
-                            e2e_executor = PlaywrightExecutorService(headless=not visible_execution)
-                            e2e_executor.schedule_id = schedule_id
-                            e2e_executor.project_id = product_id
-                            await e2e_executor.start(video_dir=video_dir if capture_video else None, storage_state=cached_state["storage_state"])
-                            if cached_state["url"]:
-                                try:
-                                    await e2e_executor._page.goto(cached_state["url"])
-                                    await e2e_executor._wait_for_loading_to_finish()
-                                except Exception as e:
-                                    logger.warning(f"Failed to navigate to cached URL: {e}")
+                            if effective_flow_type == 'mobile':
+                                from app.services.appium_executor_service import AppiumExecutorService
+                                e2e_executor = AppiumExecutorService()
+                                await e2e_executor.start(video_dir=video_dir if capture_video else None, db=db, product_id=product_id)
+                            else:
+                                from app.services.playwright_executor_service import PlaywrightExecutorService
+                                e2e_executor = PlaywrightExecutorService(headless=not visible_execution)
+                                e2e_executor.schedule_id = schedule_id
+                                e2e_executor.project_id = product_id
+                                await e2e_executor.start(video_dir=video_dir if capture_video else None, storage_state=cached_state.get("storage_state"))
+                                if cached_state.get("url"):
+                                    try:
+                                        await e2e_executor._page.goto(cached_state["url"])
+                                        await e2e_executor._wait_for_loading_to_finish()
+                                    except Exception as e:
+                                        logger.warning(f"Failed to navigate to cached URL: {e}")
 
                     for node_idx, current_id in enumerate(path_nodes[longest_prefix_len:], start=longest_prefix_len):
                         if not path_success:
                             logger.warning(f"  🛑 Skipping node {current_id} because path previously failed.")
                             break
 
-                        logger.info(f"➡️  [Step] Processing Node: {current_id}")
+                        is_target_failed = False
+                        if failed_node_ids:
+                            card_obj = cards.get(str(current_id)) if cards else None
+                            c_name = card_obj.get('name') if card_obj else None
+                            is_target_failed = (
+                                str(current_id) in failed_node_ids
+                                or (c_name and str(c_name) in failed_node_ids)
+                            )
+                            if not is_target_failed and card_obj:
+                                e2e_s = card_obj.get('e2eSteps', []) or []
+                                api_c = card_obj.get('apiCalls', []) or []
+                                step_ids = [str(s.get('id')) for s in (e2e_s + api_c) if isinstance(s, dict) and s.get('id')]
+                                if any(sid in failed_node_ids for sid in step_ids):
+                                    is_target_failed = True
+
+                        logger.info(f"➡️  [Step] Processing Node: {current_id} (Target Failed: {is_target_failed})")
                         
                             # Execute Card for this Node
                         card = cards.get(current_id)
@@ -220,8 +353,8 @@ class FlowExecutorService:
                             
                             # Combine steps into a unified execution list
                             all_steps = []
-                            is_e2e_flow = flow_data.get('flow_type') in ['e2e', 'mobile', 'web'] or flow_meta.get('flow_type') in ['e2e', 'mobile', 'web']
-                            actual_exec_type = "mobile" if flow_type == 'mobile' else ("web" if flow_type in ['e2e', 'web'] or flow_data.get('flow_type') in ['e2e', 'web'] else "api")
+                            is_e2e_flow = effective_flow_type in ['e2e', 'mobile', 'web']
+                            actual_exec_type = "mobile" if effective_flow_type == 'mobile' else ("web" if effective_flow_type in ['e2e', 'web'] else "api")
                             
                             # Do NOT execute api_calls if this is an E2E node,
                             # because they are mapped APIs from the browser extension.
@@ -359,7 +492,7 @@ class FlowExecutorService:
                                     if step_type == 'e2e':
                                         try:
                                             if not e2e_executor:
-                                                if flow_type == 'mobile':
+                                                if effective_flow_type == 'mobile':
                                                     from app.services.appium_executor_service import AppiumExecutorService
                                                     e2e_executor = AppiumExecutorService()
                                                     await e2e_executor.start(
@@ -672,7 +805,8 @@ class FlowExecutorService:
                                     error_message=final_error_message,
                                     assertions=assertion_results,
                                     healed_selector=healed_selector,
-                                    execution_type=actual_exec_type
+                                    execution_type=actual_exec_type,
+                                    retry_count=(current_session_retry_count + (attempt if attempt else 0)) if (not failed_node_ids or is_target_failed) else 0
                                 )
                                 
                                 # The main action step (e.g., Click, Type) is appended FIRST
@@ -707,7 +841,8 @@ class FlowExecutorService:
                                             environment_id=env_id,
                                             error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
                                             assertions=None,
-                                            execution_type=actual_exec_type
+                                            execution_type=actual_exec_type,
+                                            retry_count=current_session_retry_count if (not failed_node_ids or is_target_failed) else 0
                                         )
                                         history_buffer.append(bg_hist)
                                         
@@ -789,7 +924,8 @@ class FlowExecutorService:
                                         environment_id=env_id,
                                         error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
                                         assertions=None,
-                                        execution_type=actual_exec_type
+                                        execution_type=actual_exec_type,
+                                        retry_count=current_session_retry_count
                                     )
                                     final_buffer.append(bg_hist)
                                 HistoryService.save_batch(db, final_buffer, user_id)
@@ -877,7 +1013,7 @@ class FlowExecutorService:
         return variables
 
     @staticmethod
-    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
+    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
         """
         Executes all flows within a specific feature.
         """
@@ -912,8 +1048,18 @@ class FlowExecutorService:
         # FIX: Only execute the latest flow to match UI behavior (1 Feature = 1 Active Flow)
         # list_by_project returns flows ordered by updated_at desc
         if flows:
-            # Filter flows by type
-            typed_flows = [f for f in flows if f.get('flow_type') == flow_type]
+            # Filter flows by type safely
+            def matches_flow_type(f_item, target_type):
+                ft = f_item.get('flow_type')
+                if not ft:
+                    return True
+                if target_type == 'mobile':
+                    return ft in ['mobile', 'e2e']
+                if target_type in ['e2e', 'web']:
+                    return ft in ['e2e', 'web']
+                return ft == target_type
+
+            typed_flows = [f for f in flows if matches_flow_type(f, flow_type)]
             
             if not typed_flows:
                 logger.warning(f"No flows of type '{flow_type}' found for feature {feature.id}. Falling back to latest regardless of type.")
@@ -936,7 +1082,8 @@ class FlowExecutorService:
                         thread_db, latest_flow, feature.product_id, env_id, company_id, 
                         variables.copy(), feature_name=feature.name, schedule_id=schedule_id, 
                         user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, 
-                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row
+                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
+                        failed_item_ids=failed_item_ids
                     )
                     f_success = s
                     f_fail = f
@@ -950,7 +1097,7 @@ class FlowExecutorService:
                     logger.info(f"  ✅ [PARALLEL] Feature Run {idx+1}/{max_workers} DONE in {elapsed:.1f}s")
                 return f_success, f_fail
 
-            max_workers = max_concurrency if max_concurrency else 1
+            max_workers = 1 if flow_type == 'mobile' else (max_concurrency if max_concurrency else 1)
             if max_workers > 1:
                 logger.info(f"🚀 [PARALLEL] Starting {max_workers} parallel runs for feature {feature.name}")
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -959,7 +1106,7 @@ class FlowExecutorService:
                     success_count += s
                     fail_count += f
             else:
-                s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row)
+                s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row, failed_item_ids=failed_item_ids)
                 success_count += s
                 fail_count += f
         else:
@@ -968,84 +1115,75 @@ class FlowExecutorService:
         return success_count, fail_count
 
     @staticmethod
-    def execute_flow(db: Session, flow_id: str, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
+    def execute_flow(db: Session, flow_id: str, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
         # We route directly to execute_flow_by_id
-        return FlowExecutorService.execute_flow_by_id(db, flow_id, env_id, company_id, schedule_id, user_id, 1, flow_type, capture_video, capture_screenshot, visible_execution, dataset_row)
+        return FlowExecutorService.execute_flow_by_id(db, flow_id, env_id, company_id, schedule_id, user_id, 1, flow_type, capture_video, capture_screenshot, visible_execution, dataset_row, failed_item_ids=failed_item_ids)
 
     @staticmethod
-    def execute_flow_by_id(db: Session, flow_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
-        """
-        Executes a single specific flow.
-        """
-        # 1. Load Flow Metadata
-        flow = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
-        if not flow:
-            logger.error(f"Flow {flow_id} not found")
-            return 0, 0
-            
-        # 2. Load Full Flow Data
-        flow_meta = FlowService.load(db, flow.project_id, company_id, flow_id)
-        if not flow_meta or not flow_meta.get('id'):
-             logger.error(f"Could not load flow data for {flow_id}")
-             return 0, 0
+    def execute_flow_by_id(db: Session, flow_id: str, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
+        flow_meta = None
+        # 1. Try loading by FlowDB.id directly if numeric
+        try:
+            numeric_id = int(flow_id)
+            flow_meta = FlowService.load(db, flow_id=numeric_id, company_id=company_id)
+        except (ValueError, TypeError):
+            pass
 
-        # 3. Get Project/Feature info for Variables
-        # flow_meta has 'product_id' which FlowService.load populates.
-        product_id = flow_meta.get('product_id')
+        # 2. If no nodes found, try loading by project_id (feature_id) with flow_type
+        if not flow_meta or not flow_meta.get('nodes'):
+            try:
+                numeric_proj_id = int(flow_id)
+                flow_meta = FlowService.load(db, project_id=numeric_proj_id, company_id=company_id, flow_type=flow_type)
+            except (ValueError, TypeError):
+                pass
+
+        if not flow_meta or not flow_meta.get('nodes'):
+            logger.warning(f"Flow {flow_id} (flow_type={flow_type}) not found or has no nodes for company {company_id}")
+            return 0, 1
+
         feature_name = "Unknown Feature"
-        
-        feature = db.query(FeatureModel).filter(FeatureModel.id == flow.project_id).first()
-        if feature:
-            feature_name = feature.name
-            if not product_id: product_id = feature.product_id
+        product_id = flow_meta.get('product_id')
+        if flow_meta.get('project_id'):
+            feature = db.query(FeatureModel).filter(FeatureModel.id == flow_meta.get('project_id')).first()
+            if feature:
+                feature_name = feature.name
+                if not product_id: product_id = feature.product_id
 
         if not product_id:
-            logger.warning(f"Product ID not found for flow {flow_id}, using 0 for variables lookup")
             product_id = 0
 
-        # Resolve fallback env if none provided
         if not env_id and product_id:
             from app.services.environment_service import EnvironmentService
             envs = EnvironmentService.get_by_project(db, product_id)
             if envs:
-                fallback_env = envs[0]
-                env_id = fallback_env.id
-                logger.info(f"    ⚠️ No Environment selected for Flow. Fallback to First Env: {fallback_env.name} (ID: {fallback_env.id})")
+                env_id = envs[0].id
 
-        logger.info(f"🚀 Executing Single Flow: {flow_meta['name']} (ID: {flow.id}) in Feature {feature_name}")
-
-        # 4. Prepare Variables
         variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
 
-        # 5. Execute
-        success_count = 0
-        fail_count = 0
-        
-        max_workers = max_concurrency if max_concurrency else 1
-        
+        max_workers = 1 if flow_type == 'mobile' else (max_concurrency if max_concurrency else 1)
         if max_workers > 1:
+            success_count = 0
+            fail_count = 0
             def process_flow_run(idx):
-                f_success = 0
-                f_fail = 0
+                f_s, f_f = 0, 0
                 thread_db = SessionLocal()
                 try:
-                    logger.info(f"  📂 Processing Flow Run {idx+1}/{max_workers}: {flow_meta['name']} (ID: {flow.id}) [Thread]")
                     s, f = FlowExecutorService.execute_flow_logic(
                         thread_db, flow_meta, product_id, env_id, company_id, 
                         variables.copy(), feature_name=feature_name, schedule_id=schedule_id, 
                         user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, 
-                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row
+                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
+                        failed_item_ids=failed_item_ids
                     )
-                    f_success = s
-                    f_fail = f
+                    f_s = s
+                    f_f = f
                 except Exception as ex:
-                    logger.error(f"Failed to process flow {flow.id} run {idx+1}: {ex}")
-                    f_fail = 1
+                    logger.error(f"Failed execution run {idx+1} for flow {flow_id}: {ex}")
+                    f_f = 1
                 finally:
                     thread_db.close()
-                return f_success, f_fail
+                return f_s, f_f
 
-            logger.info(f"🚀 Starting parallel flow execution with {max_workers} workers")
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 full_results = list(executor.map(process_flow_run, range(max_workers)))
             for s, f in full_results:
@@ -1053,10 +1191,10 @@ class FlowExecutorService:
                 fail_count += f
             return success_count, fail_count
         else:
-            return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row)
+            return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row, failed_item_ids=failed_item_ids)
 
     @staticmethod
-    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None):
+    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
         """
         Executes all features within a product.
         """
@@ -1084,23 +1222,30 @@ class FlowExecutorService:
 
         logger.info(f"🚀 Executing Suite for Product {product_id} - {len(features)} Features")
 
-
-
-        # Worker Function for Parallel Execution
+        # Worker Function for Execution
         def process_feature(feature):
             f_success = 0
             f_fail = 0
             thread_db = SessionLocal()
             start_t = time.time()
             try:
-                logger.info(f"  📂 [PARALLEL] Feature '{feature['name']}' (ID: {feature['id']}) STARTED at t={start_t:.2f}")
+                logger.info(f"  📂 Feature '{feature['name']}' (ID: {feature['id']}) STARTED at t={start_t:.2f}")
                 flows = FlowService.list_by_project(thread_db, feature['id'], company_id)
                 
                 if flows:
-                    # Filter by type (api or e2e)
-                    typed_flows = [f for f in flows if f.get('flow_type') == flow_type]
+                    def matches_flow_type(f_item, target_type):
+                        ft = f_item.get('flow_type')
+                        if not ft:
+                            return True
+                        if target_type == 'mobile':
+                            return ft in ['mobile', 'e2e']
+                        if target_type in ['e2e', 'web']:
+                            return ft in ['e2e', 'web']
+                        return ft == target_type
+
+                    typed_flows = [f for f in flows if matches_flow_type(f, flow_type)]
                     if not typed_flows:
-                        logger.warning(f"No flows of type '{flow_type}' found for feature {feature['id']}. Skipping.")
+                        logger.warning(f"No flows matching type '{flow_type}' found for feature {feature['id']}. Skipping.")
                         return f_success, f_fail
                     latest_flow = typed_flows[0]
                     s, f = FlowExecutorService.execute_flow_logic(
@@ -1108,7 +1253,8 @@ class FlowExecutorService:
                         variables.copy(),
                         feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id,
                         capture_video=capture_video, capture_screenshot=capture_screenshot,
-                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row
+                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
+                        failed_item_ids=failed_item_ids
                     )
                     f_success = s
                     f_fail = f
@@ -1119,17 +1265,19 @@ class FlowExecutorService:
             finally:
                 thread_db.close()
                 elapsed = time.time() - start_t
-                logger.info(f"  ✅ [PARALLEL] Feature '{feature['name']}' DONE in {elapsed:.1f}s")
+                logger.info(f"  ✅ Feature '{feature['name']}' DONE in {elapsed:.1f}s")
             return f_success, f_fail
 
-        # Run Features in Parallel
-        # Adjust max_workers as needed via env var MAX_CONCURRENT_FEATURES (default 5) or override
-        max_workers = max_concurrency if max_concurrency else settings.MAX_CONCURRENT_FEATURES
+        # Mobile executions run sequentially (max_workers=1) to prevent Appium driver port collisions
+        max_workers = 1 if flow_type == 'mobile' else (max_concurrency if max_concurrency else settings.MAX_CONCURRENT_FEATURES)
         
-        logger.info(f"🚀 Starting parallel execution with {max_workers} workers")
+        logger.info(f"🚀 Starting suite execution with {max_workers} worker(s)")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            full_results = list(executor.map(process_feature, features))
+        if max_workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                full_results = list(executor.map(process_feature, features))
+        else:
+            full_results = [process_feature(f) for f in features]
 
         # Aggregate Results
         for s, f in full_results:

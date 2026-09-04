@@ -28,6 +28,7 @@ class ProductMobileSettingsBase(BaseModel):
     device_name: Optional[str] = None
     platform_version: Optional[str] = None
     app_identifier: Optional[str] = None
+    custom_capabilities: Optional[str] = None
 
 class ProductMobileSettingsCreate(ProductMobileSettingsBase):
     pass

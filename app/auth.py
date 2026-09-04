@@ -18,22 +18,28 @@ from .models.service_token_models import ServiceTokenDB
 
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=10)
+import bcrypt
+
 security = HTTPBearer(auto_error=False)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 
 
-def verify_password(plain, hashed):
-    # Truncate to 72 bytes to avoid bcrypt error with long passwords
-    truncated = plain.encode('utf-8')[:72]
-    return pwd_context.verify(truncated, hashed)
+def verify_password(plain: str, hashed: str) -> bool:
+    try:
+        if not plain or not hashed:
+            return False
+        pwd_bytes = plain.encode('utf-8')[:72]
+        hash_bytes = hashed.encode('utf-8')
+        return bcrypt.checkpw(pwd_bytes, hash_bytes)
+    except Exception:
+        return False
 
 
-def get_password_hash(password):
-    # Truncate to 72 bytes to avoid bcrypt error with long passwords
-    truncated = password.encode('utf-8')[:72]
-    return pwd_context.hash(truncated)
+def get_password_hash(password: str) -> str:
+    pwd_bytes = password.encode('utf-8')[:72]
+    salt = bcrypt.gensalt(rounds=10)
+    return bcrypt.hashpw(pwd_bytes, salt).decode('utf-8')
 
 
 import uuid
@@ -89,7 +95,7 @@ def get_current_user(
                 if blacklisted:
                     raise HTTPException(status_code=401, detail="Sessão encerrada (Token invalidado)")
 
-            user = db.query(UserDB).filter(UserDB.username == username).first()
+            user = db.query(UserDB).filter(UserDB.username.ilike(username)).first()
             if user is None:
                 raise HTTPException(status_code=401, detail="Usuário não encontrado")
                  

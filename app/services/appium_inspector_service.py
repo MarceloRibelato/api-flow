@@ -441,11 +441,11 @@ class AppiumInspectorService:
             snapshot = cls.get_snapshot(session_id)
             tree = snapshot.get("tree", [])
             
-            step_type = failed_step.get("type", "tap")
+            step_type = (failed_step.get("type") or "tap").lower()
             props = failed_step.get("properties", {})
-            step_name = failed_step.get("name", "")
-            old_selector = props.get("selector", "")
-            expected_val = props.get("value", "")
+            step_name = (failed_step.get("name") or "").strip()
+            old_selector = (props.get("selector") or "").strip()
+            expected_val = str(props.get("value") or "").strip()
 
             target_candidates = []
             search_tokens = [t.lower() for t in [step_name, expected_val, old_selector] if t]
@@ -458,16 +458,28 @@ class AppiumInspectorService:
                 n_cls = (node.get("class") or "").strip()
                 n_hint = (node.get("hint") or "").strip()
 
-                # For 'type' step, prioritize editable inputs (EditText/TextField)
-                if step_type == "type" and ("edittext" in n_cls.lower() or "textfield" in n_cls.lower() or node.get("focusable") is True):
-                    score += 5
+                # Class & interactive role boost
+                n_cls_lower = n_cls.lower()
+                if step_type in ("type", "fill"):
+                    if "edittext" in n_cls_lower or "textfield" in n_cls_lower or node.get("focusable") is True:
+                        score += 5
+                elif step_type in ("tap", "click"):
+                    if any(c in n_cls_lower for c in ["button", "imagebutton", "textview", "clickable", "touchable"]):
+                        score += 4
 
                 # Compare token matches (including hint/placeholder)
                 for tok in search_tokens:
-                    if tok and (tok in n_text.lower() or tok in n_desc.lower() or tok in n_res.lower() or tok in n_hint.lower()):
-                        score += 8
-                    elif tok and (n_text.lower() in tok or n_desc.lower() in tok or n_hint.lower() in tok):
-                        score += 4
+                    if tok:
+                        if tok in n_text.lower() or tok in n_desc.lower() or tok in n_res.lower() or tok in n_hint.lower():
+                            score += 8
+                        elif (n_text and tok in n_text.lower()) or (n_desc and tok in n_desc.lower()) or (n_hint and tok in n_hint.lower()):
+                            score += 5
+
+                # Old selector exact match bonus
+                if old_selector:
+                    clean_old = old_selector.replace("id=", "").replace("accessibility_id=", "")
+                    if clean_old in n_res or clean_old in n_desc:
+                        score += 6
 
                 if score > 0:
                     target_candidates.append({"node": node, "score": score})
@@ -508,7 +520,6 @@ class AppiumInspectorService:
             if hint_val and not res_val:
                 selectors.append({"value": f"//*[@hint='{hint_val}']", "strategy": "xpath", "count": 1})
 
-            # Generic class fallback — only used when no specific selector could be generated
             if not selectors:
                 selectors.append({"value": f"//{cls_val}", "strategy": "xpath", "count": 1})
 

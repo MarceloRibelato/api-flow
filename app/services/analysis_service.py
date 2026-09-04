@@ -42,24 +42,36 @@ def _get_custom_license_key(db: Session, user_id: int) -> str:
 
 def _detect_model(base_url: str) -> str:
     """Auto-detect Ollama/Open WebUI model with in-memory TTL cache."""
+    if not base_url:
+        base_url = "http://host.docker.internal:11434/v1"
+
     cached = _model_cache.get(base_url)
     if cached:
         model_name, ts = cached
         if time.time() - ts < _MODEL_CACHE_TTL:
             return model_name
 
-    model_name = "llama3"  # safe default
-    try:
-        m_resp = requests.get(f"{base_url}models", timeout=3)
-        if m_resp.status_code == 200 and m_resp.json().get("data"):
-            model_name = m_resp.json()["data"][0]["id"]
-        else:
-            tags_url = base_url.replace("v1/", "api/tags").replace("v1", "api/tags")
-            o_resp = requests.get(tags_url, timeout=3)
-            if o_resp.status_code == 200 and o_resp.json().get("models"):
-                model_name = o_resp.json()["models"][0]["name"]
-    except Exception:
-        pass
+    urls_to_try = [base_url]
+    if "host.docker.internal" in base_url:
+        urls_to_try.append(base_url.replace("host.docker.internal", "localhost"))
+
+    model_name = "qwen2.5:14b-instruct-q4_K_M"  # Default fallback if detection fails
+    for u in urls_to_try:
+        try:
+            clean_base = u.rstrip('/')
+            url_models = f"{clean_base}/models" if not clean_base.endswith("/models") else clean_base
+            m_resp = requests.get(url_models, timeout=3)
+            if m_resp.status_code == 200 and m_resp.json().get("data"):
+                model_name = m_resp.json()["data"][0]["id"]
+                break
+            else:
+                tags_url = clean_base.replace("/v1", "") + "/api/tags"
+                o_resp = requests.get(tags_url, timeout=3)
+                if o_resp.status_code == 200 and o_resp.json().get("models"):
+                    model_name = o_resp.json()["models"][0]["name"]
+                    break
+        except Exception as e:
+            logger.warning(f"Failed to auto-detect model from {u}: {e}")
 
     _model_cache[base_url] = (model_name, time.time())
     return model_name
@@ -128,11 +140,11 @@ class AnalysisService:
         try:
             if settings.ai_provider == "openai":
                 headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
-                data = {"model": settings.ai_model, "messages": messages, "temperature": temperature}
+                data = {"model": settings.ai_model, "messages": messages, "temperature": temperature, "max_tokens": 4096}
                 base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
                 if not base_url.endswith("/"): base_url += "/"
                 url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-                resp = requests.post(url, headers=headers, json=data, timeout=120)
+                resp = requests.post(url, headers=headers, json=data, timeout=300)
                 if resp.status_code == 200:
                     result_text = resp.json()["choices"][0]["message"]["content"]
                     if flow_id:
@@ -146,7 +158,7 @@ class AnalysisService:
             elif settings.ai_provider == "anthropic":
                 headers = {"x-api-key": settings.ai_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
                 data = {"model": settings.ai_model, "messages": messages, "max_tokens": 4096}
-                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=120)
+                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=300)
                 if resp.status_code == 200:
                     result_text = resp.json()["content"][0]["text"]
                     if flow_id:
@@ -164,8 +176,8 @@ class AnalysisService:
                     gemini_contents.append({"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]})
                 
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
-                data = {"contents": gemini_contents}
-                resp = requests.post(url, json=data, timeout=60)
+                data = {"contents": gemini_contents, "generationConfig": {"maxOutputTokens": 4096}}
+                resp = requests.post(url, json=data, timeout=300)
                 if resp.status_code == 200:
                     result_text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
                     if flow_id:
@@ -179,7 +191,7 @@ class AnalysisService:
             elif settings.ai_provider == "deepseek":
                 headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
                 data = {"model": settings.ai_model, "messages": messages, "temperature": temperature, "max_tokens": 4096}
-                resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=60)
+                resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=300)
                 if resp.status_code == 200:
                     result_text = resp.json()["choices"][0]["message"]["content"]
                     if flow_id:
@@ -191,8 +203,8 @@ class AnalysisService:
             elif settings.ai_provider == "flow_ia":
                 url, headers, base_url = _build_flow_ia_request_params(db, user_id, settings)
                 model_name = _detect_model(base_url)
-                data = {"messages": messages, "stream": False, "model": model_name}
-                resp = requests.post(url, headers=headers, json=data, timeout=120)
+                data = {"messages": messages, "stream": False, "model": model_name, "max_tokens": 4096, "options": {"num_predict": 4096}}
+                resp = requests.post(url, headers=headers, json=data, timeout=300)
                 if resp.status_code == 200:
                     result_text = resp.json()["choices"][0]["message"]["content"]
                     if flow_id:
@@ -205,7 +217,7 @@ class AnalysisService:
 
             elif settings.ai_provider == "ollama":
                 from app.config import settings as app_settings
-                license_url = settings.ai_base_url or app_settings.LICENSE_MANAGER_URL
+                license_url = app_settings.LICENSE_MANAGER_URL
                 license_key = _get_custom_license_key(db, user_id)
                 user_ident = f"user_{user_id}"
                 try:
@@ -214,17 +226,30 @@ class AnalysisService:
                 except Exception as ue:
                     logger.warning(f"Could not retrieve user info: {ue}")
 
+                default_url = "http://host.docker.internal:11434/v1"
+                base_url = settings.ai_base_url if settings.ai_base_url else default_url
+                if "localhost" in base_url or "127.0.0.1" in base_url:
+                    base_url = base_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+                if not base_url.endswith("/"):
+                    base_url += "/"
+                parsed = urlparse(base_url)
+                if parsed.path in ("", "/"):
+                    base_url += "v1/"
+
                 if license_url and license_key:
                     url = f"{license_url.rstrip('/')}/api/ai/chat"
                     headers = {
                         "Content-Type": "application/json",
                         "X-License-Key": license_key,
+                        "X-Target-Url": base_url,
                         "X-User-Identifier": user_ident,
                     }
-                    data = {"messages": messages, "stream": False}
-                    if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia"):
+                    data = {"messages": messages, "stream": False, "max_tokens": 2560, "options": {"num_predict": 2560}}
+                    if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3"):
                         data["model"] = settings.ai_model
-                    resp = requests.post(url, headers=headers, json=data, timeout=120)
+                    else:
+                        data["model"] = _detect_model(base_url)
+                    resp = requests.post(url, headers=headers, json=data, timeout=600)
                     if resp.status_code == 200:
                         result_text = resp.json()["choices"][0]["message"]["content"]
                         if flow_id:
@@ -243,12 +268,12 @@ class AnalysisService:
                     headers = {"Content-Type": "application/json"}
                     if settings.ai_api_key:
                         headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                    data = {"messages": messages, "stream": False}
-                    if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia"):
+                    data = {"messages": messages, "stream": False, "max_tokens": 2560, "options": {"num_predict": 2560}}
+                    if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3"):
                         data["model"] = settings.ai_model
                     else:
-                        data["model"] = "llama3"
-                    resp = requests.post(url, headers=headers, json=data, timeout=120)
+                        data["model"] = _detect_model(base_url)
+                    resp = requests.post(url, headers=headers, json=data, timeout=600)
                     if resp.status_code == 200:
                         result_text = resp.json()["choices"][0]["message"]["content"]
                         if flow_id:
@@ -294,9 +319,10 @@ class AnalysisService:
         content = AnalysisService._call_llm(db, user_id, prompt)
         if not content: return []
         
-        content = content.replace("```json", "").replace("```", "").strip()
+        from app.services.skill_service import _robust_json_parse
         try:
-            return json.loads(content)
+            parsed = _robust_json_parse(content)
+            return parsed if isinstance(parsed, list) else [parsed]
         except:
             return [{ "type": "logic", "severity": "low", "message": "Raw AI Response", "details": content }]
 
@@ -343,9 +369,10 @@ class AnalysisService:
         content = AnalysisService._call_llm(db, user_id, prompt)
         if not content: return []
         
-        content = content.replace("```json", "").replace("```", "").strip()
+        from app.services.skill_service import _robust_json_parse
         try:
-            return json.loads(content)
+            parsed = _robust_json_parse(content)
+            return parsed if isinstance(parsed, list) else [parsed]
         except:
              return []
 
@@ -380,6 +407,8 @@ class AnalysisService:
             logger.error(f"Failed to load original flow for AI: {e}")
             return None
 
+        effective_flow_type = "mobile" if flow.flow_type == "mobile" else ("e2e" if flow.flow_type in ["e2e", "web"] else "api")
+
         # Minimal serialization to avoid token explosion, but keep required validation fields
         min_nodes = []
         for n in original_flow_data.get("nodes", []):
@@ -387,25 +416,37 @@ class AnalysisService:
                 "id": n.get("id"),
                 "type": n.get("type"),
                 "position": n.get("position"),
-                "data": n.get("data") or {"name": "Node", "color": "#10b981", "childCount": 0, "isCollapsed": False}
+                "data": n.get("data") or {"name": "Node", "color": "#10b981", "childCount": 0, "isCollapsed": False, "nodeType": effective_flow_type}
             })
 
         min_edges = [{"id": e.get("id"), "source": e.get("source"), "target": e.get("target")} for e in original_flow_data.get("edges", [])]
         
         min_card_data = {}
         for k, v in original_flow_data.get("cardData", {}).items():
-            min_card_data[k] = {
+            c_item = {
                 "name": v.get("name"),
-                "apiCalls": [{
+                "nodeType": v.get("nodeType") or effective_flow_type,
+            }
+            if effective_flow_type in ["mobile", "e2e"]:
+                e_steps = v.get("e2eSteps") or v.get("steps") or v.get("e2e_steps") or []
+                c_item["e2eSteps"] = [{
+                    "id": s.get("id") or f"step-{idx}",
+                    "name": s.get("name"),
+                    "type": s.get("type"),
+                    "properties": s.get("properties")
+                } for idx, s in enumerate(e_steps) if isinstance(s, dict)]
+            else:
+                c_item["apiCalls"] = [{
                     "id": a.get("id") or f"step-{idx}",
                     "method": a.get("method"),
                     "url": a.get("url"),
                     "body": a.get("body")
-                } for idx, a in enumerate(v.get("apiCalls", []))]
-            }
+                } for idx, a in enumerate(v.get("apiCalls", [])) if isinstance(a, dict)]
+            min_card_data[k] = c_item
 
+        step_field = "e2eSteps" if effective_flow_type in ["mobile", "e2e"] else "apiCalls"
         prompt = f"""
-        You are an expert QA automation engineer. The user has an existing API test flow.
+        You are an expert QA automation engineer. The user has an existing {effective_flow_type.upper()} test flow.
         You must create a NEW test scenario branch that implements: "{scenario_title}".
         
         Original Flow Data (JSON for context, DO NOT include in your response):
@@ -415,15 +456,16 @@ class AnalysisService:
         
         Task: 
         1. Create a NEW set of nodes and edges that represent the alternative test scenario.
-        2. DO NOT create fake or non-existent API calls. Modify parameters, bodies, or headers of the existing API calls to inject the fault (e.g., duplicate an existing node but change its properties).
+        2. DO NOT create fake or non-existent steps. Modify parameters, bodies, or properties of the existing {step_field} to inject the fault or test condition.
         3. The first node of your new branch MUST connect from the 'start' node. So create an edge with source="start" and target="your_first_new_node_id".
         4. RETURN ONLY THE NEW NODES, EDGES, AND CARD DATA. Do NOT return the original nodes.
+        5. In `cardData` and `nodes`, ALWAYS set `"nodeType": "{effective_flow_type}"`.
         
         Format exactly like this JSON:
         {{
            "nodes": [ ... ],
            "edges": [ ... ],
-           "cardData": {{ "your_node_id": {{ ... }} }}
+           "cardData": {{ "your_node_id": {{ "name": "...", "nodeType": "{effective_flow_type}", "{step_field}": [...] }} }}
         }}
         
         Respond ONLY with raw JSON. No markdown backticks.
@@ -433,14 +475,11 @@ class AnalysisService:
         if not content:
             raise ValueError("O assistente de IA retornou uma resposta vazia ou ocorreu um timeout na chamada.")
         
-        content = content.replace("```json", "").replace("```", "").strip()
-        
-        # Remove any conversational text before or after the JSON block
-        if "{" in content and "}" in content:
-            content = content[content.find("{"):content.rfind("}")+1]
-
+        from app.services.skill_service import _robust_json_parse
         try:
-            suggested_data = json.loads(content)
+            suggested_data = _robust_json_parse(content)
+            if not isinstance(suggested_data, dict):
+                suggested_data = {}
             
             # Merge with original first, avoiding duplicate node IDs
             merged_nodes_dict = {n.get("id"): n for n in original_flow_data.get("nodes", [])}
@@ -448,19 +487,20 @@ class AnalysisService:
             for ai_node in suggested_data.get("nodes", []):
                 nid = ai_node.get("id")
                 if nid in merged_nodes_dict:
-                    # Update existing if provided
                     merged_nodes_dict[nid].update(ai_node)
                 else:
                     merged_nodes_dict[nid] = ai_node
                     
             merged_nodes = list(merged_nodes_dict.values())
             
-            # Ensure required Pydantic fields (position, data) exist
+            # Ensure required Pydantic fields (position, data) exist and nodeType is set
             for idx, n in enumerate(merged_nodes):
                 if "position" not in n:
                     n["position"] = {"x": idx * 150, "y": 150}
-                if "data" not in n:
-                    n["data"] = {"name": n.get("id", "Node"), "color": "#10b981", "childCount": 0, "isCollapsed": False}
+                if "data" not in n or not isinstance(n["data"], dict):
+                    n["data"] = {"name": n.get("id", "Node"), "color": "#10b981", "childCount": 0, "isCollapsed": False, "nodeType": effective_flow_type}
+                else:
+                    n["data"]["nodeType"] = n["data"].get("nodeType") or effective_flow_type
                     
             merged_edges = original_flow_data.get("edges", []) + suggested_data.get("edges", [])
             
@@ -479,6 +519,13 @@ class AnalysisService:
             
             # Normalize AI generated headers/params and legacy DB data to match Pydantic ApiCallSchema (List of Dicts)
             for card_id, card_data in merged_card_data.items():
+                if isinstance(card_data, dict):
+                    card_data["nodeType"] = card_data.get("nodeType") or effective_flow_type
+                    if effective_flow_type in ["mobile", "e2e"] and "e2eSteps" not in card_data:
+                        if "steps" in card_data:
+                            card_data["e2eSteps"] = card_data.pop("steps")
+                        elif "e2e_steps" in card_data:
+                            card_data["e2eSteps"] = card_data.pop("e2e_steps")
                 
                 # Gather all apiCalls lists to normalize (top-level + envData)
                 all_api_calls_lists = []
@@ -708,22 +755,11 @@ class AnalysisService:
                     }
                 
                 # Auto-detect model
-                model_name = "llama3"
-                try:
-                    m_resp = requests.get(f"{base_url}models", timeout=2)
-                    if m_resp.status_code == 200 and m_resp.json().get("data"):
-                        model_name = m_resp.json()["data"][0]["id"]
-                    else:
-                        o_resp = requests.get(base_url.replace("v1/", "api/tags").replace("v1", "api/tags"), timeout=2)
-                        if o_resp.status_code == 200 and o_resp.json().get("models"):
-                            model_name = o_resp.json()["models"][0]["name"]
-                except Exception:
-                    pass
-                
+                model_name = _detect_model(base_url)
                 data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
                 
                 logger.info(f"📡 [Auto-Heal] Flow-IA Req: {url} using model {model_name}")
-                resp = requests.post(url, headers=headers, json=data, timeout=30)
+                resp = requests.post(url, headers=headers, json=data, timeout=300)
                 if resp.status_code == 200:
                     selector = _clean(resp.json()["choices"][0]["message"]["content"])
                     logger.info(f"✨ [Auto-Heal] Flow-IA Returned: {selector}")
@@ -752,8 +788,9 @@ class AnalysisService:
                         "X-License-Key": license_key,
                         "X-User-Identifier": user_ident
                     }
-                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
-                    resp = requests.post(url, headers=headers, json=data, timeout=30)
+                    model_name = settings.ai_model if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3") else _detect_model(license_url or "http://host.docker.internal:11434/v1")
+                    data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    resp = requests.post(url, headers=headers, json=data, timeout=300)
                     if resp.status_code == 200:
                         selector = _clean(resp.json()["choices"][0]["message"]["content"])
                         return selector
@@ -767,10 +804,11 @@ class AnalysisService:
                     url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
                     headers = {"Content-Type": "application/json"}
                     if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    model_name = settings.ai_model if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3") else _detect_model(base_url)
+                    data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
                     
                     logger.info(f"📡 [Auto-Heal] Ollama Req: {url}")
-                    resp = requests.post(url, headers=headers, json=data, timeout=30)
+                    resp = requests.post(url, headers=headers, json=data, timeout=300)
                     if resp.status_code == 200:
                         selector = _clean(resp.json()["choices"][0]["message"]["content"])
                         logger.info(f"✨ [Auto-Heal] Ollama Returned: {selector}")
@@ -872,8 +910,9 @@ class AnalysisService:
                 if license_url and license_key:
                     url = f"{license_url.rstrip('/')}/api/ai/chat"
                     headers = {"Content-Type": "application/json", "X-License-Key": license_key, "X-User-Identifier": f"user_{settings.user_id}"}
-                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
-                    resp = requests.post(url, headers=headers, json=data, timeout=30)
+                    model_name = settings.ai_model if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3") else _detect_model(license_url or "http://host.docker.internal:11434/v1")
+                    data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    resp = requests.post(url, headers=headers, json=data, timeout=300)
                     if resp.status_code == 200:
                         return _clean(resp.json()["choices"][0]["message"]["content"])
                 else:
@@ -883,8 +922,9 @@ class AnalysisService:
                     url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
                     headers = {"Content-Type": "application/json"}
                     if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                    data = {"model": settings.ai_model or "llama3", "messages": [{"role": "user", "content": prompt}], "stream": False}
-                    resp = requests.post(url, headers=headers, json=data, timeout=30)
+                    model_name = settings.ai_model if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3") else _detect_model(base_url)
+                    data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
+                    resp = requests.post(url, headers=headers, json=data, timeout=300)
                     if resp.status_code == 200:
                         return _clean(resp.json()["choices"][0]["message"]["content"])
                         
@@ -1034,8 +1074,9 @@ class AnalysisService:
             content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.2)
             if not content:
                 return []
-            content = content.replace("```json", "").replace("```", "").strip()
-            return json.loads(content)
+            from app.services.skill_service import _robust_json_parse
+            parsed = _robust_json_parse(content)
+            return parsed if isinstance(parsed, list) else []
         except Exception as e:
             logger.error(f"AI Assertion Gen Error: {e}")
             return []
@@ -1089,6 +1130,9 @@ class AnalysisService:
             
         for r in roots:
             dfs(r, [], set())
+
+        if not paths or (len(paths) > 1 and all(len(p) <= 1 for p in paths)):
+            paths = [list(nodes.keys())]
             
         suggestions = []
         redundant_signatures_found = set()
