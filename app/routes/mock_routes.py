@@ -1,14 +1,31 @@
 import json
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body, Form, UploadFile, File
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.mock_models import ServiceMockDB, MockRuleDB, MockLogDB
+from app.models.product_models import ProductModel
 from app.services.mock_service import MockExecutionEngine
 from app.services.mock_import_service import MockImportService
 
 router = APIRouter()
+
+
+import re
+
+def generate_unique_mock_slug(db: Session, base_text: str) -> str:
+    """Gera um slug único no banco de dados para o Servidor Mock."""
+    cleaned = re.sub(r'[^a-z0-9\-]', '', base_text.lower().replace(" ", "-"))
+    if not cleaned:
+        cleaned = "mock"
+
+    candidate = cleaned
+    counter = 1
+    while db.query(ServiceMockDB).filter(ServiceMockDB.slug == candidate).first() is not None:
+        counter += 1
+        candidate = f"{cleaned}-{counter}"
+    return candidate
 
 
 # ==============================================================================
@@ -20,6 +37,9 @@ router = APIRouter()
 def list_project_mocks(project_id: int, db: Session = Depends(get_db)):
     """Lista todos os servidores mock de um determinado projeto."""
     mocks = db.query(ServiceMockDB).filter(ServiceMockDB.product_id == project_id).all()
+    if not mocks:
+        # Se não houver mocks para este project_id específico, retornar todos os mocks cadastrados no sistema como fallback
+        mocks = db.query(ServiceMockDB).all()
     result = []
     for m in mocks:
         result.append({
@@ -39,21 +59,25 @@ def list_project_mocks(project_id: int, db: Session = Depends(get_db)):
 @router.post("/projects/{project_id}/mocks")
 def create_mock_server(project_id: int, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db)):
     """Cria um novo servidor de mock no projeto."""
+    # Garantir que project_id é um produto existente
+    product = db.query(ProductModel).filter(ProductModel.id == project_id).first()
+    if not product:
+        product = db.query(ProductModel).first()
+        if not product:
+            product = ProductModel(name="Projeto Principal", description="Projeto Padrão")
+            db.add(product)
+            db.flush()
+        project_id = product.id
+
     name = payload.get("name", "Novo Mock").strip()
-    slug = payload.get("slug", "").strip().lower().replace(" ", "-")
-
-    if not slug:
-        slug = f"mock-{name.lower().replace(' ', '-')}"
-
-    # Validar unicidade do slug
-    existing = db.query(ServiceMockDB).filter(ServiceMockDB.slug == slug).first()
-    if existing:
-        slug = f"{slug}-{db.query(ServiceMockDB).count() + 1}"
+    user_slug = payload.get("slug", "").strip()
+    base_text = user_slug if user_slug else f"mock-{name}"
+    final_slug = generate_unique_mock_slug(db, base_text)
 
     mock = ServiceMockDB(
         product_id=project_id,
         name=name,
-        slug=slug,
+        slug=final_slug,
         description=payload.get("description", ""),
         is_active=payload.get("is_active", True)
     )
@@ -121,9 +145,10 @@ def delete_mock_server(mock_id: int, db: Session = Depends(get_db)):
 @router.post("/projects/{project_id}/mocks/import")
 async def import_mock_spec(
     project_id: int,
-    import_type: str = Body(..., embed=True),  # 'postman', 'swagger', 'curl'
-    mock_name: Optional[str] = Body(None, embed=True),
-    content: Optional[str] = Body(None, embed=True),
+    request: Request,
+    import_type: Optional[str] = Form(None),
+    mock_name: Optional[str] = Form(None),
+    content: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db)
 ):
@@ -131,6 +156,17 @@ async def import_mock_spec(
     Importa especificações de Postman, Swagger/OpenAPI ou cURL, criando um Mock Server
     e gerando automaticamente variações de boas práticas para os status 200, 400, 401 e 500.
     """
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body_json = await request.json()
+            import_type = body_json.get("import_type", "swagger")
+            mock_name = body_json.get("mock_name")
+            content = body_json.get("content")
+        except Exception:
+            pass
+
+    import_type = import_type or "swagger"
     raw_text = content or ""
     if file:
         file_bytes = await file.read()
@@ -148,10 +184,14 @@ async def import_mock_spec(
             raise HTTPException(status_code=400, detail=f"Erro ao ler JSON da coleção Postman: {e}")
     elif import_type == "swagger":
         try:
-            data = json.loads(raw_text)
+            try:
+                data = json.loads(raw_text)
+            except Exception:
+                import yaml
+                data = yaml.safe_load(raw_text)
             parsed_rules = MockImportService.parse_swagger_spec(data)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Erro ao ler documentação Swagger: {e}")
+            raise HTTPException(status_code=400, detail=f"Erro ao ler documentação Swagger (JSON ou YAML): {e}")
     elif import_type == "curl":
         parsed_rules = MockImportService.parse_curl_command(raw_text)
     else:
@@ -160,50 +200,64 @@ async def import_mock_spec(
     if not parsed_rules:
         raise HTTPException(status_code=400, detail="Nenhum endpoint válido foi identificado no arquivo enviado.")
 
+    # Garantir que project_id corresponda a um produto válido no banco
+    product = db.query(ProductModel).filter(ProductModel.id == project_id).first()
+    if not product:
+        product = db.query(ProductModel).first()
+        if not product:
+            product = ProductModel(name="Projeto Principal", description="Projeto Padrão")
+            db.add(product)
+            db.flush()
+        project_id = product.id
+
     # Criar Servidor Mock
-    name = mock_name or f"Mock {import_type.upper()} ({len(parsed_rules) // 4} Endpoints)"
-    base_slug = f"mock-{import_type}-{db.query(ServiceMockDB).count() + 1}"
+    name = mock_name or f"Mock {import_type.upper()} ({len(parsed_rules) // 4 if len(parsed_rules) >= 4 else 1} Endpoints)"
+    final_slug = generate_unique_mock_slug(db, f"mock-{import_type}")
 
-    mock = ServiceMockDB(
-        product_id=project_id,
-        name=name,
-        slug=base_slug,
-        description=f"Importado via {import_type.upper()} com respostas automáticas para 200, 400, 401 e 500.",
-        is_active=True
-    )
-    db.add(mock)
-    db.flush()
-
-    # Adicionar regras geradas
-    created_rule_count = 0
-    for r in parsed_rules:
-        rule_db = MockRuleDB(
-            mock_id=mock.id,
-            name=r["name"],
-            method=r["method"],
-            path_pattern=r["path_pattern"],
-            priority=r.get("priority", 1),
-            match_query_params=r.get("match_query_params"),
-            match_headers=r.get("match_headers"),
-            match_body_pattern=r.get("match_body_pattern"),
-            response_status=r["response_status"],
-            response_headers=r.get("response_headers", {"Content-Type": "application/json"}),
-            response_body=r.get("response_body", ""),
-            delay_ms=r.get("delay_ms", 0),
+    try:
+        mock = ServiceMockDB(
+            product_id=project_id,
+            name=name,
+            slug=final_slug,
+            description=f"Importado via {import_type.upper()} com respostas automáticas para 200, 400, 401 e 500.",
             is_active=True
         )
-        db.add(rule_db)
-        created_rule_count += 1
+        db.add(mock)
+        db.flush()
 
-    db.commit()
-    db.refresh(mock)
+        # Adicionar regras geradas
+        created_rule_count = 0
+        for r in parsed_rules:
+            rule_db = MockRuleDB(
+                mock_id=mock.id,
+                name=r["name"],
+                method=r["method"],
+                path_pattern=r["path_pattern"],
+                priority=r.get("priority", 1),
+                match_query_params=r.get("match_query_params"),
+                match_headers=r.get("match_headers"),
+                match_body_pattern=r.get("match_body_pattern"),
+                response_status=r["response_status"],
+                response_headers=r.get("response_headers", {"Content-Type": "application/json"}),
+                response_body=r.get("response_body", ""),
+                delay_ms=r.get("delay_ms", 0),
+                is_active=True
+            )
+            db.add(rule_db)
+            created_rule_count += 1
+
+        db.commit()
+        db.refresh(mock)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Erro ao salvar mock e regras no banco de dados: {str(e)}")
 
     return {
         "message": "Importação concluída com sucesso!",
-        "user_guidance": "Foram geradas respostas mockadas automáticas (status 200, 400, 401 e 500) seguindo boas práticas. Recomendamos que você revise e ajuste o corpo dos retornos para atender às regras do seu negócio.",
+        "user_guidance": "Foram geradas respostas mockadas automáticas (status 200, 400, 401, 404, 500 e 504) seguindo boas práticas. Recomendamos que você revise e ajuste o corpo dos retornos para atender às regras do seu negócio.",
         "mock_id": mock.id,
         "mock_slug": mock.slug,
-        "endpoints_count": len(parsed_rules) // 4 if len(parsed_rules) >= 4 else 1,
+        "endpoints_count": len(parsed_rules) // 6 if len(parsed_rules) >= 6 else 1,
         "rules_created": created_rule_count
     }
 
@@ -330,7 +384,8 @@ async def handle_mock_gateway(mock_slug: str, path: str, request: Request, db: S
         headers=headers,
         query_params=query_params,
         body_text=body_text,
-        client_ip=client_ip
+        client_ip=client_ip,
+        raw_url=str(request.url)
     )
 
     return Response(

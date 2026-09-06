@@ -56,12 +56,12 @@ class MockImportService:
                 "updatedAt": "{{timestamp}}"
             }, indent=2)
 
-        # Regra 1: 200 OK / 201 Created
+        # Regra 1: 200 OK / 201 Created (Prioridade 1 = Resposta Padrão de Sucesso)
         rule_200 = {
             "name": f"[200 OK] {name} - Sucesso",
             "method": clean_method,
             "path_pattern": clean_path,
-            "priority": 10,
+            "priority": 1,
             "response_status": success_status,
             "response_headers": {"Content-Type": "application/json"},
             "response_body": success_body,
@@ -74,8 +74,8 @@ class MockImportService:
             "name": f"[400 Bad Request] {name} - Erro Validação",
             "method": clean_method,
             "path_pattern": clean_path,
-            "priority": 5,
-            "match_headers": {"X-Mock-Status": "400"},
+            "priority": 2,
+            "match_headers": [{"target": "query", "field": "error", "operator": "equals", "value": "400"}],
             "response_status": 400,
             "response_headers": {"Content-Type": "application/json"},
             "response_body": json.dumps({
@@ -95,8 +95,8 @@ class MockImportService:
             "name": f"[401 Unauthorized] {name} - Não Autorizado",
             "method": clean_method,
             "path_pattern": clean_path,
-            "priority": 5,
-            "match_headers": {"X-Mock-Status": "401"},
+            "priority": 3,
+            "match_headers": [{"target": "query", "field": "error", "operator": "equals", "value": "401"}],
             "response_status": 401,
             "response_headers": {"Content-Type": "application/json"},
             "response_body": json.dumps({
@@ -108,13 +108,31 @@ class MockImportService:
             "is_active": True
         }
 
-        # Regra 4: 500 Internal Server Error
+        # Regra 4: 404 Not Found
+        rule_404 = {
+            "name": f"[404 Not Found] {name} - Não Encontrado",
+            "method": clean_method,
+            "path_pattern": clean_path,
+            "priority": 4,
+            "match_headers": [{"target": "query", "field": "error", "operator": "equals", "value": "404"}],
+            "response_status": 404,
+            "response_headers": {"Content-Type": "application/json"},
+            "response_body": json.dumps({
+                "error": "Not Found",
+                "message": f"O recurso solicitado em {clean_path} não foi encontrado.",
+                "code": 404
+            }, indent=2),
+            "delay_ms": 50,
+            "is_active": True
+        }
+
+        # Regra 5: 500 Internal Server Error
         rule_500 = {
             "name": f"[500 Error] {name} - Falha Interna",
             "method": clean_method,
             "path_pattern": clean_path,
-            "priority": 1,
-            "match_headers": {"X-Mock-Status": "500"},
+            "priority": 5,
+            "match_headers": [{"target": "query", "field": "error", "operator": "equals", "value": "500"}],
             "response_status": 500,
             "response_headers": {"Content-Type": "application/json"},
             "response_body": json.dumps({
@@ -126,7 +144,25 @@ class MockImportService:
             "is_active": True
         }
 
-        return [rule_200, rule_400, rule_401, rule_500]
+        # Regra 6: 504 Gateway Timeout
+        rule_504 = {
+            "name": f"[504 Timeout] {name} - Tempo Limite Excedido",
+            "method": clean_method,
+            "path_pattern": clean_path,
+            "priority": 6,
+            "match_headers": [{"target": "query", "field": "error", "operator": "equals", "value": "504"}],
+            "response_status": 504,
+            "response_headers": {"Content-Type": "application/json"},
+            "response_body": json.dumps({
+                "error": "Gateway Timeout",
+                "message": "O tempo limite de comunicação com o serviço upstream foi excedido.",
+                "code": 504
+            }, indent=2),
+            "delay_ms": 5000,
+            "is_active": True
+        }
+
+        return [rule_200, rule_400, rule_401, rule_404, rule_500, rule_504]
 
     @classmethod
     def parse_postman_collection(cls, collection_data: Dict[str, Any]) -> List[Dict[str, Any]]:
