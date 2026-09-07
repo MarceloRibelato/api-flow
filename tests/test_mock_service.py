@@ -416,4 +416,161 @@ def test_merge_received_json_with_created_date():
     assert "T" in data_merge["created"] and data_merge["created"].endswith("Z")
 
 
+def test_process_mock_request_proxy_forwarding():
+    from unittest.mock import AsyncMock, patch
+    import httpx
+
+    mock_db = MagicMock(spec=ServiceMockDB)
+    mock_db.id = 101
+    mock_db.name = "Proxy Gateway"
+    mock_db.slug = "proxy-gw"
+    mock_db.rules = []  # Nenhuma regra local
+    mock_db.enable_proxy = True
+    mock_db.target_url = "https://api.realupstream.com/v1"
+
+    db_session = MagicMock()
+
+    # Mockando httpx.AsyncClient
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {"content-type": "application/json", "x-upstream": "true"}
+    mock_resp.text = '{"upstream_success": true, "balance": 4500}'
+
+    mock_client_instance = AsyncMock()
+    mock_client_instance.request.return_value = mock_resp
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    mock_client_instance.__aexit__.return_value = None
+
+    with patch("httpx.AsyncClient", return_value=mock_client_instance):
+        status, headers, body = asyncio.run(MockExecutionEngine.process_mock_request(
+            db=db_session,
+            mock=mock_db,
+            method="GET",
+            path="/accounts/balance",
+            headers={"Authorization": "Bearer real-token"},
+            query_params={"currency": "BRL"},
+            body_text=""
+        ))
+
+    assert status == 200
+    assert "upstream_success" in body
+    assert headers.get("x-upstream") == "true"
+    # Verificar se o log gravado foi com is_proxied=True
+    added_log = db_session.add.call_args[0][0]
+    assert added_log.is_proxied is True
+    assert added_log.response_status == 200
+
+
+def test_process_mock_request_proxy_error_handling():
+    from unittest.mock import AsyncMock, patch
+    import httpx
+
+    mock_db = MagicMock(spec=ServiceMockDB)
+    mock_db.id = 102
+    mock_db.name = "Failing Proxy Gateway"
+    mock_db.slug = "failing-proxy"
+    mock_db.rules = []
+    mock_db.enable_proxy = True
+    mock_db.target_url = "https://unreachable-upstream.internal"
+
+    db_session = MagicMock()
+
+    mock_client_instance = AsyncMock()
+    mock_client_instance.request.side_effect = httpx.ConnectError("Connection refused")
+    mock_client_instance.__aenter__.return_value = mock_client_instance
+    mock_client_instance.__aexit__.return_value = None
+
+    with patch("httpx.AsyncClient", return_value=mock_client_instance):
+        status, headers, body = asyncio.run(MockExecutionEngine.process_mock_request(
+            db=db_session,
+            mock=mock_db,
+            method="POST",
+            path="/payments/charge",
+            headers={},
+            query_params={},
+            body_text='{"amount": 100}'
+        ))
+
+    assert status == 502
+    assert "Bad Gateway / Proxy Error" in body
+    assert "Connection refused" in body
+    added_log = db_session.add.call_args[0][0]
+    assert added_log.is_proxied is True
+    assert added_log.response_status == 502
+
+
+def test_process_mock_request_rule_precedence_over_proxy():
+    mock_db = MagicMock(spec=ServiceMockDB)
+    mock_db.id = 103
+    mock_db.name = "Hybrid Server"
+    mock_db.slug = "hybrid-server"
+    mock_db.enable_proxy = True
+    mock_db.target_url = "https://api.upstream.com"
+
+    # Regra local para /intercepted-path
+    rule = MockRuleDB(
+        id=77,
+        mock_id=103,
+        name="Local Override Rule",
+        method="GET",
+        path_pattern="*",
+        priority=1,
+        is_active=True,
+        match_headers=[{"target": "url", "field": "", "operator": "contains", "value": "intercepted-path"}],
+        response_status=201,
+        response_body='{"local_mock": true}',
+        delay_ms=0
+    )
+    mock_db.rules = [rule]
+
+    db_session = MagicMock()
+
+    status, headers, body = asyncio.run(MockExecutionEngine.process_mock_request(
+        db=db_session,
+        mock=mock_db,
+        method="GET",
+        path="/intercepted-path",
+        headers={},
+        query_params={},
+        body_text=""
+    ))
+
+    # Regra local deve prevalecer, status 201 e is_proxied=False
+    assert status == 201
+    assert '{"local_mock": true}' in body
+    added_log = db_session.add.call_args[0][0]
+    assert added_log.is_proxied is False
+    assert added_log.rule_id == 77
+
+
+def test_process_mock_request_proxy_disabled_returns_mock_default():
+    mock_db = MagicMock(spec=ServiceMockDB)
+    mock_db.id = 104
+    mock_db.name = "Isolated Server"
+    mock_db.slug = "isolated-server"
+    mock_db.rules = []
+    mock_db.enable_proxy = False
+    mock_db.target_url = "https://api.upstream.com"
+
+    db_session = MagicMock()
+
+    status, headers, body = asyncio.run(MockExecutionEngine.process_mock_request(
+        db=db_session,
+        mock=mock_db,
+        method="GET",
+        path="/unmatched-route",
+        headers={},
+        query_params={},
+        body_text=""
+    ))
+
+    # Sem proxy -> deve retornar resposta padrão de mock local
+    assert status == 200
+    assert "mock_server" in body
+    assert "isolated-server" in body
+    added_log = db_session.add.call_args[0][0]
+    assert added_log.is_proxied is False
+
+
+
 

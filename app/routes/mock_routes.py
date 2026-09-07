@@ -49,6 +49,8 @@ def list_project_mocks(project_id: int, db: Session = Depends(get_db)):
             "slug": m.slug,
             "description": m.description,
             "is_active": m.is_active,
+            "target_url": m.target_url,
+            "enable_proxy": m.enable_proxy,
             "rule_count": len(m.rules),
             "created_at": m.created_at.isoformat() if m.created_at else None
         })
@@ -79,12 +81,21 @@ def create_mock_server(project_id: int, payload: Dict[str, Any] = Body(...), db:
         name=name,
         slug=final_slug,
         description=payload.get("description", ""),
-        is_active=payload.get("is_active", True)
+        is_active=payload.get("is_active", True),
+        target_url=payload.get("target_url"),
+        enable_proxy=payload.get("enable_proxy", False)
     )
     db.add(mock)
     db.commit()
     db.refresh(mock)
-    return {"id": mock.id, "name": mock.name, "slug": mock.slug, "is_active": mock.is_active}
+    return {
+        "id": mock.id,
+        "name": mock.name,
+        "slug": mock.slug,
+        "is_active": mock.is_active,
+        "target_url": mock.target_url,
+        "enable_proxy": mock.enable_proxy
+    }
 
 
 @router.get("/v1/mocks/{mock_id}")
@@ -121,7 +132,44 @@ def get_mock_details(mock_id: int, db: Session = Depends(get_db)):
         "slug": mock.slug,
         "description": mock.description,
         "is_active": mock.is_active,
+        "target_url": mock.target_url,
+        "enable_proxy": mock.enable_proxy,
         "rules": rules
+    }
+
+
+@router.put("/v1/mocks/{mock_id}")
+@router.put("/mocks/{mock_id}")
+@router.patch("/v1/mocks/{mock_id}")
+@router.patch("/mocks/{mock_id}")
+def update_mock_server(mock_id: int, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db)):
+    """Atualiza as propriedades do servidor mock (incluindo proxy e target_url)."""
+    mock = db.query(ServiceMockDB).filter(ServiceMockDB.id == mock_id).first()
+    if not mock:
+        raise HTTPException(status_code=404, detail="Mock Server não encontrado.")
+
+    if "name" in payload:
+        mock.name = payload["name"]
+    if "description" in payload:
+        mock.description = payload["description"]
+    if "is_active" in payload:
+        mock.is_active = payload["is_active"]
+    if "target_url" in payload:
+        mock.target_url = payload["target_url"]
+    if "enable_proxy" in payload:
+        mock.enable_proxy = bool(payload["enable_proxy"])
+
+    db.commit()
+    db.refresh(mock)
+    return {
+        "id": mock.id,
+        "product_id": mock.product_id,
+        "name": mock.name,
+        "slug": mock.slug,
+        "description": mock.description,
+        "is_active": mock.is_active,
+        "target_url": mock.target_url,
+        "enable_proxy": mock.enable_proxy
     }
 
 
@@ -340,6 +388,7 @@ def get_mock_logs(mock_id: int, limit: int = 50, db: Session = Depends(get_db)):
             "request_body": log.request_body,
             "response_status": log.response_status,
             "response_body": log.response_body,
+            "is_proxied": getattr(log, "is_proxied", False),
             "executed_at": log.executed_at.isoformat() if log.executed_at else None
         })
     return result

@@ -14,6 +14,8 @@ class ServiceMockDB(Base):
     slug = Column(String(100), unique=True, index=True, nullable=False)
     description = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    target_url = Column(String(500), nullable=True)
+    enable_proxy = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -63,6 +65,7 @@ class MockLogDB(Base):
     request_body = Column(Text, nullable=True)
     response_status = Column(Integer, nullable=False)
     response_body = Column(Text, nullable=True)
+    is_proxied = Column(Boolean, default=False, nullable=False)
     executed_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
     # Relationships

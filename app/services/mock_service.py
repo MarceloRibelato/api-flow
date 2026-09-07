@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 import json
 import re
 import uuid
@@ -560,6 +561,7 @@ class MockExecutionEngine:
 
         # 1. Encontrar Regra de Match
         matched_rule = cls.match_rule(mock.rules, method, path, headers, query_params, body_text, raw_url=raw_url)
+        is_proxied = False
 
         if matched_rule:
             status_code = matched_rule.response_status
@@ -567,6 +569,47 @@ class MockExecutionEngine:
             raw_body = matched_rule.response_body or ""
             delay_ms = matched_rule.delay_ms or 0
             rule_id = matched_rule.id
+        elif getattr(mock, "enable_proxy", False) and getattr(mock, "target_url", None) and mock.target_url.strip():
+            # INTEGRAÇÃO COM API REAL / PROXY REVERSO:
+            # Quando a proxy está ativada e não há regra mock correspondente, repassar a chamada para a API Real
+            target_base = mock.target_url.strip().rstrip("/")
+            path_clean = ("/" + path.lstrip("/")) if path else ""
+            forward_url = f"{target_base}{path_clean}"
+            if query_str:
+                forward_url = f"{forward_url}?{query_str}"
+
+            # Limpar cabeçalhos hop-by-hop para não quebrar a requisição upstream
+            forward_headers = {k: v for k, v in headers.items() if k.lower() not in ("host", "content-length", "connection")}
+
+            try:
+                async with httpx.AsyncClient(timeout=30.0, verify=False, follow_redirects=True) as client:
+                    upstream_resp = await client.request(
+                        method=method,
+                        url=forward_url,
+                        headers=forward_headers,
+                        content=body_text.encode("utf-8") if body_text else None
+                    )
+                    status_code = upstream_resp.status_code
+                    resp_headers = dict(upstream_resp.headers)
+                    resp_headers.pop("transfer-encoding", None)
+                    resp_headers.pop("content-encoding", None)
+                    resp_headers.pop("content-length", None)
+                    raw_body = upstream_resp.text
+                    is_proxied = True
+                    delay_ms = 0
+                    rule_id = None
+            except Exception as exc:
+                status_code = 502
+                resp_headers = {"Content-Type": "application/json"}
+                raw_body = json.dumps({
+                    "error": "Bad Gateway / Proxy Error",
+                    "message": f"Falha ao conectar com o serviço real: {str(exc)}",
+                    "target_url": forward_url,
+                    "mock_slug": mock.slug
+                }, indent=2)
+                is_proxied = True
+                delay_ms = 0
+                rule_id = None
         else:
             # ESTRATÉGIA DEFAULT: SE NENHUMA REGRA ESPECÍFICA FOR ATENDIDA -> RETORNA 200 OK SUCESSO!
             status_code = 200
@@ -585,18 +628,22 @@ class MockExecutionEngine:
         if delay_ms > 0:
             await asyncio.sleep(delay_ms / 1000.0)
 
-        # 3. Interpolador de Templating
-        final_body = cls.interpolate_template(raw_body, request_data)
-
-        # Interpolar cabeçalhos de resposta caso o usuário utilize tags dinâmicas
-        final_headers = {}
-        if isinstance(resp_headers, dict):
-            for hk, hv in resp_headers.items():
-                interp_k = cls.interpolate_template(hk, request_data)
-                interp_v = cls.interpolate_template(str(hv), request_data)
-                final_headers[interp_k] = interp_v
-        else:
+        # 3. Interpolador de Templating (somente para respostas mockadas locais)
+        if is_proxied:
+            final_body = raw_body
             final_headers = resp_headers
+        else:
+            final_body = cls.interpolate_template(raw_body, request_data)
+
+            # Interpolar cabeçalhos de resposta caso o usuário utilize tags dinâmicas
+            final_headers = {}
+            if isinstance(resp_headers, dict):
+                for hk, hv in resp_headers.items():
+                    interp_k = cls.interpolate_template(hk, request_data)
+                    interp_v = cls.interpolate_template(str(hv), request_data)
+                    final_headers[interp_k] = interp_v
+            else:
+                final_headers = resp_headers
 
         # 4. Registra no Log de Inspeção
         try:
@@ -610,6 +657,7 @@ class MockExecutionEngine:
                 request_body=body_text[:2000] if body_text else None,
                 response_status=status_code,
                 response_body=final_body[:2000] if final_body else None,
+                is_proxied=is_proxied,
                 executed_at=datetime.utcnow()
             )
             db.add(log_entry)

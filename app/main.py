@@ -6,7 +6,7 @@ import httpx # Added for global client
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
 
 from app.config import settings
@@ -131,6 +131,15 @@ async def lifespan(app: FastAPI):
                     conn.execute(text("UPDATE users SET role = 'admin' WHERE id = 1 OR role IS NULL;"))
             except Exception as e:
                 logger.info(f"Erro users columns: {e}")
+
+            # Auto-repair for service_mocks and mock_logs columns
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE service_mocks ADD COLUMN IF NOT EXISTS target_url VARCHAR(500);"))
+                    conn.execute(text("ALTER TABLE service_mocks ADD COLUMN IF NOT EXISTS enable_proxy BOOLEAN DEFAULT FALSE;"))
+                    conn.execute(text("ALTER TABLE mock_logs ADD COLUMN IF NOT EXISTS is_proxied BOOLEAN DEFAULT FALSE;"))
+            except Exception as e:
+                logger.info(f"Erro service_mocks columns: {e}")
 
             logger.info("Colunas dinâmicas processadas.")
             
@@ -377,6 +386,11 @@ def read_root():
 def api_status():
     routes = [{"path": getattr(route, "path", str(route)), "name": getattr(route, "name", "unknown")} for route in app.routes]
     return {"status": "online", "total_routes": len(routes)}
+
+@app.get("/api-validation", include_in_schema=False)
+@app.get("/api/api-validation", include_in_schema=False)
+def redirect_api_validation():
+    return RedirectResponse(url="/products/1/api-validation", status_code=307)
 
 if __name__ == "__main__":
     import uvicorn
