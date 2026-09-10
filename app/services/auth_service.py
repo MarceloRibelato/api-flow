@@ -59,8 +59,12 @@ class AuthService:
         company_id = None
         
         # Default Role/Status
-        role = "admin"
-        status = "active"
+        if is_first_user:
+            role = "admin"
+            status = "active"
+        else:
+            role = "viewer"
+            status = "pending"
 
         if user.company:
             from app.models.company_models import CompanyDB
@@ -82,8 +86,8 @@ class AuthService:
         if not user.accepted_terms:
             raise ValueError("Você deve aceitar os Termos de Uso para se cadastrar.")
             
-        from datetime import datetime
-        terms_accepted_at = datetime.utcnow()
+        from datetime import datetime, timezone
+        terms_accepted_at = datetime.now(timezone.utc)
 
         db_user = UserDB(
             username=user.username.strip().lower(),

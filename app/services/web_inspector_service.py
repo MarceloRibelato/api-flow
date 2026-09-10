@@ -193,6 +193,17 @@ class _WebInspectorServiceImpl:
                 logger.error(f"🔴 [WebInspector] Failed to start screencast: {e}")
                 return False
         return True
+
+    @classmethod
+    async def unregister_frame_queue(cls, session_id: str):
+        """Unregisters the WebSocket frame queue to stop routing frames after disconnect."""
+        session = _active_sessions.get(session_id)
+        if not session:
+            return False
+        session.pop("fastapi_queue", None)
+        session.pop("fastapi_loop", None)
+        logger.info(f"⚪ [WebInspector] Frame queue unregistered for session {session_id}")
+        return True
     """
     A persistent session manager that uses Playwright for an 
     interactive web inspection UI (recording and live view).
@@ -352,11 +363,15 @@ class _WebInspectorServiceImpl:
                 logger.error(f"🌐 [WebInspector] FATAL failure in start_session: {e}")
                 traceback.print_exc(file=sys.stdout)
                 # Ensure cleanup of failed artifacts
-                try:
-                    if 'page' in locals(): await page.close()
-                    if 'context' in locals(): await context.close()
-                    if 'browser' in locals(): await browser.close()
-                except: pass
+                if 'page' in locals() and page:
+                    try: await page.close()
+                    except: pass
+                if 'context' in locals() and context:
+                    try: await context.close()
+                    except: pass
+                if 'browser' in locals() and browser:
+                    try: await browser.close()
+                    except: pass
                 raise e
 
     @classmethod
@@ -367,12 +382,41 @@ class _WebInspectorServiceImpl:
             session = _active_sessions.pop(session_id, None)
             if session:
                 logger.info(f"🌐 [WebInspector] Stopping session {session_id}.")
-                try:
-                    await session["page"].close()
-                    await session["context"].close()
-                    await session["browser"].close()
-                except Exception as e:
-                    logger.warning(f"🌐 [WebInspector] Error during cleanup: {e}")
+                # 1. Detach CDP client if active
+                cdp = session.get("cdp_client")
+                if cdp:
+                    try:
+                        await cdp.send("Page.stopScreencast")
+                    except Exception:
+                        pass
+                    try:
+                        await cdp.detach()
+                    except Exception as cdp_err:
+                        logger.warning(f"🌐 [WebInspector] Error detaching CDP client: {cdp_err}")
+
+                # 2. Close Page
+                page = session.get("page")
+                if page:
+                    try:
+                        await page.close()
+                    except Exception as pe:
+                        logger.warning(f"🌐 [WebInspector] Error closing page: {pe}")
+
+                # 3. Close Context
+                ctx = session.get("context")
+                if ctx:
+                    try:
+                        await ctx.close()
+                    except Exception as ce:
+                        logger.warning(f"🌐 [WebInspector] Error closing context: {ce}")
+
+                # 4. Close Browser (Guaranteed to be attempted!)
+                browser = session.get("browser")
+                if browser:
+                    try:
+                        await browser.close()
+                    except Exception as be:
+                        logger.warning(f"🌐 [WebInspector] Error closing browser: {be}")
 
     @classmethod
     def get_progress(cls, session_id: str) -> dict:
@@ -1020,6 +1064,10 @@ class WebInspectorService:
     @classmethod
     async def register_frame_queue(cls, *args, **kwargs):
         return await cls._dispatch(_WebInspectorServiceImpl.register_frame_queue(*args, **kwargs))
+
+    @classmethod
+    async def unregister_frame_queue(cls, *args, **kwargs):
+        return await cls._dispatch(_WebInspectorServiceImpl.unregister_frame_queue(*args, **kwargs))
     @classmethod
     async def _dispatch(cls, coro):
         future = asyncio.run_coroutine_threadsafe(coro, _playwright_loop)

@@ -102,6 +102,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         logger.info(f"⚪ [WebSocket] disconnected for session {session_id}")
     except Exception as e:
         logger.error(f"🔴 [WebSocket] connection error for session {session_id}: {e}")
+    finally:
+        sender_task.cancel()
+        try:
+            await sender_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        try:
+            await WebInspectorService.unregister_frame_queue(session_id)
+        except Exception:
+            pass
 
 @router.post("/session/start")
 async def start_web_session(payload: SessionStartPayload = None, initial_url: str = None, session_id: str = None):

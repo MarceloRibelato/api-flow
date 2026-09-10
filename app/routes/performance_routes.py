@@ -264,7 +264,11 @@ def export_detailed_csv(
     import os
     from fastapi.responses import FileResponse
     
-    csv_path = f"/tmp/{job_id}_detailed.csv"
+    base_reports_dir = "/app/data/reports" if os.path.exists("/app") else os.path.abspath("data/reports")
+    shared_csv_path = os.path.join(base_reports_dir, f"{job_id}_detailed.csv")
+    tmp_csv_path = f"/tmp/{job_id}_detailed.csv"
+    
+    csv_path = shared_csv_path if os.path.exists(shared_csv_path) else tmp_csv_path
     if not os.path.exists(csv_path):
         raise HTTPException(status_code=404, detail="Detailed CSV not found for this job ID. Wait for the test to finish or run a new one.")
         

@@ -237,8 +237,10 @@ class PDFService:
         import os
         try:
             from app.main import VIDEO_DIR
-            base = os.path.dirname(VIDEO_DIR)  # /app/media
-            fs_path = os.path.normpath(os.path.join(base, url_path.lstrip('/')))
+            base = os.path.abspath(os.path.dirname(VIDEO_DIR))  # /app/media
+            fs_path = os.path.abspath(os.path.normpath(os.path.join(base, url_path.lstrip('/'))))
+            if os.path.commonpath([base, fs_path]) != base:
+                return None
             return fs_path if os.path.exists(fs_path) else None
         except Exception:
             return None

@@ -52,3 +52,10 @@ def test_generate_pdf_success(db_session):
     assert pdf_bytes is not None
     assert isinstance(pdf_bytes, (bytes, bytearray))
     assert len(pdf_bytes) > 0
+
+
+def test_resolve_media_path_traversal_protection():
+    # Attempt directory traversal
+    traversal_path = "/../../../etc/passwd"
+    resolved = PDFService._resolve_media_path(traversal_path)
+    assert resolved is None

@@ -10,15 +10,18 @@ def setup_logging():
     import os
     handlers = [logging.StreamHandler(sys.stdout)]
     
-    # Only use file logging if explicitly enabled (to avoid slow volume mounts in Docker/Windows)
-    if os.getenv("ENABLE_FILE_LOGGING", "false").lower() == "true":
+    from logging.handlers import RotatingFileHandler
+    try:
+        log_file = "/app/api.log" if os.path.exists("/app") else "api.log"
         file_handler = RotatingFileHandler(
-            "api.log", 
+            log_file, 
             maxBytes=5 * 1024 * 1024,  # 5 MB
             backupCount=3, 
             encoding="utf-8"
         )
         handlers.append(file_handler)
+    except Exception:
+        pass
     
     logging.basicConfig(
         level=logging.INFO,

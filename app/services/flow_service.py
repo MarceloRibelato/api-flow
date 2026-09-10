@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.flow_models import FlowDB, FlowNodeDB, FlowEdgeDB, FlowCardDataDB, FlowE2EStepDB
@@ -304,7 +304,9 @@ class FlowService:
             name = c_name or n_data.get("name") or n_data.get("label") or f"Card #{nid_str}"
             current_node_names.append(str(name))
 
-        flow.updated_at = datetime.utcnow()
+        flow.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(flow)
         return {
             "id": flow.id, 
             "project_id": flow.project_id, 

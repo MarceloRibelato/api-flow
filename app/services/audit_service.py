@@ -44,13 +44,14 @@ class AuditService:
                 details=details or {},
                 ip_address=ip_address
             )
-            db.add(log_entry)
+            with db.begin_nested():
+                db.add(log_entry)
+                db.flush()
             db.commit()
             db.refresh(log_entry)
             return log_entry
         except Exception as e:
             logger.error(f"Erro ao salvar registro de auditoria: {str(e)}")
-            db.rollback()
             return None
 
     @staticmethod

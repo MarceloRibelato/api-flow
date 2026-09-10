@@ -220,8 +220,8 @@ class MobileExecutorService:
                             
                             # Combine steps into a unified execution list
                             all_steps = []
-                            is_e2e_flow = flow_data.get('flow_type') in ['e2e', 'mobile'] or flow_meta.get('flow_type') in ['e2e', 'mobile']
-                            actual_exec_type = "mobile" if flow_type == 'mobile' else ("web" if flow_type == 'e2e' or flow_data.get('flow_type') == 'e2e' else "api")
+                            is_e2e_flow = flow_data.get('flow_type') in ['e2e', 'mobile', 'web'] or flow_meta.get('flow_type') in ['e2e', 'mobile', 'web']
+                            actual_exec_type = "mobile" if (flow_type == 'mobile' or flow_data.get('flow_type') == 'mobile' or flow_meta.get('flow_type') == 'mobile') else ("web" if (flow_type in ['e2e', 'web'] or flow_data.get('flow_type') in ['e2e', 'web'] or flow_meta.get('flow_type') in ['e2e', 'web']) else "api")
                             
                             # Do NOT execute api_calls if this is an E2E node,
                             # because they are mapped APIs from the browser extension.

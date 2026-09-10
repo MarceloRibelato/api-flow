@@ -49,7 +49,7 @@ class ApiExecutorService:
         return _is_blocked_domain(url)
 
     @staticmethod
-    def execute(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False, dataset_row: dict = None):
+    def execute(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
         # (imports now at top of file)
 
         # Resolve fallback env if none provided
@@ -173,6 +173,13 @@ class ApiExecutorService:
                     current_path_vars = copy.deepcopy(base_variables_dict)
                     flow_session = requests.Session()
                     flow_session.trust_env = False
+                    try:
+                        from requests.adapters import HTTPAdapter
+                        http_adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+                        flow_session.mount('http://', http_adapter)
+                        flow_session.mount('https://', http_adapter)
+                    except Exception as pool_err:
+                        logger.warning(f"Could not configure HTTPAdapter pool on flow_session: {pool_err}")
                     
                     # Reset e2e executor inside if used
                     e2e_executor = None
@@ -562,9 +569,17 @@ class ApiExecutorService:
                                                         start_time = time.time()
                                                         api_timeout = float(step_data.get('timeout', 30000)) / 1000.0
                                                         
+                                                        verify_ssl = step_data.get('verifySSL', step_data.get('verify_ssl', True))
+                                                        if isinstance(verify_ssl, str):
+                                                            verify_ssl = verify_ssl.lower() not in ('false', '0', 'no')
+
                                                         loop = asyncio.get_event_loop()
                                                         import functools
-                                                        request_func = functools.partial(flow_session.request, method, url, headers=headers, data=body, params=params, timeout=api_timeout)
+                                                        request_func = functools.partial(
+                                                            flow_session.request, method, url,
+                                                            headers=headers, data=body, params=params,
+                                                            timeout=api_timeout, verify=verify_ssl
+                                                        )
                                                         resp = await loop.run_in_executor(None, request_func)
                                                         
                                                         duration = int((time.time() - start_time) * 1000)
@@ -669,7 +684,8 @@ class ApiExecutorService:
                                 )
                                 
                                 # The main action step (e.g., Click, Type) is appended FIRST
-                                history_buffer.append(hist)
+                                with execution_lock:
+                                    history_buffer.append(hist)
                                 
                                 # Fetch any background HTTP requests intercepted by the browser during this step
                                 # We append them AFTER the main step so the sequence makes sense (Action -> Resulting Requests)
@@ -702,7 +718,8 @@ class ApiExecutorService:
                                             assertions=None,
                                             execution_type=actual_exec_type
                                         )
-                                        history_buffer.append(bg_hist)
+                                        with execution_lock:
+                                            history_buffer.append(bg_hist)
                                         
                                         # Visually count intercepted requests for suite metrics (optional, avoids '0 steps' visual bug)
                                         with execution_lock:
@@ -823,6 +840,9 @@ class ApiExecutorService:
             logger.error(f"Error executing flow {flow_meta['id']}: {e}")
             db.rollback()
             return 0, 0
+
+    # Alias execute_flow_logic to execute for internal callers and backward compatibility
+    execute_flow_logic = execute
 
     @staticmethod
     def get_merged_variables(db: Session, product_id: int, env_id: int):

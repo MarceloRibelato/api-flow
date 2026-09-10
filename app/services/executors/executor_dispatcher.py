@@ -35,30 +35,39 @@ class ExecutorDispatcher:
         if flow_type == 'e2e' or flow_type == 'web':
             from app.services.executors.web_executor_service import WebExecutorService
             logger.info(f"🚀 Dispatching flow {flow_data.get('id')} to Web/E2E Executor")
-            return await WebExecutorService.execute(
-                db=db, flow_data=flow_data, user_id=user_id, project=project_id,
-                env_id=env_id, schedule_id=schedule_id, company_id=company_id,
-                batch_id=batch_id, capture_video=capture_video, capture_screenshot=capture_screenshot,
-                global_vars=global_vars
+            s, f = await asyncio.to_thread(
+                WebExecutorService.execute,
+                db=db, flow_meta=flow_data, product_id=project_id,
+                env_id=env_id, company_id=company_id or 1,
+                variables_dict=global_vars or {}, schedule_id=schedule_id,
+                user_id=user_id, capture_video=capture_video,
+                capture_screenshot=capture_screenshot, flow_type='e2e'
             )
+            return {"success_count": s, "fail_count": f}
             
         elif flow_type == 'mobile':
             from app.services.executors.mobile_executor_service import MobileExecutorService
             logger.info(f"🚀 Dispatching flow {flow_data.get('id')} to Mobile Executor")
-            return await MobileExecutorService.execute(
-                db=db, flow_data=flow_data, user_id=user_id, project=project_id,
-                env_id=env_id, schedule_id=schedule_id, company_id=company_id,
-                batch_id=batch_id, capture_video=capture_video, capture_screenshot=capture_screenshot,
-                global_vars=global_vars
+            s, f = await asyncio.to_thread(
+                MobileExecutorService.execute,
+                db=db, flow_meta=flow_data, product_id=project_id,
+                env_id=env_id, company_id=company_id or 1,
+                variables_dict=global_vars or {}, schedule_id=schedule_id,
+                user_id=user_id, capture_video=capture_video,
+                capture_screenshot=capture_screenshot, flow_type='mobile'
             )
+            return {"success_count": s, "fail_count": f}
             
         else:
             # Default to API
             from app.services.executors.api_executor_service import ApiExecutorService
             logger.info(f"🚀 Dispatching flow {flow_data.get('id')} to API Executor")
-            return await ApiExecutorService.execute(
-                db=db, flow_data=flow_data, user_id=user_id, project=project_id,
-                env_id=env_id, schedule_id=schedule_id, company_id=company_id,
-                flow_session=flow_session, loop=loop, batch_id=batch_id,
-                global_vars=global_vars
+            s, f = await asyncio.to_thread(
+                ApiExecutorService.execute,
+                db=db, flow_meta=flow_data, product_id=project_id,
+                env_id=env_id, company_id=company_id or 1,
+                variables_dict=global_vars or {}, schedule_id=schedule_id,
+                user_id=user_id, capture_video=capture_video,
+                capture_screenshot=capture_screenshot, flow_type='api'
             )
+            return {"success_count": s, "fail_count": f}

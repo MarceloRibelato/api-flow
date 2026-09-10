@@ -37,9 +37,6 @@ def generate_unique_mock_slug(db: Session, base_text: str) -> str:
 def list_project_mocks(project_id: int, db: Session = Depends(get_db)):
     """Lista todos os servidores mock de um determinado projeto."""
     mocks = db.query(ServiceMockDB).filter(ServiceMockDB.product_id == project_id).all()
-    if not mocks:
-        # Se não houver mocks para este project_id específico, retornar todos os mocks cadastrados no sistema como fallback
-        mocks = db.query(ServiceMockDB).all()
     result = []
     for m in mocks:
         result.append({

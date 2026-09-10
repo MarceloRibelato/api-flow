@@ -29,6 +29,121 @@ def get_db():
     finally:
         db.close()
 
+def _send_schedule_webhook_notifications(db: Session, schedule, success_count: int, fail_count: int):
+    """Sends webhook notifications (Slack, Teams, generic) for scheduled execution."""
+    if not schedule:
+        return
+    try:
+        target_urls = schedule.notification_urls
+
+        if not target_urls:
+            try:
+                from app.models.product_models import ProductModel
+                from app.models.feature_models import FeatureModel
+
+                product_id_for_url = None
+
+                if schedule.type == 'suite':
+                    product_id_for_url = schedule.target_id
+                elif schedule.type == 'feature':
+                    feat = db.query(FeatureModel).filter(FeatureModel.id == schedule.target_id).first()
+                    if feat:
+                        product_id_for_url = feat.product_id
+                elif schedule.type == 'flow':
+                    from app.models.flow_models import FlowDB
+                    flow_obj = db.query(FlowDB).filter(FlowDB.id == schedule.target_id).first()
+                    if flow_obj:
+                        feat = db.query(FeatureModel).filter(FeatureModel.id == flow_obj.project_id).first()
+                        if feat:
+                            product_id_for_url = feat.product_id
+
+                if product_id_for_url:
+                    prod = db.query(ProductModel).filter(ProductModel.id == product_id_for_url).first()
+                    if prod and prod.notification_urls:
+                        target_urls = prod.notification_urls
+                        logger.info(f"Using Product-level webhook for Schedule {schedule.id}")
+
+            except Exception as e:
+                logger.error(f"Error fetching product webhook: {e}")
+
+        if target_urls:
+            if hasattr(schedule, 'notifications_enabled') and schedule.notifications_enabled is False:
+                logger.info(f"Skipping webhook notification for Schedule {schedule.id} (notifications disabled)")
+            else:
+                logger.info(f"Target URLs for webhook: {target_urls}")
+                try:
+                    urls = [u.strip() for u in target_urls.split(',') if u.strip()]
+                    exec_time_dt = schedule.last_run if schedule.last_run else datetime.now(timezone.utc)
+                    if exec_time_dt.tzinfo is not None:
+                        exec_time_dt = exec_time_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    br_time = (exec_time_dt - timedelta(hours=3)).strftime("%d/%m/%Y, %H:%M:%S")
+
+                    payload = {
+                        "schedule_id": schedule.id,
+                        "schedule_name": schedule.name,
+                        "type": schedule.type,
+                        "target_id": schedule.target_id,
+                        "status": schedule.last_run_status,
+                        "execution_time": br_time,
+                        "success_count": success_count,
+                        "fail_count": fail_count
+                    }
+
+                    import time
+                    import requests
+                    for url in urls:
+                        try:
+                            final_payload = payload
+                            headers = {'Content-Type': 'application/json'}
+
+                            if 'hooks.slack.com' in url:
+                                color = "#36a64f" if payload['status'] == 'success' else "#d72b3f"
+                                final_payload = {
+                                    "text": f"Execution Report: {payload['schedule_name']}",
+                                    "attachments": [
+                                        {
+                                            "color": color,
+                                            "fields": [
+                                                {"title": "Status", "value": payload['status'].upper(), "short": True},
+                                                {"title": "Success", "value": str(payload['success_count']), "short": True},
+                                                {"title": "Failed", "value": str(payload['fail_count']), "short": True},
+                                                {"title": "Target", "value": f"{payload['type'].title()} #{payload['target_id']}", "short": True}
+                                            ],
+                                            "footer": "API Flow Scheduler",
+                                            "ts": int(time.time())
+                                        }
+                                    ]
+                                }
+                            elif 'webhook.office.com' in url or 'outlook.office.com' in url:
+                                theme_color = "00FF00" if payload['status'] == 'success' else "FF0000"
+                                final_payload = {
+                                    "@type": "MessageCard",
+                                    "@context": "http://schema.org/extensions",
+                                    "themeColor": theme_color,
+                                    "summary": f"Execution: {payload['schedule_name']}",
+                                    "sections": [{
+                                        "activityTitle": f"📢 Execution Completed: {payload['schedule_name']}",
+                                        "activitySubtitle": f"Status: {payload['status'].upper()}",
+                                        "facts": [
+                                            {"name": "Success", "value": str(payload['success_count'])},
+                                            {"name": "Failed", "value": str(payload['fail_count'])},
+                                            {"name": "Time", "value": payload['execution_time']}
+                                        ],
+                                        "markdown": True
+                                    }]
+                                }
+
+                            wh_resp = requests.post(url, json=final_payload, headers=headers, timeout=5)
+                            logger.info(f"Webhook response: {wh_resp.status_code}")
+                        except Exception as wh_err:
+                            logger.error(f"Failed to send webhook to {url}: {wh_err}")
+
+                except Exception as notify_err:
+                    logger.error(f"Error processing webhooks: {notify_err}")
+    except Exception as notify_outer_err:
+        logger.error(f"Outer error in notifications dispatch: {notify_outer_err}")
+
+
 def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
     """
     Original callback function now executed by Celery worker.
@@ -39,7 +154,7 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
     success_count = 0
     fail_count = 0
     schedule = None
-    
+    session = None
     try:
         schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
         if not schedule:
@@ -335,139 +450,19 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
 
     finally:
         # Close the session to free resources
-        if 'session' in locals():
+        if session:
             try:
                 session.close()
-            except:
+            except Exception:
                 pass
 
-    # --- 4. Send Webhook Notification ---
-    # Logic: Use Schedule URL > Fallback to Product URL
-    if schedule:
-        try:
-            target_urls = schedule.notification_urls
-            
-            if not target_urls:
-                # Fallback logic based on type
-                try:
-                    from app.models.product_models import ProductModel
-                    from app.models.feature_models import FeatureModel
-                    
-                    product_id_for_url = None
-                    
-                    if schedule.type == 'suite':
-                        product_id_for_url = schedule.target_id
-                    elif schedule.type == 'feature':
-                        # Need to get product_id from feature
-                        feat = db.query(FeatureModel).filter(FeatureModel.id == schedule.target_id).first()
-                        if feat:
-                            product_id_for_url = feat.product_id
-                    elif schedule.type == 'flow':
-                        # Need to get product_id from flow -> feature -> product
-                        from app.models.flow_models import FlowDB
-                        flow_obj = db.query(FlowDB).filter(FlowDB.id == schedule.target_id).first()
-                        if flow_obj:
-                             feat = db.query(FeatureModel).filter(FeatureModel.id == flow_obj.project_id).first()
-                             if feat:
-                                product_id_for_url = feat.product_id
-                    
-                    if product_id_for_url:
-                        prod = db.query(ProductModel).filter(ProductModel.id == product_id_for_url).first()
-                        if prod and prod.notification_urls:
-                            target_urls = prod.notification_urls
-                            logger.info(f"Using Product-level webhook for Schedule {schedule.id}")
+        if schedule:
+            try:
+                _send_schedule_webhook_notifications(db, schedule, success_count, fail_count)
+            except Exception as notify_e:
+                logger.error(f"Error in scheduler webhook notifications: {notify_e}")
 
-                except Exception as e:
-                    logger.error(f"Error fetching product webhook: {e}")
-
-            if target_urls:
-                # CHECK NOTIFICATION TOGGLE
-                if hasattr(schedule, 'notifications_enabled') and schedule.notifications_enabled is False:
-                     logger.info(f"Skipping webhook notification for Schedule {schedule.id} (notifications disabled)")
-                else:
-                    logger.info(f"Target URLs for webhook: {target_urls}")
-                    try:
-                        # Helper function defined inline or use a service method if reusable
-                        # Using simple requests here for immediate execution
-                        urls = [u.strip() for u in target_urls.split(',') if u.strip()]
-                        logger.info(f"Parsed URLs: {urls}")
-                        
-                        # Use UTC-3 for execution time in notifications
-                        from datetime import timedelta
-                        tz_adjust = timedelta(hours=3)
-                        exec_time_dt = schedule.last_run if schedule.last_run else datetime.now(timezone.utc)
-                        br_time = (exec_time_dt - tz_adjust).strftime("%d/%m/%Y, %H:%M:%S")
-
-                        payload = {
-                            "schedule_id": schedule.id,
-                            "schedule_name": schedule.name,
-                            "type": schedule.type,
-                            "target_id": schedule.target_id,
-                            "status": schedule.last_run_status,
-                            "execution_time": br_time,
-                            "success_count": success_count,
-                            "fail_count": fail_count
-                        }
-                    
-                        for url in urls:
-                            logger.info(f"Sending webhook to: {url}")
-                            
-                            try:
-                                final_payload = payload
-                                headers = {'Content-Type': 'application/json'}
-
-                                # --- SLACK FORMATTING ---
-                                if 'hooks.slack.com' in url:
-                                    color = "#36a64f" if payload['status'] == 'success' else "#d72b3f"
-                                    final_payload = {
-                                        "text": f"Execution Report: {payload['schedule_name']}",
-                                        "attachments": [
-                                            {
-                                                "color": color,
-                                                "fields": [
-                                                    {"title": "Status", "value": payload['status'].upper(), "short": True},
-                                                    {"title": "Success", "value": str(payload['success_count']), "short": True},
-                                                    {"title": "Failed", "value": str(payload['fail_count']), "short": True},
-                                                    {"title": "Target", "value": f"{payload['type'].title()} #{payload['target_id']}", "short": True}
-                                                ],
-                                                "footer": "API Flow Scheduler",
-                                                "ts": int(time.time())
-                                            }
-                                        ]
-                                    }
-                                
-                                # --- TEAMS FORMATTING (Adaptive Card or MessageCard) ---
-                                elif 'webhook.office.com' in url or 'outlook.office.com' in url:
-                                    theme_color = "00FF00" if payload['status'] == 'success' else "FF0000"
-                                    final_payload = {
-                                        "@type": "MessageCard",
-                                        "@context": "http://schema.org/extensions",
-                                        "themeColor": theme_color,
-                                        "summary": f"Execution: {payload['schedule_name']}",
-                                        "sections": [{
-                                            "activityTitle": f"📢 Execution Completed: {payload['schedule_name']}",
-                                            "activitySubtitle": f"Status: {payload['status'].upper()}",
-                                            "facts": [
-                                            {"name": "Success", "value": str(payload['success_count'])},
-                                            {"name": "Failed", "value": str(payload['fail_count'])},
-                                            {"name": "Time", "value": payload['execution_time']}
-                                        ],
-                                        "markdown": True
-                                    }]
-                                }
-
-                                import requests
-                                wh_resp = requests.post(url, json=final_payload, headers=headers, timeout=5)
-                                logger.info(f"Webhook response: {wh_resp.status_code}")
-                            except Exception as wh_err:
-                                logger.error(f"Failed to send webhook to {url}: {wh_err}")
-
-                    except Exception as notify_err:
-                        logger.error(f"Error processing webhooks: {notify_err}")
-        except Exception as notify_outer_err:
-            logger.error(f"Outer error in notifications dispatch: {notify_outer_err}")
-        finally:
-            db.close()
+        db.close()
 
 def execute_job(schedule_id: int):
     """
@@ -554,16 +549,24 @@ class SchedulerService:
 
 def purge_history_job():
     """
-    Tiered maintenance task: 
-    1. Archive records older than HISTORY_RETENTION_DAYS (per company config or default)
-    2. Purge archived records older than HISTORY_ARCHIVE_RETENTION_DAYS
+    Unified Data Retention maintenance task:
+    1. Permanently delete execution records older than retention_days (default 360 days)
+    2. Permanently delete performance test results older than retention_days
+    3. Cleanup video recordings older than retention_days
+    4. Trigger pg_partman maintenance on PostgreSQL if available
     """
     from app.services.history_service import HistoryService
     from app.config import settings
     from app.database import SessionLocal
     from app.models.company_models import CompanyDB
-    from app.models.api_test_history_models import ApiExecutionHistory
+    from app.models.api_test_history_models import (
+        ApiExecutionHistory,
+        WebExecutionHistory,
+        MobileExecutionHistory
+    )
+    from app.models.performance_models import PerformanceTestResult
     from app.models.user_models import UserDB
+    from sqlalchemy import text
     import os
     import shutil
     
@@ -573,35 +576,49 @@ def purge_history_job():
         BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         VIDEO_ROOT = os.path.join(BASE_DIR, "data", "videos")
         
+        default_days = getattr(settings, "DEFAULT_RETENTION_DAYS", 360)
+        
         for company in companies:
-            retain_days = company.history_retention_days or settings.HISTORY_RETENTION_DAYS
-            archive_retain_days = company.history_archive_retention_days or settings.HISTORY_ARCHIVE_RETENTION_DAYS
-            
-            logger.info(f"🏢 Company {company.id}: Archiving (Threshold: {retain_days} days)")
-            
-            # Find unique batch IDs that will be archived for this company
+            retain_days = company.retention_days or company.history_retention_days or default_days
             threshold = datetime.now(timezone.utc) - timedelta(days=retain_days)
-            archived_batches = db.query(ApiExecutionHistory.batch_id).join(UserDB, ApiExecutionHistory.user_id == UserDB.id).filter(
-                ApiExecutionHistory.created_at < threshold,
-                UserDB.company_id == company.id
-            ).distinct().all()
             
-            archived_count = HistoryService.archive_old_records(db, retain_days, company.id)
-            logger.info(f"✅ Company {company.id}: Archived {archived_count} records.")
+            logger.info(f"🏢 Company {company.id}: Data Retention Cleanup (Threshold: {retain_days} days)")
             
-            # 🔗 Cleanup Files associated with Archived Batches
-            if archived_count > 0:
-                for (batch_id,) in archived_batches:
+            # Find unique batch IDs that will be purged for this company across Web/Mobile/Api
+            for ModelClass in (WebExecutionHistory, MobileExecutionHistory, ApiExecutionHistory):
+                expired_batches = db.query(ModelClass.batch_id).join(UserDB, ModelClass.user_id == UserDB.id).filter(
+                    ModelClass.created_at < threshold,
+                    UserDB.company_id == company.id
+                ).distinct().all()
+                
+                for (batch_id,) in expired_batches:
                     if batch_id:
                         batch_path = os.path.join(VIDEO_ROOT, batch_id)
                         if os.path.exists(batch_path):
-                            logger.info(f"🧹 Deleting archived recording: {batch_path}")
+                            logger.info(f"🧹 Deleting expired recording: {batch_path}")
                             shutil.rmtree(batch_path, ignore_errors=True)
-                            
-            # Tier 2: Purge
-            logger.info(f"🧹 Company {company.id}: Starting archive purge (Threshold: {archive_retain_days} days)")
-            purged_count = HistoryService.purge_archived_records(db, archive_retain_days, company.id)
-            logger.info(f"✨ Company {company.id}: Purge complete. Removed {purged_count} archived records.")
+            
+            # Permanent delete executions
+            deleted_count = HistoryService.permanent_delete_old_records(db, retain_days, company.id)
+            logger.info(f"✅ Company {company.id}: Permanently deleted {deleted_count} execution records.")
+            
+            # Permanent delete performance test results
+            perf_deleted = db.query(PerformanceTestResult).filter(
+                PerformanceTestResult.company_id == company.id,
+                PerformanceTestResult.started_at < threshold
+            ).delete(synchronize_session=False)
+            db.commit()
+            if perf_deleted:
+                logger.info(f"📊 Company {company.id}: Deleted {perf_deleted} performance results.")
+                
+        # Trigger pg_partman maintenance on PostgreSQL if extension exists
+        try:
+            if db.bind and "postgresql" in str(db.bind.dialect.name):
+                db.execute(text("SELECT partman.run_maintenance();"))
+                db.commit()
+                logger.info("🔧 pg_partman run_maintenance executed.")
+        except Exception as pe:
+            logger.debug(f"pg_partman maintenance note: {pe}")
             
     except Exception as e:
         logger.error(f"❌ Failed to run history maintenance: {e}")

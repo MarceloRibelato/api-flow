@@ -67,7 +67,7 @@ def test_get_merged_variables(mock_get_envs, mock_get_vars, db_session):
     result = FlowExecutorService.get_merged_variables(db_session, 1, 10)
     assert "GLOBAL" in result
     assert "ENV" in result
-    assert result["GLOBAL"].value == "1"
+    assert result["GLOBAL"]["value"] == "1"
 
 @patch("app.services.feature_service.FeatureService.get_by_id")
 @patch("app.services.flow_service.FlowService.list_by_project")

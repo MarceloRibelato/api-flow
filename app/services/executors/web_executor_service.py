@@ -705,7 +705,7 @@ class WebExecutorService:
                                             response_body="", 
                                             response_time=req['duration_ms'],
                                             environment_id=env_id,
-                                            error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
+                                            error_message=req.get('error') or (f"HTTP Error {req['status']}" if (req['status'] >= 400 or req['status'] == 0) else None),
                                             assertions=None,
                                             execution_type=actual_exec_type
                                         )
@@ -713,7 +713,7 @@ class WebExecutorService:
                                         
                                         # Visually count intercepted requests for suite metrics (optional, avoids '0 steps' visual bug)
                                         with execution_lock:
-                                            if req['status'] >= 400:
+                                            if req['status'] >= 400 or req['status'] == 0:
                                                 flow_fail_count += 1
                                                 # We no longer set path_success = False here for background requests
                                                 # This prevents silent aborts when analytics/favicons fail in E2E tests
@@ -767,32 +767,35 @@ class WebExecutorService:
                             await asyncio.sleep(1)
                             
                             # Catch lingering API calls right before we tear down the browser
-                            final_intercepted = e2e_executor.pop_captured_requests()
-                            if final_intercepted:
-                                final_buffer = []
-                                for req in final_intercepted:
-                                    bg_hist = ExecutionHistoryCreate(
-                                        batch_id=batch_id,
-                                        api_id=None,
-                                        api_name=f"{req['method']} {(req['url'][:40] + '...') if len(req['url']) > 40 else req['url']}",
-                                        project_id=product_id,
-                                        flow_id=flow_meta['id'],
-                                        node_id=None,
-                                        schedule_id=schedule_id,
-                                        feature_name=feature_name,
-                                        node_name="Finalização (Background)",
-                                        method=req['method'],
-                                        url=req['url'],
-                                        status_code=req['status'],
-                                        response_body="", 
-                                        response_time=req['duration_ms'],
-                                        environment_id=env_id,
-                                        error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
-                                        assertions=None,
-                                        execution_type=actual_exec_type
-                                    )
-                                    final_buffer.append(bg_hist)
-                                HistoryService.save_batch(db, final_buffer, user_id)
+                            try:
+                                final_intercepted = e2e_executor.pop_captured_requests()
+                                if final_intercepted:
+                                    final_buffer = []
+                                    for req in final_intercepted:
+                                        bg_hist = ExecutionHistoryCreate(
+                                            batch_id=batch_id,
+                                            api_id=None,
+                                            api_name=f"{req['method']} {(req['url'][:40] + '...') if len(req['url']) > 40 else req['url']}",
+                                            project_id=product_id,
+                                            flow_id=flow_meta['id'],
+                                            node_id=None,
+                                            schedule_id=schedule_id,
+                                            feature_name=feature_name,
+                                            node_name="Finalização (Background)",
+                                            method=req['method'],
+                                            url=req['url'],
+                                            status_code=req['status'],
+                                            response_body="", 
+                                            response_time=req['duration_ms'],
+                                            environment_id=env_id,
+                                            error_message=req.get('error') or (f"HTTP Error {req['status']}" if (req['status'] >= 400 or req['status'] == 0) else None),
+                                            assertions=None,
+                                            execution_type=actual_exec_type
+                                        )
+                                        final_buffer.append(bg_hist)
+                                    HistoryService.save_batch(db, final_buffer, user_id)
+                            except Exception as hist_err:
+                                logger.warning(f"Failed to record background API history: {hist_err}")
                                 
                             trace_path = f"{video_dir}/trace_{path_index+1}.zip" if capture_video else None
                             await e2e_executor.stop(trace_path=trace_path)
@@ -811,6 +814,15 @@ class WebExecutorService:
                                     HistoryService.update_video_url_by_batch(db, batch_id, video_url)
                         except Exception as ve:
                             logger.warning(f"Video finalize failed for path: {ve}")
+                        finally:
+                            # 🛡️ Failsafe: Guarantee e2e_executor is completely stopped even on unexpected exception
+                            if e2e_executor:
+                                try:
+                                    if getattr(e2e_executor, '_browser', None) or getattr(e2e_executor, '_context', None):
+                                        await e2e_executor.stop()
+                                except Exception as fail_stop_ex:
+                                    logger.warning(f"Failsafe stop failed for path {path_index+1}: {fail_stop_ex}")
+                                e2e_executor = None
 
             # asyncio.run() is thread-safe in Python 3.7+ and creates its own
             # isolated event loop per call — safe to call from multiple threads.

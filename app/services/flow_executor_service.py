@@ -63,11 +63,10 @@ class FlowExecutorService:
         global_timeout_ms = None
         global_retry_actions = None
         global_retry_test = 0
-        current_session_retry_count = 0
+        eff_ft = flow_type or 'api'
+        schedule = None
         if schedule_id:
             from app.models.schedule_models import ScheduleModel
-            from app.models.api_test_history_models import ApiExecutionHistory
-            from sqlalchemy import func
             schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
             if schedule:
                 if schedule.duration_seconds:
@@ -76,15 +75,36 @@ class FlowExecutorService:
                     global_retry_actions = schedule.virtual_users
                 if schedule.ramp_up_seconds is not None:
                     global_retry_test = schedule.ramp_up_seconds
+                eff_ft = getattr(schedule, 'flow_type', None) or eff_ft
 
-            max_retry = db.query(func.max(ApiExecutionHistory.retry_count)).filter(ApiExecutionHistory.schedule_id == schedule_id).scalar()
-            hist_count = db.query(func.count(ApiExecutionHistory.id)).filter(ApiExecutionHistory.schedule_id == schedule_id).scalar()
+        from app.models.api_test_history_models import ApiExecutionHistory, WebExecutionHistory, MobileExecutionHistory
+        if eff_ft == 'mobile':
+            HistoryModel = MobileExecutionHistory
+        elif eff_ft in ['e2e', 'web']:
+            HistoryModel = WebExecutionHistory
+        else:
+            HistoryModel = ApiExecutionHistory
+
+        current_session_retry_count = 0
+        if schedule_id:
+            from sqlalchemy import func
+            max_retry = db.query(func.max(HistoryModel.retry_count)).filter(HistoryModel.schedule_id == schedule_id).scalar()
+            hist_count = db.query(func.count(HistoryModel.id)).filter(HistoryModel.schedule_id == schedule_id).scalar()
             if hist_count and hist_count > 0:
                 current_session_retry_count = (max_retry or 0) + 1
+        if current_session_retry_count == 0 and failed_item_ids:
+            clean_ids = [int(x) for x in failed_item_ids if str(x).isdigit()]
+            if clean_ids:
+                from sqlalchemy import func
+                for HM in (MobileExecutionHistory, WebExecutionHistory, ApiExecutionHistory):
+                    max_r = db.query(func.max(HM.retry_count)).filter(HM.id.in_(clean_ids)).scalar()
+                    if max_r is not None:
+                        current_session_retry_count = (max_r or 0) + 1
+                        break
 
         existing_batch_id = None
         if schedule_id:
-            first_hist = db.query(ApiExecutionHistory.batch_id).filter(ApiExecutionHistory.schedule_id == schedule_id).order_by(ApiExecutionHistory.id.desc()).first()
+            first_hist = db.query(HistoryModel.batch_id).filter(HistoryModel.schedule_id == schedule_id).order_by(HistoryModel.id.desc()).first()
             if first_hist and first_hist[0]:
                 existing_batch_id = first_hist[0]
         elif failed_item_ids:
@@ -95,12 +115,14 @@ class FlowExecutorService:
                 except (ValueError, TypeError):
                     pass
             if clean_ids:
-                first_hist = db.query(ApiExecutionHistory.batch_id).filter(ApiExecutionHistory.id.in_(clean_ids)).first()
-                if first_hist and first_hist[0]:
-                    existing_batch_id = first_hist[0]
+                first_hist = None
+                for HM in (MobileExecutionHistory, WebExecutionHistory, ApiExecutionHistory):
+                    first_hist = db.query(HM.batch_id).filter(HM.id.in_(clean_ids)).first()
+                    if first_hist and first_hist[0]:
+                        existing_batch_id = first_hist[0]
+                        break
 
         if existing_batch_id:
-            import re
             base_prefix = re.sub(r'(_path|_retry).*$', '', existing_batch_id)
             base_batch_id = base_prefix
         else:
@@ -199,15 +221,20 @@ class FlowExecutorService:
                 clean_failed_item_ids = []
                 for item in failed_item_ids:
                     item_str = str(item).strip()
-                    if item_str:
-                        failed_node_ids.add(item_str)
                     try:
                         clean_failed_item_ids.append(int(item))
                     except (ValueError, TypeError):
-                        pass
+                        if item_str:
+                            failed_node_ids.add(item_str)
 
                 if clean_failed_item_ids:
-                    failed_recs = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.id.in_(clean_failed_item_ids)).all()
+                    failed_recs = db.query(HistoryModel).filter(HistoryModel.id.in_(clean_failed_item_ids)).all()
+                    if not failed_recs:
+                        for HM in (MobileExecutionHistory, WebExecutionHistory, ApiExecutionHistory):
+                            if HM != HistoryModel:
+                                failed_recs = db.query(HM).filter(HM.id.in_(clean_failed_item_ids)).all()
+                                if failed_recs:
+                                    break
                     
                     target_recs = []
                     f_id = flow_data.get('id') or flow_data.get('flow_id') or flow_meta.get('id') or flow_meta.get('flow_id')
@@ -220,10 +247,11 @@ class FlowExecutorService:
                         elif not fr.flow_id and not fr.project_id:
                             target_recs.append(fr)
 
-                    if not target_recs:
-                        target_recs = failed_recs
+                    # If failed_recs exist in DB but none belong to this flow, skip this flow during retry
+                    if failed_recs and not target_recs:
+                        logger.info(f"⏭️ Skipping Flow {f_id} (Project {p_id}) during retry: none of the failed items belong to this flow.")
+                        return 0, 0
 
-                    import re
                     for fr in target_recs:
                         if fr.node_id:
                             failed_node_ids.add(str(fr.node_id))
@@ -243,32 +271,29 @@ class FlowExecutorService:
 
             selected_path_entries = path_entries
             if failed_path_numbers:
+                # Ground-truth path filtering: isolate only the scenario paths where failures actually occurred
                 filtered_entries = [pe for pe in path_entries if pe[0] in failed_path_numbers]
                 if filtered_entries:
-                    logger.info(f"🎯 [RETRY FILTER] Isolating exact failed path numbers {failed_path_numbers}: {len(filtered_entries)} of {len(path_entries)} path(s) selected.")
                     selected_path_entries = filtered_entries
-            elif failed_node_ids:
-                leaf_matched = [
-                    pe for pe in path_entries
-                    if str(pe[1][-1]) in failed_node_ids or (cards and cards.get(str(pe[1][-1]), {}).get('name') in failed_node_ids)
-                ]
-                if leaf_matched:
-                    selected_path_entries = leaf_matched
-                    logger.info(f"🎯 [RETRY FILTER] Isolating scenario paths ending in failed node(s) {failed_node_ids}: {len(selected_path_entries)} of {len(path_entries)} path(s) selected.")
+                    logger.info(f"🎯 [RETRY FILTER] Isolating scenario paths by failed path numbers: {len(selected_path_entries)} of {len(path_entries)} path(s) selected (paths: {[pe[0] for pe in selected_path_entries]}).")
                 else:
-                    filtered_entries = [
-                        pe for pe in path_entries 
-                        if any(
-                            str(nid) in failed_node_ids 
-                            or (cards and cards.get(str(nid), {}).get('name') in failed_node_ids) 
-                            for nid in pe[1]
-                        )
-                    ]
-                    if filtered_entries:
-                        selected_path_entries = filtered_entries
-                        logger.info(f"🎯 [RETRY FILTER] Isolating scenario paths containing failed node(s) {failed_node_ids}: {len(selected_path_entries)} of {len(path_entries)} path(s) selected.")
-                    else:
-                        logger.info(f"⚠️ [RETRY FILTER] Could not match failed node(s) {failed_node_ids} to path nodes; executing all paths.")
+                    logger.info(f"⚠️ [RETRY FILTER] Path numbers {failed_path_numbers} not found in path entries; executing all paths.")
+            elif failed_node_ids:
+                # Fallback path filtering by node IDs when path numbers are unavailable (e.g. canvas retry)
+                filtered_entries = [
+                    pe for pe in path_entries 
+                    if any(
+                        str(nid) in failed_node_ids 
+                        or (cards and cards.get(str(nid), {}).get('name') in failed_node_ids) 
+                        for nid in pe[1]
+                    )
+                ]
+                if filtered_entries:
+                    selected_path_entries = filtered_entries
+                    logger.info(f"🎯 [RETRY FILTER] Isolating scenario paths by failed node IDs: {len(selected_path_entries)} of {len(path_entries)} path(s) selected (paths: {[pe[0] for pe in selected_path_entries]}).")
+                else:
+                    logger.info(f"⚠️ [RETRY FILTER] No nodes in Flow matched failed node IDs {failed_node_ids}; skipping execution.")
+                    return 0, 0
 
             logger.info(f"   Found {len(selected_path_entries)} unique path(s) to execute out of {len(path_entries)} total.")
             async def run_paths():
@@ -279,27 +304,47 @@ class FlowExecutorService:
                     
                     # Each path is a separate logical execution batch, preserving original path_number
                     batch_id = f"{base_batch_id}_path_{path_number}"
-                    video_dir = f"/app/data/videos/{batch_id}"
+                    base_video_dir = "/app/data/videos" if os.path.exists("/app") else os.path.abspath("data/videos")
+                    video_dir = os.path.join(base_video_dir, batch_id)
                     os.makedirs(video_dir, exist_ok=True)
                     
                     # Reset states fully for each scenario path
                     current_path_vars = copy.deepcopy(base_variables_dict)
                     flow_session = requests.Session()
                     flow_session.trust_env = False
+                    try:
+                        from requests.adapters import HTTPAdapter
+                        http_adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+                        flow_session.mount('http://', http_adapter)
+                        flow_session.mount('https://', http_adapter)
+                    except Exception as pool_err:
+                        logger.warning(f"Could not configure HTTPAdapter pool on flow_session: {pool_err}")
                     
-                    # Reset e2e executor inside if used
-                    e2e_executor = None
+                    # For mobile execution, keep Appium driver session alive across scenario paths
+                    # and cleanly restart the app to initial state. For web/API, reset executor.
+                    if effective_flow_type == 'mobile':
+                        if e2e_executor:
+                            logger.info(f"📱 [Mobile] Reusing Appium session for Scenario Path {path_number}. Restarting app...")
+                            await e2e_executor.restart()
+                            if capture_video:
+                                await e2e_executor.start_screen_recording(video_dir)
+                    else:
+                        e2e_executor = None
 
                     path_success = True
 
                     longest_prefix_len = 0
                     cached_state = None
-                    for i in range(len(path_nodes), 0, -1):
-                        prefix = tuple(path_nodes[:i])
-                        if prefix in path_cache:
-                            longest_prefix_len = i
-                            cached_state = path_cache[prefix]
-                            break
+                    # Never skip prefix nodes during retry runs or in mobile/e2e/web executions.
+                    # Each scenario path must execute completely from the beginning (node 0) to the end.
+                    is_retry_run = bool(failed_item_ids) or current_session_retry_count > 0
+                    if not is_retry_run and effective_flow_type not in ['mobile', 'e2e', 'web']:
+                        for i in range(len(path_nodes), 0, -1):
+                            prefix = tuple(path_nodes[:i])
+                            if prefix in path_cache:
+                                longest_prefix_len = i
+                                cached_state = path_cache[prefix]
+                                break
                     
                     if cached_state:
                         logger.info(f"⏭️ [CACHE HIT] Puling {longest_prefix_len} nodes! Injecting saved state from prefix {prefix}")
@@ -513,11 +558,11 @@ class FlowExecutorService:
                                             
                                             step_data = resolved_step_data
                                             
-                                            # Inject timeout and retries dynamically from Schedule Config (if present)
+                                            # Inject timeout dynamically from Schedule Config (if present)
                                             if global_timeout_ms is not None:
                                                 step_data.setdefault('properties', {})['timeout'] = global_timeout_ms
-                                            if global_retry_actions is not None:
-                                                step_data.setdefault('properties', {})['retries'] = global_retry_actions
+                                            # No step-level retries: steps execute once and fail directly without looping
+                                            step_data.setdefault('properties', {})['retries'] = 0
                                             if global_retry_test is not None:
                                                 step_data.setdefault('properties', {})['ramp_up'] = global_retry_test
 
@@ -567,9 +612,9 @@ class FlowExecutorService:
                                                 resp_reason = "E2E Driver Error"
                                                 resp_text = str(e)
                                         else:
-                                            # Inject global config (retries/timeout) dynamically from Schedule Config for API steps
-                                            if global_retry_actions is not None:
-                                                step_data['retries'] = global_retry_actions
+                                            # Inject global config (timeout) dynamically from Schedule Config for API steps
+                                            # No step-level retries: steps execute once and fail directly without looping
+                                            step_data['retries'] = 0
                                             if global_timeout_ms is not None:
                                                 step_data['timeout'] = global_timeout_ms
 
@@ -702,9 +747,17 @@ class FlowExecutorService:
                                                         start_time = time.time()
                                                         api_timeout = float(step_data.get('timeout', 30000)) / 1000.0
                                                         
+                                                        verify_ssl = step_data.get('verifySSL', step_data.get('verify_ssl', True))
+                                                        if isinstance(verify_ssl, str):
+                                                            verify_ssl = verify_ssl.lower() not in ('false', '0', 'no')
+
                                                         loop = asyncio.get_event_loop()
                                                         import functools
-                                                        request_func = functools.partial(flow_session.request, method, url, headers=headers, data=body, params=params, timeout=api_timeout)
+                                                        request_func = functools.partial(
+                                                            flow_session.request, method, url,
+                                                            headers=headers, data=body, params=params,
+                                                            timeout=api_timeout, verify=verify_ssl
+                                                        )
                                                         resp = await loop.run_in_executor(None, request_func)
                                                         
                                                         duration = int((time.time() - start_time) * 1000)
@@ -784,33 +837,38 @@ class FlowExecutorService:
                                 if attempt > 0:
                                     base_api_name += f":::RETRIES:::{attempt}"
 
-                                hist = ExecutionHistoryCreate(
-                                    batch_id=batch_id,
-                                    api_id=str(step_data.get('id')),
-                                    api_name=base_api_name,
-                                    project_id=p_id, # Use Feature ID, not Product ID
-                                    flow_id=flow_meta['id'],
-                                    node_id=current_id,
-                                    schedule_id=schedule_id,
-                                    feature_name=feature_name,
-                                    node_name=card.get('name'),
-                                    method=method,
-                                    url=url,
-                                    request_headers=headers,
-                                    request_body=body,
-                                    status_code=resp_status,
-                                    response_body=resp_text,
-                                    response_time=duration,
-                                    environment_id=env_id,
-                                    error_message=final_error_message,
-                                    assertions=assertion_results,
-                                    healed_selector=healed_selector,
-                                    execution_type=actual_exec_type,
-                                    retry_count=(current_session_retry_count + (attempt if attempt else 0)) if (not failed_node_ids or is_target_failed) else 0
-                                )
-                                
-                                # The main action step (e.g., Click, Type) is appended FIRST
-                                history_buffer.append(hist)
+                                try:
+                                    resolved_retry = current_session_retry_count
+                                    hist = ExecutionHistoryCreate(
+                                        batch_id=batch_id,
+                                        api_id=str(step_data.get('id')),
+                                        api_name=base_api_name,
+                                        project_id=p_id or product_id, # Use Feature ID, fallback to Product ID
+                                        flow_id=flow_meta['id'],
+                                        node_id=current_id,
+                                        schedule_id=schedule_id,
+                                        feature_name=feature_name,
+                                        node_name=card.get('name'),
+                                        method=method,
+                                        url=url,
+                                        request_headers=headers,
+                                        request_body=body,
+                                        status_code=resp_status,
+                                        response_body=resp_text,
+                                        response_time=duration,
+                                        environment_id=env_id,
+                                        error_message=final_error_message,
+                                        assertions=assertion_results,
+                                        healed_selector=healed_selector,
+                                        execution_type=actual_exec_type,
+                                        retry_count=resolved_retry
+                                    )
+                                    
+                                    # The main action step (e.g., Click, Type) is appended FIRST
+                                    with execution_lock:
+                                        history_buffer.append(hist)
+                                except Exception as hist_create_err:
+                                    logger.error(f"Error creating ExecutionHistoryCreate for step: {hist_create_err}")
                                 
                                 # Fetch any background HTTP requests intercepted by the browser during this step
                                 # We append them AFTER the main step so the sequence makes sense (Action -> Resulting Requests)
@@ -827,7 +885,7 @@ class FlowExecutorService:
                                             batch_id=batch_id,
                                             api_id=None,
                                             api_name=f"{req['method']} {(req['url'][:40] + '...') if len(req['url']) > 40 else req['url']}",
-                                            project_id=product_id,
+                                            project_id=p_id or product_id,
                                             flow_id=flow_meta['id'],
                                             node_id=current_id,
                                             schedule_id=schedule_id,
@@ -842,9 +900,10 @@ class FlowExecutorService:
                                             error_message=f"HTTP Error {req['status']}" if req['status'] >= 400 else None,
                                             assertions=None,
                                             execution_type=actual_exec_type,
-                                            retry_count=current_session_retry_count if (not failed_node_ids or is_target_failed) else 0
+                                            retry_count=current_session_retry_count
                                         )
-                                        history_buffer.append(bg_hist)
+                                        with execution_lock:
+                                            history_buffer.append(bg_hist)
                                         
                                         # Visually count intercepted requests for suite metrics (optional, avoids '0 steps' visual bug)
                                         with execution_lock:
@@ -898,7 +957,7 @@ class FlowExecutorService:
                     # Finalize Video Recording PER PATH
                     if e2e_executor:
                         try:
-                            logger.info(f"⏳ Waiting 1s for video to capture final state (Scenario {path_index+1})...")
+                            logger.info(f"⏳ Waiting 1s for video to capture final state (Scenario {path_number})...")
                             await asyncio.sleep(1)
                             
                             # Catch lingering API calls right before we tear down the browser
@@ -910,7 +969,7 @@ class FlowExecutorService:
                                         batch_id=batch_id,
                                         api_id=None,
                                         api_name=f"{req['method']} {(req['url'][:40] + '...') if len(req['url']) > 40 else req['url']}",
-                                        project_id=product_id,
+                                        project_id=p_id or product_id,
                                         flow_id=flow_meta['id'],
                                         node_id=None,
                                         schedule_id=schedule_id,
@@ -930,8 +989,12 @@ class FlowExecutorService:
                                     final_buffer.append(bg_hist)
                                 HistoryService.save_batch(db, final_buffer, user_id)
                                 
-                            trace_path = f"{video_dir}/trace_{path_index+1}.zip" if capture_video else None
-                            await e2e_executor.stop(trace_path=trace_path)
+                            trace_path = f"{video_dir}/trace_{path_number}.zip" if capture_video else None
+                            if effective_flow_type == 'mobile':
+                                if capture_video:
+                                    await e2e_executor.stop_screen_recording()
+                            else:
+                                await e2e_executor.stop(trace_path=trace_path)
                             
                             # Pequeno delay adicional para garantir que o SO finalizou a gravação do arquivo (Playwright rename/flush)
                             await asyncio.sleep(0.5)
@@ -943,14 +1006,25 @@ class FlowExecutorService:
                                     latest_file = max(videos_files, key=os.path.getctime)
                                     video_name = os.path.basename(latest_file)
                                     video_url = f"/videos/{batch_id}/{video_name}"
-                                    logger.info(f"✅ Video Path {path_index+1} recorded successfully: {video_url}")
+                                    logger.info(f"✅ Video Path {path_number} recorded successfully: {video_url}")
                                     HistoryService.update_video_url_by_batch(db, batch_id, video_url)
                         except Exception as ve:
                             logger.warning(f"Video finalize failed for path: {ve}")
 
             # asyncio.run() is thread-safe in Python 3.7+ and creates its own
             # isolated event loop per call — safe to call from multiple threads.
-            asyncio.run(run_paths())
+            async def run_paths_wrapper():
+                try:
+                    await run_paths()
+                finally:
+                    if effective_flow_type == 'mobile' and e2e_executor:
+                        try:
+                            logger.info("📱 [Mobile] Stopping Appium session after all paths completed.")
+                            await e2e_executor.stop()
+                        except Exception as stop_err:
+                            logger.warning(f"Error stopping Appium executor: {stop_err}")
+
+            asyncio.run(run_paths_wrapper())
 
             # Update the original variables_dict with the extracted results
             variables_dict.update(final_variables)
@@ -964,6 +1038,14 @@ class FlowExecutorService:
 
         except Exception as e:
             logger.error(f"Error executing flow {flow_meta['id']}: {e}")
+            import traceback
+            traceback.print_exc()
+            if history_buffer:
+                try:
+                    HistoryService.save_batch(db, history_buffer, user_id)
+                    history_buffer.clear()
+                except Exception:
+                    pass
             db.rollback()
             return 0, 0
 

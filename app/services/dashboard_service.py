@@ -1,55 +1,62 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, case
-from app.models.api_test_history_models import ApiExecutionHistory
+from app.models.api_test_history_models import (
+    ApiExecutionHistory,
+    WebExecutionHistory,
+    MobileExecutionHistory
+)
+from app.services.history_service import HistoryService
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 import io
 import csv
 
+
 class DashboardService:
     @staticmethod
-    def _apply_filters(db: Session, query, project_id: Optional[int] = None, flow_id: Optional[int] = None, 
+    def _apply_filters(db: Session, query, ModelClass, project_id: Optional[int] = None, flow_id: Optional[int] = None, 
                        environment_id: Optional[int] = None,
                        start_date: Optional[datetime] = None, end_date: Optional[datetime] = None,
                        execution_type: Optional[str] = None,
                        search_term: Optional[str] = None,
                        status_code: Optional[str] = None,
                        last_execution_only: bool = False,
-                       trigger_origin: Optional[str] = None):
+                       trigger_origin: Optional[str] = None,
+                       company_id: Optional[int] = None):
         if project_id:
-            # Frontend passes Product ID as project_id, but ApiExecutionHistory.project_id stores Feature ID.
             from app.models.feature_models import FeatureModel
             features = db.query(FeatureModel.id).filter(FeatureModel.product_id == project_id).all()
             feature_ids = [f.id for f in features] if features else []
-            # Fallback to direct match in case some records DO store Product ID
             query = query.filter(
-                (ApiExecutionHistory.project_id.in_(feature_ids)) | 
-                (ApiExecutionHistory.project_id == project_id)
+                (ModelClass.project_id.in_(feature_ids)) | 
+                (ModelClass.project_id == project_id)
             )
             
         if flow_id:
-            # Frontend passes Feature ID as flow_id, but ApiExecutionHistory.flow_id stores Flow UUID.
-            # ApiExecutionHistory.project_id stores Feature ID.
             from app.models.flow_models import FlowDB
             flows = db.query(FlowDB.id).filter(FlowDB.project_id == flow_id).all()
             flow_ids = [str(f.id) for f in flows] if flows else []
             query = query.filter(
-                (ApiExecutionHistory.project_id == flow_id) | 
-                (ApiExecutionHistory.flow_id.in_(flow_ids)) |
-                (ApiExecutionHistory.flow_id == str(flow_id))
+                (ModelClass.project_id == flow_id) | 
+                (ModelClass.flow_id.in_(flow_ids)) |
+                (ModelClass.flow_id == str(flow_id))
             )
             
         if environment_id:
-            query = query.filter(ApiExecutionHistory.environment_id == environment_id)
+            query = query.filter(ModelClass.environment_id == environment_id)
         if execution_type:
-            query = query.filter(ApiExecutionHistory.execution_type == execution_type)
+            query = query.filter(ModelClass.execution_type == execution_type)
         if search_term:
-            query = query.filter(ApiExecutionHistory.api_name.ilike(f"%{search_term}%"))
+            query = query.filter(ModelClass.api_name.ilike(f"%{search_term}%"))
         if status_code:
-            query = query.filter(ApiExecutionHistory.status_code == int(status_code))
+            query = query.filter(ModelClass.status_code == int(status_code))
         if trigger_origin:
-            query = query.filter(ApiExecutionHistory.trigger_origin == trigger_origin)
+            query = query.filter(ModelClass.trigger_origin == trigger_origin)
         
+        if company_id:
+            from app.models.user_models import UserDB
+            query = query.join(UserDB, ModelClass.user_id == UserDB.id).filter(UserDB.company_id == company_id)
+
         # Ensure dates are timezone-aware (UTC) if they are naive
         if start_date and start_date.tzinfo is None:
             start_date = start_date.replace(tzinfo=timezone.utc)
@@ -57,66 +64,82 @@ class DashboardService:
             end_date = end_date.replace(tzinfo=timezone.utc)
             
         if start_date:
-            query = query.filter(ApiExecutionHistory.created_at >= start_date)
+            query = query.filter(ModelClass.created_at >= start_date)
         if end_date:
-            query = query.filter(ApiExecutionHistory.created_at <= end_date)
+            query = query.filter(ModelClass.created_at <= end_date)
 
         if last_execution_only:
-            # Find the most recent batch_id for the given project/flow
-            latest_batch_subq = db.query(ApiExecutionHistory.batch_id).filter(ApiExecutionHistory.batch_id.isnot(None))
+            latest_batch_subq = db.query(ModelClass.batch_id).filter(ModelClass.batch_id.isnot(None))
+            if company_id:
+                from app.models.user_models import UserDB
+                latest_batch_subq = latest_batch_subq.join(UserDB, ModelClass.user_id == UserDB.id).filter(UserDB.company_id == company_id)
             if project_id:
                 latest_batch_subq = latest_batch_subq.filter(
-                    (ApiExecutionHistory.project_id.in_(feature_ids)) | 
-                    (ApiExecutionHistory.project_id == project_id)
+                    (ModelClass.project_id.in_(feature_ids)) | 
+                    (ModelClass.project_id == project_id)
                 )
             if flow_id:
                 latest_batch_subq = latest_batch_subq.filter(
-                    (ApiExecutionHistory.project_id == flow_id) | 
-                    (ApiExecutionHistory.flow_id.in_(flow_ids)) |
-                    (ApiExecutionHistory.flow_id == str(flow_id))
+                    (ModelClass.project_id == flow_id) | 
+                    (ModelClass.flow_id.in_(flow_ids)) |
+                    (ModelClass.flow_id == str(flow_id))
                 )
-            latest_batch = latest_batch_subq.order_by(desc(ApiExecutionHistory.created_at)).first()
+            latest_batch = latest_batch_subq.order_by(desc(ModelClass.created_at)).first()
             
             if latest_batch and latest_batch[0]:
                 full_batch_id = latest_batch[0]
                 if "_path_" in full_batch_id:
                     base_batch_id = full_batch_id.split("_path_")[0]
-                    query = query.filter(ApiExecutionHistory.batch_id.startswith(base_batch_id))
+                    query = query.filter(ModelClass.batch_id.startswith(base_batch_id))
                 else:
-                    query = query.filter(ApiExecutionHistory.batch_id == full_batch_id)
-            else:
-                # If no batch_id, maybe just limit to the very last execution record time
-                pass
+                    query = query.filter(ModelClass.batch_id == full_batch_id)
             
         return query
 
     @staticmethod
-    def get_summary_stats(db: Session, days: int = 7, project_id: int = None, flow_id: int = None, 
+    def get_summary_stats(db: Session, days: Any = 7, project_id: int = None, flow_id: int = None, 
                           environment_id: int = None,
                           start_date: datetime = None, end_date: datetime = None,
                           execution_type: str = None,
-                          search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None) -> Dict[str, Any]:
+                          search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None,
+                          company_id: Optional[int] = None) -> Dict[str, Any]:
+        if str(days).lower() == "today":
+            days = 1
+            if not start_date:
+                start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            try:
+                days = int(days)
+            except (ValueError, TypeError):
+                days = 7
+
         if not start_date and not end_date:
             start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
-        base_query = db.query(ApiExecutionHistory)
-        base_query = DashboardService._apply_filters(db, base_query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin)
+        ModelClass = HistoryService.get_model(execution_type)
+        base_query = db.query(ModelClass)
+        base_query = DashboardService._apply_filters(db, base_query, ModelClass, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin, company_id=company_id)
         
-        total_executions = base_query.count()
-        failures = base_query.filter(ApiExecutionHistory.error_message != None).count()
+        agg_result = base_query.with_entities(
+            func.count(ModelClass.id),
+            func.count(case((ModelClass.error_message.isnot(None), 1))),
+            func.avg(ModelClass.response_time)
+        ).first()
+
+        total_executions = agg_result[0] if agg_result and agg_result[0] is not None else 0
+        failures = agg_result[1] if agg_result and agg_result[1] is not None else 0
+        avg_time = agg_result[2] if agg_result and agg_result[2] is not None else 0
         
         success_rate = 0.0
         if total_executions > 0:
             success_rate = ((total_executions - failures) / total_executions) * 100
             
-        avg_time = base_query.with_entities(func.avg(ApiExecutionHistory.response_time)).scalar() or 0
-        
         return {
             "total_executions": total_executions,
-            "total_failures": failures,
             "success_rate": round(success_rate, 2),
-            "avg_response_time": round(avg_time, 2),
-            "period_days": days
+            "total_failures": failures,
+            "failures": failures,
+            "avg_response_time": round(float(avg_time), 2)
         }
 
     @staticmethod
@@ -124,11 +147,13 @@ class DashboardService:
                             environment_id: int = None,
                             start_date: datetime = None, end_date: datetime = None,
                             execution_type: str = None,
-                            search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None) -> List[Dict[str, Any]]:
-        query = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.error_message != None)
-        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin)
+                            search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None,
+                            company_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        ModelClass = HistoryService.get_model(execution_type)
+        query = db.query(ModelClass).filter(ModelClass.error_message != None)
+        query = DashboardService._apply_filters(db, query, ModelClass, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin, company_id=company_id)
         
-        failures = query.order_by(desc(ApiExecutionHistory.created_at)).limit(limit).all()
+        failures = query.order_by(desc(ModelClass.created_at)).limit(limit).all()
         return [
             {
                 "id": f.id,
@@ -147,11 +172,13 @@ class DashboardService:
                               environment_id: int = None,
                               start_date: datetime = None, end_date: datetime = None,
                               execution_type: str = None,
-                              search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None) -> List[Dict[str, Any]]:
-        query = db.query(ApiExecutionHistory)
-        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin)
+                              search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None,
+                              company_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        ModelClass = HistoryService.get_model(execution_type)
+        query = db.query(ModelClass)
+        query = DashboardService._apply_filters(db, query, ModelClass, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin, company_id=company_id)
         
-        executions = query.order_by(desc(ApiExecutionHistory.created_at)).limit(limit).all()
+        executions = query.order_by(desc(ModelClass.created_at)).limit(limit).all()
         return [
             {
                 "id": e.id,
@@ -171,11 +198,13 @@ class DashboardService:
                                environment_id: int = None,
                                start_date: datetime = None, end_date: datetime = None,
                                execution_type: str = None,
-                               search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None) -> List[Dict[str, Any]]:
-        query = db.query(ApiExecutionHistory)
-        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin)
+                               search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None,
+                               company_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        ModelClass = HistoryService.get_model(execution_type)
+        query = db.query(ModelClass)
+        query = DashboardService._apply_filters(db, query, ModelClass, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin, company_id=company_id)
         
-        slowest = query.order_by(desc(ApiExecutionHistory.response_time)).limit(limit * 5).all()
+        slowest = query.order_by(desc(ModelClass.response_time)).limit(limit * 5).all()
         
         results = []
         seen_batches = set()
@@ -206,11 +235,22 @@ class DashboardService:
         return results
 
     @staticmethod
-    def get_daily_stats(db: Session, days: int = 7, project_id: int = None, flow_id: int = None,
+    def get_daily_stats(db: Session, days: Any = 7, project_id: int = None, flow_id: int = None,
                         environment_id: int = None,
                         start_date: datetime = None, end_date: datetime = None,
                         execution_type: str = None,
-                        search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None) -> List[Dict[str, Any]]:
+                        search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None,
+                        company_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        if str(days).lower() == "today":
+            days = 1
+            if not start_date:
+                start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            try:
+                days = int(days)
+            except (ValueError, TypeError):
+                days = 7
+
         if not start_date and not end_date:
             start_date_query = datetime.now(timezone.utc) - timedelta(days=days)
         else:
@@ -219,13 +259,14 @@ class DashboardService:
         if start_date_query and start_date_query.tzinfo is None:
             start_date_query = start_date_query.replace(tzinfo=timezone.utc)
 
+        ModelClass = HistoryService.get_model(execution_type)
         query = db.query(
-            ApiExecutionHistory.created_at,
-            ApiExecutionHistory.status_code,
-            ApiExecutionHistory.error_message
+            ModelClass.created_at,
+            ModelClass.status_code,
+            ModelClass.error_message
         )
         
-        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date_query, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin)
+        query = DashboardService._apply_filters(db, query, ModelClass, project_id, flow_id, environment_id, start_date_query, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin, company_id=company_id)
 
         raw_data = query.all()
         stats_map = {}
@@ -265,21 +306,23 @@ class DashboardService:
                              environment_id: int = None,
                              start_date: datetime = None, end_date: datetime = None,
                              execution_type: str = None,
-                             search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None) -> List[Dict[str, Any]]:
+                             search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None,
+                             company_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        ModelClass = HistoryService.get_model(execution_type)
         
         api_name_expr = case(
-            (ApiExecutionHistory.execution_type == 'web', func.coalesce(ApiExecutionHistory.feature_name, 'Web Flow')),
-            else_=func.coalesce(ApiExecutionHistory.api_name, 'Unknown API')
+            (ModelClass.execution_type == 'web', func.coalesce(ModelClass.feature_name, 'Web Flow')),
+            else_=func.coalesce(ModelClass.api_name, 'Unknown API')
         ).label('api_name')
 
         query = db.query(
             api_name_expr,
-            func.count(ApiExecutionHistory.id).label('failure_count')
+            func.count(ModelClass.id).label('failure_count')
         ).filter(
-             ApiExecutionHistory.error_message != None
+             ModelClass.error_message != None
         )
         
-        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin)
+        query = DashboardService._apply_filters(db, query, ModelClass, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin, company_id=company_id)
         
         top_failures = query.group_by(
             api_name_expr
@@ -296,17 +339,29 @@ class DashboardService:
         ]
 
     @staticmethod
-    def export_data_csv(db: Session, days: int = 7, project_id: int = None, flow_id: int = None,
+    def export_data_csv(db: Session, days: Any = 7, project_id: int = None, flow_id: int = None,
                         environment_id: int = None, start_date: datetime = None, end_date: datetime = None,
-                        execution_type: str = None, search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None) -> str:
+                        execution_type: str = None, search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None,
+                        company_id: Optional[int] = None) -> str:
         
+        if str(days).lower() == "today":
+            days = 1
+            if not start_date:
+                start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            try:
+                days = int(days)
+            except (ValueError, TypeError):
+                days = 7
+
         if not start_date and not end_date:
             start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
-        query = db.query(ApiExecutionHistory)
-        query = DashboardService._apply_filters(db, query, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin)
+        ModelClass = HistoryService.get_model(execution_type)
+        query = db.query(ModelClass)
+        query = DashboardService._apply_filters(db, query, ModelClass, project_id, flow_id, environment_id, start_date, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin, company_id=company_id)
         
-        executions = query.order_by(desc(ApiExecutionHistory.created_at)).all()
+        executions = query.order_by(desc(ModelClass.created_at)).all()
 
         output = io.StringIO()
         writer = csv.writer(output)

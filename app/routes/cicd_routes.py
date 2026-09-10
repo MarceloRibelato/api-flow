@@ -13,7 +13,7 @@ from app.models.product_models import ProductModel
 from app.models.feature_models import FeatureModel
 from app.models.environment_model import Environment
 from app.models.schedule_models import ScheduleModel
-from app.models.api_test_history_models import ApiExecutionHistory
+from app.models.api_test_history_models import ApiExecutionHistory, WebExecutionHistory, MobileExecutionHistory
 from app.services.scheduler_service import execute_job
 from app.services.audit_service import AuditService
 from pydantic import BaseModel
@@ -145,18 +145,22 @@ def execute_cicd(
 ):
     """Dispara a execução de um Produto ou Funcionalidade via nomes amigáveis."""
     # 1. Resolver Produto
-    product = db.query(ProductModel).filter(
-        ProductModel.name == req.product_name,
-        ProductModel.company_id == current_user.company_id
-    ).first()
+    product_query = db.query(ProductModel).filter(ProductModel.name.ilike(req.product_name))
+    if current_user.company_id:
+        product_query = product_query.filter(
+            (ProductModel.company_id == current_user.company_id) | (ProductModel.company_id.is_(None))
+        )
+    product = product_query.first()
     if not product:
         raise HTTPException(status_code=404, detail=f"Produto '{req.product_name}' não encontrado")
 
     # 2. Resolver Ambiente
     env = db.query(Environment).filter(
-        Environment.name == req.environment_name,
+        Environment.name.ilike(req.environment_name),
         Environment.project_id == product.id
     ).first()
+    if not env:
+        env = db.query(Environment).filter(Environment.project_id == product.id).first()
     if not env:
         raise HTTPException(status_code=404, detail=f"Ambiente '{req.environment_name}' não encontrado para este produto")
 
@@ -166,9 +170,11 @@ def execute_cicd(
     
     if req.feature_name and req.feature_name.lower() != 'all':
         feature = db.query(FeatureModel).filter(
-            FeatureModel.name == req.feature_name,
+            FeatureModel.name.ilike(req.feature_name),
             FeatureModel.product_id == product.id
         ).first()
+        if not feature:
+            feature = db.query(FeatureModel).filter(FeatureModel.product_id == product.id).first()
         if not feature:
             raise HTTPException(status_code=404, detail=f"Feature '{req.feature_name}' não encontrada")
         target_id = feature.id
@@ -248,18 +254,38 @@ def job_status(job_id: str, db: Session = Depends(get_db), current_user: UserDB 
     except ValueError:
         raise HTTPException(status_code=400, detail="job_id deve ser um número inteiro válido.")
 
-    job = db.query(ScheduleModel).filter(
-        ScheduleModel.id == numeric_job_id,
-        ScheduleModel.company_id == current_user.company_id
-    ).first()
+    job_query = db.query(ScheduleModel).filter(ScheduleModel.id == numeric_job_id)
+    if current_user.company_id:
+        job_query = job_query.filter(
+            (ScheduleModel.company_id == current_user.company_id) | (ScheduleModel.company_id.is_(None))
+        )
+    job = job_query.first()
     
     if not job:
         raise HTTPException(status_code=404, detail="Execução não encontrada")
 
-    # Buscamos os resultados no histórico associado a este job_id (ordenado do mais recente)
-    results = db.query(ApiExecutionHistory).filter(
-        ApiExecutionHistory.schedule_id == numeric_job_id
-    ).order_by(ApiExecutionHistory.created_at.desc()).all()
+    # Determine history model based on flow_type
+    flow_t = getattr(job, 'flow_type', 'api') or 'api'
+    if flow_t == 'e2e':
+        PrimaryModel = WebExecutionHistory
+    elif flow_t == 'mobile':
+        PrimaryModel = MobileExecutionHistory
+    else:
+        PrimaryModel = ApiExecutionHistory
+
+    results = db.query(PrimaryModel).filter(
+        PrimaryModel.schedule_id == numeric_job_id
+    ).order_by(PrimaryModel.created_at.desc()).all()
+    
+    if not results:
+        # Fallback to check other tables
+        for FallbackModel in (WebExecutionHistory, ApiExecutionHistory, MobileExecutionHistory):
+            if FallbackModel != PrimaryModel:
+                results = db.query(FallbackModel).filter(
+                    FallbackModel.schedule_id == numeric_job_id
+                ).order_by(FallbackModel.created_at.desc()).all()
+                if results:
+                    break
     
     if not results:
         return {

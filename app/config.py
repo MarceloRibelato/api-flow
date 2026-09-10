@@ -16,8 +16,10 @@ class Settings(BaseSettings):
     FRONTEND_BASE_URL: str = "http://localhost:5173"
     INTERNAL_GATEWAY_URL: str = "http://flow-frontend" # For Docker internal rewrite
     TARGET_URL_REPLACEMENT: str = "" # Optional global replacement for localhost
-    HISTORY_RETENTION_DAYS: int = 30
-    HISTORY_ARCHIVE_RETENTION_DAYS: int = 180
+    DEFAULT_RETENTION_DAYS: int = 360
+    RETENTION_DAYS: int = 360
+    HISTORY_RETENTION_DAYS: int = 360
+    HISTORY_ARCHIVE_RETENTION_DAYS: int = 360
     MAX_CONCURRENT_FEATURES: int = 5
     
     # Redis Settings

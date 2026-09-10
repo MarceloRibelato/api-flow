@@ -79,8 +79,8 @@ def test_delay_execution_parsing(db_session: Session):
             res.headers = {}
             mock_session.request.return_value = res
             
-            # Patch time.sleep to intercept the delay calculation without actually sleeping in tests
-            with patch('time.sleep') as mock_sleep:
+            from unittest.mock import AsyncMock
+            with patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 variables = {}
                 
                 success, fail = FlowExecutorService.execute_flow_logic(

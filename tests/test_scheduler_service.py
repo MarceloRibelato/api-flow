@@ -145,12 +145,16 @@ def test_execute_job_suite_and_webhook(mock_post, mock_requests_session, mock_ex
 @patch("app.services.history_service.HistoryService")
 @patch("app.services.scheduler_service.SessionLocal")
 def test_purge_history_job(mock_session_local, mock_history_service, db_session):
+    from app.models.company_models import CompanyDB
+    company = CompanyDB(name="Test Co", retention_days=360)
+    db_session.add(company)
+    db_session.commit()
+
     mock_session_local.return_value = db_session
-    mock_history_service.archive_old_records.return_value = 100
-    mock_history_service.purge_archived_records.return_value = 50
+    mock_history_service.permanent_delete_old_records.return_value = 100
     
     purge_history_job()
     
-    mock_history_service.archive_old_records.assert_called_once()
-    mock_history_service.purge_archived_records.assert_called_once()
+    mock_history_service.permanent_delete_old_records.assert_called()
+
 

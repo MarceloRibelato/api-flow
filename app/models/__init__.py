@@ -6,7 +6,11 @@ from app.models.feature_models import FeatureModel
 from app.models.flow_models import FlowDB
 from app.models.variable_model import Variable
 from app.models.environment_model import Environment
-from app.models.api_test_history_models import ApiExecutionHistory
+from app.models.api_test_history_models import (
+    ApiExecutionHistory,
+    WebExecutionHistory,
+    MobileExecutionHistory
+)
 from app.models.schedule_models import ScheduleModel
 from app.models.auth_models import BlacklistedToken
 from app.models.service_token_models import ServiceTokenDB
@@ -23,6 +27,8 @@ __all__ = [
     "Variable",
     "Environment",
     "ApiExecutionHistory",
+    "WebExecutionHistory",
+    "MobileExecutionHistory",
     "ScheduleModel",
     "BlacklistedToken",
     "ServiceTokenDB",

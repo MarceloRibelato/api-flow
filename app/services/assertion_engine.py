@@ -3,6 +3,8 @@ Assertion Engine — Evaluates API response assertions.
 Extracted from flow_executor_service.py for modularity and testability.
 """
 import logging
+import re
+import json
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -57,8 +59,42 @@ def evaluate_assertion(assertion: dict, resp_status: int, resp_headers: dict,
             is_success, actual_val = _evaluate_body_assertion(op, prop, target, resp_json)
 
         elif src == 'contract':
-            is_success = resp_status < 400
-            actual_val = "Schema Match" if is_success else "Invalid"
+            schema_target = target
+            if schema_target and resp_json is not None:
+                try:
+                    import jsonschema
+                    if isinstance(schema_target, str):
+                        try:
+                            schema_dict = json.loads(schema_target)
+                        except Exception:
+                            schema_dict = None
+                    elif isinstance(schema_target, dict):
+                        schema_dict = schema_target
+                    else:
+                        schema_dict = None
+
+                    if schema_dict and isinstance(schema_dict, dict) and (
+                        'type' in schema_dict or 'properties' in schema_dict or '$schema' in schema_dict or 'required' in schema_dict
+                    ):
+                        try:
+                            jsonschema.validate(instance=resp_json, schema=schema_dict)
+                            is_success = resp_status < 400
+                            actual_val = "Schema Match" if is_success else f"HTTP Status {resp_status}"
+                        except jsonschema.ValidationError as ve:
+                            is_success = False
+                            actual_val = f"Schema Mismatch: {ve.message}"
+                        except jsonschema.SchemaError as se:
+                            is_success = False
+                            actual_val = f"Invalid JSON Schema: {se.message}"
+                    else:
+                        is_success = resp_status < 400
+                        actual_val = "Schema Match" if is_success else "Invalid"
+                except ImportError:
+                    is_success = resp_status < 400
+                    actual_val = "Schema Match" if is_success else "Invalid"
+            else:
+                is_success = resp_status < 400
+                actual_val = "Schema Match" if is_success else "Invalid"
 
     except Exception as ae:
         logger.error(f"Assertion evaluation error: {ae}")
@@ -140,10 +176,21 @@ def _compare_string(actual: str, target: str, op: str, raw_actual: Any = None) -
 
 
 def _resolve_json_path(data: Any, path: str) -> Optional[Any]:
-    """Traverses a JSON object by dot-separated path."""
+    """Traverses a JSON object or array supporting dot notation, brackets ([0]), and root ($)."""
     if not path:
         return data
-    parts = str(path).split('.')
+    path_str = str(path).strip()
+    if path_str == '$':
+        return data
+    if path_str.startswith('$.'):
+        path_str = path_str[2:]
+    elif path_str.startswith('$'):
+        path_str = path_str[1:]
+        
+    path_str = re.sub(r'\[(\d+)\]', r'.\1', path_str)
+    path_str = re.sub(r'\[[\'"]([^\'"]+)[\'"]\]', r'.\1', path_str)
+    parts = [p for p in path_str.split('.') if p != '']
+
     curr = data
     for p in parts:
         if isinstance(curr, dict) and p in curr:

@@ -1,5 +1,8 @@
 import os
 from celery import Celery
+from app.utils.logger import setup_logging
+
+setup_logging()
 
 # Initialize Celery app
 broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")

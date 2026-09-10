@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.product_service import ProductService
 from app.schemas.product_schemas import ProductCreate, ProductResponse, ProductMobileSettingsCreate, ProductMobileSettingsResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
 import requests
 
@@ -35,8 +35,7 @@ class MobileDeviceCreate(BaseModel):
 class MobileDeviceResponse(MobileDeviceCreate):
     id: int
     product_id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class MobilePingPayload(BaseModel):
     server_url: Optional[str] = None
@@ -301,6 +300,21 @@ def ping_mobile_server(
         }
     except requests.exceptions.RequestException as e:
         return {"status": "error", "message": str(e)}
+
+@router.get("/{product_id}/mobile-devices/adb-connected")
+def get_connected_adb_devices(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """Listar dispositivos físicos e emuladores detectados via ADB no servidor e status do pool."""
+    from app.services.mobile_device_pool_service import MobileDevicePoolService
+    devices = MobileDevicePoolService.get_connected_adb_devices()
+    pool_status = MobileDevicePoolService.get_pool_status(db, product_id)
+    return {
+        "adb_devices": devices,
+        "configured_devices": pool_status
+    }
 
 @router.get("/{product_id}/mobile-devices", response_model=List[MobileDeviceResponse])
 def list_mobile_devices(

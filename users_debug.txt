@@ -1,0 +1,23 @@
+[
+  {
+    "id": 3,
+    "username": "admin",
+    "email": "admin@flow.local",
+    "role": "admin",
+    "status": "active"
+  },
+  {
+    "id": 1,
+    "username": "mribelato@gmail.com",
+    "email": "mribelato@gmail.com",
+    "role": "admin",
+    "status": "active"
+  },
+  {
+    "id": 2,
+    "username": "testuser@gmail.com",
+    "email": "testuser@gmail.com",
+    "role": "admin",
+    "status": "active"
+  }
+]

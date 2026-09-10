@@ -36,7 +36,11 @@ def update_company_settings(
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
         
-    if settings_data.history_retention_days is not None:
+    if settings_data.retention_days is not None:
+        company.retention_days = settings_data.retention_days
+        company.history_retention_days = settings_data.retention_days
+    elif settings_data.history_retention_days is not None:
+        company.retention_days = settings_data.history_retention_days
         company.history_retention_days = settings_data.history_retention_days
     if settings_data.history_archive_retention_days is not None:
         company.history_archive_retention_days = settings_data.history_archive_retention_days

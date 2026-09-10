@@ -3,16 +3,28 @@ Extraction Engine — Extracts values from API responses into variables.
 Extracted from flow_executor_service.py for modularity and testability.
 """
 import logging
+import re
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
 def resolve_json_path(data: Any, path: str) -> Optional[Any]:
-    """Traverses a JSON object by dot-separated path."""
+    """Traverses a JSON object or array supporting dot notation, brackets ([0]), and root ($)."""
     if not path:
         return data
-    parts = str(path).split('.')
+    path_str = str(path).strip()
+    if path_str == '$':
+        return data
+    if path_str.startswith('$.'):
+        path_str = path_str[2:]
+    elif path_str.startswith('$'):
+        path_str = path_str[1:]
+        
+    path_str = re.sub(r'\[(\d+)\]', r'.\1', path_str)
+    path_str = re.sub(r'\[[\'"]([^\'"]+)[\'"]\]', r'.\1', path_str)
+    parts = [p for p in path_str.split('.') if p != '']
+
     curr = data
     for p in parts:
         if isinstance(curr, dict) and p in curr:

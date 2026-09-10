@@ -41,7 +41,7 @@ def save_execution_history(
 @router.get("/", response_model=PaginatedHistoryResponse)
 def get_execution_history(
     page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=1000),
+    limit: int = Query(20, ge=1, le=5000),
     api_id: Optional[int] = None,
     project_id: Optional[int] = None,
     flow_id: Optional[int] = None,
@@ -52,7 +52,7 @@ def get_execution_history(
     method: Optional[str] = None,
     status_code: Optional[int] = None,
     node_id: Optional[str] = None,
-    execution_type: Optional[str] = Query(None, pattern="^(api|web)$"),
+    execution_type: Optional[str] = Query(None, pattern="^(api|web|mobile)$"),
     batch_id: Optional[str] = None,
     sort_by: Optional[str] = Query('created_at', pattern="^(created_at|id|response_time)$"),
     order: Optional[str] = Query('desc', pattern="^(asc|desc)$"),
@@ -63,14 +63,14 @@ def get_execution_history(
     try:
         return HistoryService.get_all(
             db,
-            current_user.company_id,  # Updated: company_id
+            current_user.company_id,
             page,
             limit,
             api_id,
             project_id,
             flow_id,
             environment_id,
-            schedule_id,  # Passed to service
+            schedule_id,
             start_date,
             end_date,
             method,
@@ -94,6 +94,7 @@ def get_history_batches(
     project_id: Optional[int] = None,
     flow_id: Optional[int] = None,
     schedule_type: Optional[str] = None,
+    execution_type: Optional[str] = Query(None, pattern="^(api|web|mobile)$"),
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
@@ -106,7 +107,8 @@ def get_history_batches(
             limit=limit,
             project_id=project_id,
             flow_id=flow_id,
-            schedule_type=schedule_type
+            schedule_type=schedule_type,
+            execution_type=execution_type
         )
     except Exception as e:
         import logging

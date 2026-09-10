@@ -105,6 +105,7 @@ class QueueExecutorService:
         except ImportError:
             return {"status": 500, "error": "Pacote 'pika' não instalado no backend."}
         
+        connection = None
         try:
             params = pika.URLParameters(conn_str)
             connection = pika.BlockingConnection(params)
@@ -118,7 +119,6 @@ class QueueExecutorService:
                     body=payload,
                     properties=pika.BasicProperties(delivery_mode=2) # Persistent
                 )
-                connection.close()
                 return {"status": 200, "message": "Mensagem publicada com sucesso"}
             
             elif action == 'consume':
@@ -127,13 +127,20 @@ class QueueExecutorService:
                 method_frame, header_frame, body = next(channel.consume(queue=queue_name, inactivity_timeout=timeout_sec))
                 if method_frame:
                     channel.basic_ack(method_frame.delivery_tag)
-                    connection.close()
                     return {"status": 200, "message": body.decode('utf-8') if body else None}
                 else:
-                    connection.close()
                     return {"status": 404, "error": "Timeout: Nenhuma mensagem encontrada"}
+            else:
+                return {"status": 400, "error": f"Ação desconhecida: {action}"}
         except Exception as e:
             return {"status": 500, "error": str(e)}
+        finally:
+            if connection:
+                try:
+                    if not getattr(connection, 'is_closed', False):
+                        connection.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def _execute_sqs(action: str, queue_url: str, queue_name: str, payload: str, timeout_ms: int):

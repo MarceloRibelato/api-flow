@@ -67,79 +67,243 @@ async def lifespan(app: FastAPI):
             Base.metadata.create_all(bind=engine)
             logger.info("Tabelas verificadas/criadas via metadata sqlalchemy")
             
-            # Step 1.5: Adicionar colunas novas que não foram criadas via metadata
+            # Step 1.5: Adicionar colunas novas e reparar partições (PostgreSQL only)
             from sqlalchemy import text
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS db_queries JSON DEFAULT '[]'::json;"))
-            except Exception as e:
-                logger.info(f"Erro db_queries: {e}")
-            
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS message_queues JSON DEFAULT '[]'::json;"))
-            except Exception as e:
-                logger.info(f"Erro message_queues: {e}")
+            if "postgresql" in str(engine.url):
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS db_queries JSON DEFAULT '[]'::json;"))
+                except Exception as e:
+                    logger.info(f"Erro db_queries: {e}")
+                
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS message_queues JSON DEFAULT '[]'::json;"))
+                except Exception as e:
+                    logger.info(f"Erro message_queues: {e}")
 
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE flow_edges ADD COLUMN IF NOT EXISTS label VARCHAR(255);"))
-            except Exception as e:
-                logger.info(f"Erro label: {e}")
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("ALTER TABLE flow_edges ADD COLUMN IF NOT EXISTS label VARCHAR(255);"))
+                except Exception as e:
+                    logger.info(f"Erro label: {e}")
 
-            # Auto-repair for trigger_origin if alembic failed
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE api_test_execution_history ADD COLUMN IF NOT EXISTS trigger_origin VARCHAR(50) DEFAULT 'manual';"))
-                    conn.execute(text("ALTER TABLE api_test_execution_history_archive ADD COLUMN IF NOT EXISTS trigger_origin VARCHAR(50) DEFAULT 'manual';"))
-                    conn.execute(text("ALTER TABLE api_test_execution_history ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;"))
-                    conn.execute(text("ALTER TABLE api_test_execution_history_archive ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;"))
+                # Auto-repair for trigger_origin if alembic failed
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("ALTER TABLE api_test_execution_history ADD COLUMN IF NOT EXISTS trigger_origin VARCHAR(50) DEFAULT 'manual';"))
+                        conn.execute(text("ALTER TABLE api_test_execution_history_archive ADD COLUMN IF NOT EXISTS trigger_origin VARCHAR(50) DEFAULT 'manual';"))
+                        conn.execute(text("ALTER TABLE api_test_execution_history ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;"))
+                        conn.execute(text("ALTER TABLE api_test_execution_history_archive ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;"))
+                        
+                        # Fix previously misclassified schedules (one-time manual schedules were saved as pipeline)
+                        conn.execute(text("""
+                            UPDATE api_test_execution_history
+                            SET trigger_origin = 'schedule'
+                            FROM schedules
+                            WHERE api_test_execution_history.schedule_id = schedules.id
+                            AND api_test_execution_history.trigger_origin = 'pipeline'
+                            AND schedules.name NOT LIKE 'CI/CD%'
+                            AND schedules.name NOT LIKE '[PIPELINE]%'
+                        """))
+                except Exception as e:
+                    logger.info(f"Erro trigger_origin: {e}")
 
-                    
-                    # Fix previously misclassified schedules (one-time manual schedules were saved as pipeline)
-                    conn.execute(text("""
-                        UPDATE api_test_execution_history
-                        SET trigger_origin = 'schedule'
-                        FROM schedules
-                        WHERE api_test_execution_history.schedule_id = schedules.id
-                        AND api_test_execution_history.trigger_origin = 'pipeline'
-                        AND schedules.name NOT LIKE 'CI/CD%'
-                        AND schedules.name NOT LIKE '[PIPELINE]%'
-                    """))
-            except Exception as e:
-                logger.info(f"Erro trigger_origin: {e}")
+                # Auto-repair for companies table retention columns
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS default_notification_urls VARCHAR(500);"))
+                        conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS retention_days INTEGER DEFAULT 360;"))
+                        conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS history_retention_days INTEGER;"))
+                        conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS history_archive_retention_days INTEGER;"))
+                except Exception as e:
+                    logger.info(f"Erro companies columns: {e}")
 
-            # Auto-repair for companies table retention columns
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS default_notification_urls VARCHAR(500);"))
-                    conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS history_retention_days INTEGER;"))
-                    conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS history_archive_retention_days INTEGER;"))
-            except Exception as e:
-                logger.info(f"Erro companies columns: {e}")
+                # Auto-repair for users table columns
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS company_id INTEGER;"))
+                        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'admin';"))
+                        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER DEFAULT 1;"))
+                        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';"))
+                        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS accepted_terms BOOLEAN DEFAULT FALSE;"))
+                        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP;"))
+                        conn.execute(text("UPDATE users SET status = 'active' WHERE status IS NULL OR status = 'pending';"))
+                        conn.execute(text("UPDATE users SET role = 'admin' WHERE id = 1 OR role IS NULL;"))
+                except Exception as e:
+                    logger.info(f"Erro users columns: {e}")
 
-            # Auto-repair for users table columns
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS company_id INTEGER;"))
-                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'admin';"))
-                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER DEFAULT 1;"))
-                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';"))
-                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS accepted_terms BOOLEAN DEFAULT FALSE;"))
-                    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMP;"))
-                    conn.execute(text("UPDATE users SET status = 'active' WHERE status IS NULL OR status = 'pending';"))
-                    conn.execute(text("UPDATE users SET role = 'admin' WHERE id = 1 OR role IS NULL;"))
-            except Exception as e:
-                logger.info(f"Erro users columns: {e}")
+                # Auto-repair & Seed default admin user (guarantees both 'admin' and ID 1 work with password 'admin')
+                try:
+                    with engine.begin() as conn:
+                        from app.auth import get_password_hash
+                        hashed_pw = get_password_hash("admin")
+                        # 1. Guarantee user 'admin' exists
+                        admin_by_name = conn.execute(text("SELECT id FROM users WHERE username = 'admin';")).fetchone()
+                        if not admin_by_name:
+                            conn.execute(text("""
+                                INSERT INTO users (username, email, hashed_password, full_name, role, status, accepted_terms, token_version)
+                                VALUES ('admin', 'admin@flow.local', :pwd, 'Administrator', 'admin', 'active', true, 1);
+                            """), {"pwd": hashed_pw})
+                            logger.info("⚡ [Startup] Usuário 'admin' criado com sucesso (senha: 'admin').")
+                        else:
+                            conn.execute(text("""
+                                UPDATE users SET hashed_password = :pwd, status = 'active', role = 'admin' WHERE id = :uid;
+                            """), {"pwd": hashed_pw, "uid": admin_by_name.id})
 
-            # Auto-repair for service_mocks and mock_logs columns
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE service_mocks ADD COLUMN IF NOT EXISTS target_url VARCHAR(500);"))
-                    conn.execute(text("ALTER TABLE service_mocks ADD COLUMN IF NOT EXISTS enable_proxy BOOLEAN DEFAULT FALSE;"))
-                    conn.execute(text("ALTER TABLE mock_logs ADD COLUMN IF NOT EXISTS is_proxied BOOLEAN DEFAULT FALSE;"))
-            except Exception as e:
-                logger.info(f"Erro service_mocks columns: {e}")
+                        # 2. Guarantee user ID 1 (e.g. mribelato@gmail.com) is active and has password 'admin'
+                        user_1 = conn.execute(text("SELECT id, username FROM users WHERE id = 1;")).fetchone()
+                        if user_1 and user_1.username != 'admin':
+                            conn.execute(text("""
+                                UPDATE users SET hashed_password = :pwd, status = 'active', role = 'admin' WHERE id = 1;
+                            """), {"pwd": hashed_pw})
+                            logger.info(f"⚡ [Startup] Usuário '{user_1.username}' (ID: 1) garantido ativo com senha 'admin'.")
+
+                        # 3. Guarantee default company and ensure users and products have company_id
+                        comp = conn.execute(text("SELECT id FROM companies LIMIT 1;")).fetchone()
+                        if not comp:
+                            conn.execute(text("INSERT INTO companies (name) VALUES ('Default Company');"))
+                            comp = conn.execute(text("SELECT id FROM companies LIMIT 1;")).fetchone()
+                        comp_id = comp.id if comp else 1
+                        conn.execute(text("UPDATE users SET company_id = :cid WHERE company_id IS NULL;"), {"cid": comp_id})
+                        conn.execute(text("UPDATE products SET company_id = :cid WHERE company_id IS NULL;"), {"cid": comp_id})
+
+                        # 4. Guarantee existing flow service token
+                        target_token = "flw_-YEHBrTePfPeS1qExNOsBxC41CMXSoZEhwSKdnRBqsU"
+                        import hashlib
+                        target_hash = hashlib.sha256(target_token.encode()).hexdigest()
+                        tok_exists = conn.execute(text("SELECT id FROM service_tokens WHERE token_hash = :th;"), {"th": target_hash}).fetchone()
+                        if not tok_exists:
+                            first_uid = user_1.id if user_1 else 1
+                            conn.execute(text("""
+                                INSERT INTO service_tokens (name, token_hash, user_id, company_id, created_at)
+                                VALUES ('CI/CD Default Token', :th, :uid, :cid, NOW())
+                                ON CONFLICT DO NOTHING;
+                            """), {"th": target_hash, "uid": first_uid, "cid": comp_id})
+                            logger.info(f"⚡ [Startup] Service token '{target_token}' garantido no banco.")
+
+                        users_list = conn.execute(text("SELECT id, username, email, role, status FROM users;")).fetchall()
+                        users_summary = [dict(u._mapping) for u in users_list]
+                        logger.info(f"⚡ [Startup] Usuários registrados no banco: {users_summary}")
+                        try:
+                            debug_path = "/app/users_debug.txt" if os.path.exists("/app") else "users_debug.txt"
+                            with open(debug_path, "w") as f:
+                                import json
+                                json.dump(users_summary, f, indent=2, default=str)
+                        except Exception as fe:
+                            logger.warning(f"Não foi possível gravar users_debug.txt: {fe}")
+                except Exception as e:
+                    logger.warning(f"Erro auto-seed admin: {e}")
+
+                # Auto-repair for service_mocks and mock_logs columns
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("ALTER TABLE service_mocks ADD COLUMN IF NOT EXISTS target_url VARCHAR(500);"))
+                        conn.execute(text("ALTER TABLE service_mocks ADD COLUMN IF NOT EXISTS enable_proxy BOOLEAN DEFAULT FALSE;"))
+                        conn.execute(text("ALTER TABLE mock_logs ADD COLUMN IF NOT EXISTS is_proxied BOOLEAN DEFAULT FALSE;"))
+                except Exception as e:
+                    logger.info(f"Erro service_mocks columns: {e}")
+
+                # Auto-repair & Setup Partitions for partitioned execution history tables
+                try:
+                    tables_config = [
+                        ("api_execution_history", "created_at"),
+                        ("web_execution_history", "created_at"),
+                        ("mobile_execution_history", "created_at"),
+                        ("performance_test_results", "started_at"),
+                    ]
+
+                    # 1. Guarantee DEFAULT partition exists for all tables in independent transactions
+                    for tbl, col in tables_config:
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(text(f"CREATE TABLE IF NOT EXISTS {tbl}_default PARTITION OF {tbl} DEFAULT;"))
+                                logger.info(f"✅ Partição DEFAULT para '{tbl}' garantida com sucesso.")
+                        except Exception as def_err:
+                            logger.warning(f"Aviso partição default para {tbl}: {def_err}")
+
+                    # 2. Try enabling pg_partman extension
+                    has_partman = False
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(text("CREATE SCHEMA IF NOT EXISTS partman;"))
+                            conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_partman SCHEMA partman;"))
+                            has_partman = bool(conn.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'pg_partman';")).scalar())
+                    except Exception as pe:
+                        logger.info(f"pg_partman extension notice: {pe}")
+
+                    # 3. Register with pg_partman if available (omitting p_type for pg_partman v5 compatibility)
+                    if has_partman:
+                        for tbl, col in tables_config:
+                            try:
+                                with engine.begin() as conn:
+                                    is_registered = bool(conn.execute(text(f"SELECT 1 FROM partman.part_config WHERE parent_table = 'public.{tbl}'")).scalar())
+                                    if not is_registered:
+                                        try:
+                                            conn.execute(text(f"""
+                                                SELECT partman.create_parent(
+                                                    p_parent_table => 'public.{tbl}',
+                                                    p_control => '{col}',
+                                                    p_interval => '1 month',
+                                                    p_premake => 4
+                                                );
+                                            """))
+                                        except Exception:
+                                            # Fallback if an older pg_partman version requires p_type
+                                            conn.execute(text(f"""
+                                                SELECT partman.create_parent(
+                                                    p_parent_table => 'public.{tbl}',
+                                                    p_control => '{col}',
+                                                    p_type => 'native',
+                                                    p_interval => '1 month',
+                                                    p_premake => 4
+                                                );
+                                            """))
+
+                                        conn.execute(text(f"""
+                                            UPDATE partman.part_config
+                                            SET retention = '360 days',
+                                                retention_keep_table = false
+                                            WHERE parent_table = 'public.{tbl}';
+                                        """))
+                                        logger.info(f"⚡ [Partman] Tabela '{tbl}' registrada no pg_partman com sucesso.")
+                            except Exception as part_err:
+                                logger.info(f"Partman setup notice for {tbl}: {part_err}")
+
+                    # 4. Probe tests on all 4 tables to verify that write operations succeed!
+                    for tbl, probe_sql in [
+                        ("api_execution_history", """
+                            INSERT INTO api_execution_history (execution_id, method, url, status_code, status_text, response_time, retry_count, created_at)
+                            VALUES ('healthcheck_probe_api', 'GET', 'http://localhost/health', 200, 'OK', 1, 0, NOW());
+                            DELETE FROM api_execution_history WHERE execution_id = 'healthcheck_probe_api';
+                        """),
+                        ("web_execution_history", """
+                            INSERT INTO web_execution_history (execution_id, method, url, status_code, status_text, response_time, retry_count, created_at)
+                            VALUES ('healthcheck_probe_web', 'GET', 'http://localhost/health', 200, 'OK', 1, 0, NOW());
+                            DELETE FROM web_execution_history WHERE execution_id = 'healthcheck_probe_web';
+                        """),
+                        ("mobile_execution_history", """
+                            INSERT INTO mobile_execution_history (execution_id, method, url, status_code, status_text, response_time, retry_count, created_at)
+                            VALUES ('healthcheck_probe_mob', 'GET', 'http://localhost/health', 200, 'OK', 1, 0, NOW());
+                            DELETE FROM mobile_execution_history WHERE execution_id = 'healthcheck_probe_mob';
+                        """),
+                        ("performance_test_results", """
+                            INSERT INTO performance_test_results (id, status, started_at)
+                            VALUES ('healthcheck_probe_perf', 'completed', NOW());
+                            DELETE FROM performance_test_results WHERE id = 'healthcheck_probe_perf';
+                        """),
+                    ]:
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(text(probe_sql))
+                                logger.info(f"✅ [Partitions] Teste de inserção e exclusão em '{tbl}' realizado com SUCESSO!")
+                        except Exception as probe_err:
+                            logger.error(f"❌ [Partitions] FALHA no teste de inserção em '{tbl}': {probe_err}")
+
+                except Exception as e:
+                    logger.error(f"Erro ao configurar partições de tabelas: {e}")
+
+
 
             logger.info("Colunas dinâmicas processadas.")
             

@@ -13,8 +13,9 @@ class CompanyDB(Base):
     name = Column(String(255), nullable=False)
     cnpj = Column(String(20), unique=True, index=True, nullable=True)
     default_notification_urls = Column(String(500), nullable=True) # Global webhook URL
-    history_retention_days = Column(Integer, nullable=True) # Days before archiving history
-    history_archive_retention_days = Column(Integer, nullable=True) # Days before purging archived history
+    retention_days = Column(Integer, default=360, nullable=True) # Days before permanently deleting execution history & videos
+    history_retention_days = Column(Integer, nullable=True) # Deprecated
+    history_archive_retention_days = Column(Integer, nullable=True) # Deprecated
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships

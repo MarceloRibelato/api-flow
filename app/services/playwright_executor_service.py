@@ -66,6 +66,8 @@ class PlaywrightExecutorService:
         self._page = None
         self._captured_requests = []   # list of captured API calls during execution
         self._pending_requests = {}    # url -> {method, start_time}
+        self._page_errors = []         # uncaught JavaScript exceptions on page
+        self._console_errors = []      # console.error messages
         self._headless = headless
         self._last_dialog_message = None
 
@@ -131,13 +133,17 @@ class PlaywrightExecutorService:
                 logger.warning(f"Stealth application failed: {e}")
             
             # Auto-handle dialogs to prevent deadlocks and capture message
-            def handle_dialog(dialog):
+            async def handle_dialog(dialog):
                 self._last_dialog_message = dialog.message
-                dialog.accept()
+                try:
+                    await dialog.accept()
+                except Exception as de:
+                    logger.warning(f"Auto-accept dialog error: {de}")
                 
             self._page.on("dialog", handle_dialog)
             
             self._install_network_listeners()
+            self._install_console_and_error_listeners()
 
     def _should_capture(self, url: str) -> bool:
         """Return True if this URL is an API call worth capturing."""
@@ -158,7 +164,7 @@ class PlaywrightExecutorService:
 
 
     def _install_network_listeners(self):
-        """Attach request/response listeners to capture API calls made by the tested app."""
+        """Attach request/response/requestfailed listeners to capture API calls made by the tested app."""
         def on_request(request):
             if not self._should_capture(request.url):
                 return
@@ -183,9 +189,28 @@ class PlaywrightExecutorService:
                 'duration_ms': elapsed,
             })
 
+        def on_request_failed(request):
+            if not self._should_capture(request.url):
+                return
+            pending = self._pending_requests.pop(request, None)
+            elapsed = 0
+            method = request.method if request else 'GET'
+            if pending:
+                elapsed = int(_time.time() * 1000 - pending['start_ms'])
+                method = pending['method']
+            failure_text = request.failure or "Network request failed or aborted"
+            self._captured_requests.append({
+                'url': request.url,
+                'method': method,
+                'status': 0,
+                'duration_ms': elapsed,
+                'error': str(failure_text),
+            })
+
         self._page.on('request', on_request)
         self._page.on('response', on_response)
-        logger.info("🕸️  Network capture listeners installed")
+        self._page.on('requestfailed', on_request_failed)
+        logger.info("🕸️  Network capture listeners installed (request/response/requestfailed)")
 
     def pop_captured_requests(self):
         """Return and clear the accumulated network captures since last call."""
@@ -193,6 +218,34 @@ class PlaywrightExecutorService:
         self._captured_requests.clear()
         self._pending_requests.clear()
         return captured
+
+    def _install_console_and_error_listeners(self):
+        """Attach pageerror and console listeners to capture frontend runtime exceptions."""
+        def on_page_error(exc):
+            err_msg = str(exc)
+            logger.warning(f"🌐 [Browser Page Error] {err_msg}")
+            self._page_errors.append(err_msg)
+            if len(self._page_errors) > 50:
+                self._page_errors.pop(0)
+
+        def on_console(msg):
+            if msg.type == "error":
+                text = f"[{msg.type.upper()}] {msg.text}"
+                self._console_errors.append(text)
+                if len(self._console_errors) > 50:
+                    self._console_errors.pop(0)
+
+        self._page.on("pageerror", on_page_error)
+        self._page.on("console", on_console)
+        logger.info("🚨 Frontend console & pageerror listeners installed")
+
+    def pop_captured_errors(self):
+        """Return and clear accumulated page and console errors."""
+        page_errs = list(self._page_errors)
+        console_errs = list(self._console_errors)
+        self._page_errors.clear()
+        self._console_errors.clear()
+        return {"page_errors": page_errs, "console_errors": console_errs}
 
     async def stop(self, trace_path: str = None):
         """Shuts down the browser and playwright engine, optionally saving a trace."""
@@ -205,21 +258,36 @@ class PlaywrightExecutorService:
                     logger.warning(f"Failed to save trace: {trace_e}")
                     
             if self._context:
-                await self._context.close()
-            self._page = None
-            self._context = None
+                try:
+                    await self._context.close()
+                except Exception as ce:
+                    logger.warning(f"Error closing Playwright context: {ce}")
+                finally:
+                    self._page = None
+                    self._context = None
             
             if self._browser:
-                await self._browser.close()
-                self._browser = None
+                try:
+                    await self._browser.close()
+                except Exception as be:
+                    logger.warning(f"Error closing Playwright browser: {be}")
+                finally:
+                    self._browser = None
         
             if self._playwright:
-                await self._playwright.stop()
-                self._playwright = None
+                try:
+                    await self._playwright.stop()
+                except Exception as pe:
+                    logger.warning(f"Error stopping Playwright engine: {pe}")
+                finally:
+                    self._playwright = None
                 
             logger.info("Playwright Browser stopped")
         except Exception as e:
             logger.error(f"Error stopping Playwright gracefully: {e}")
+        finally:
+            self._page = None
+            self._context = None
             self._browser = None
             self._playwright = None
 
@@ -248,7 +316,7 @@ class PlaywrightExecutorService:
         try:
             # Wait for common loaders to vanish
             await self._page.wait_for_function('''() => {
-                const loaders = document.querySelectorAll('.spinner, .loader, mat-spinner, [role="progressbar"], .loading-overlay, #loader, #spinner, app-loader');
+                const loaders = document.querySelectorAll('.spinner, .loader, mat-spinner, [role="progressbar"], .loading-overlay, #loader, #spinner, app-loader, [aria-busy="true"], .skeleton, [class*="skeleton"]');
                 for (let i = 0; i < loaders.length; i++) {
                     const el = loaders[i];
                     const style = window.getComputedStyle(el);
@@ -439,14 +507,14 @@ class PlaywrightExecutorService:
         
         retries_prop = properties.get('retries')
         try:
-            retries_val = int(retries_prop) if retries_prop is not None else 1
+            retries_val = int(retries_prop) if retries_prop is not None else 0
         except:
-            retries_val = 1
+            retries_val = 0
             
-        MAX_ATTEMPTS = max(2, retries_val + 1)
+        MAX_ATTEMPTS = max(1, retries_val + 1)
         for attempt in range(MAX_ATTEMPTS):
             try:
-                self.start() # Ensure started
+                await self.start() # Ensure started
                 
                 # Resolve target (Page or Iframe)
                 target = self._page
@@ -506,16 +574,22 @@ class PlaywrightExecutorService:
                         try:
                             import time
                             t1 = time.time()
-                            # Perform forced click to bypass actionability wait times, return immediately
-                            await el.click(timeout=timeout, force=True, no_wait_after=True)
+                            # Two-tier action: 1) Try natural actionability check with adaptive timeout
+                            #                  2) Fall back to forced click if obscured by transient overlay/animation
+                            natural_timeout = min(timeout, 3000)
+                            try:
+                                await el.click(timeout=natural_timeout)
+                            except Exception as nat_err:
+                                logger.info(f"Natural click unfulfilled ({nat_err}), resorting to forced click fallback")
+                                await el.click(timeout=timeout, force=True)
                             t2 = time.time()
                             logger.info(f"⏱️ Click timing: click_exec={round((t2-t1)*1000)}ms")
                         except Exception as click_err:
-                            logger.warning(f"Forced click failed, error: {click_err}")
+                            logger.warning(f"Click failed, error: {click_err}")
                             raise click_err
                             
-                        # Brief wait for UI to handle event
-                        await self._page.wait_for_timeout(50)
+                        # Brief wait for UI to handle event and micro-animations settle
+                        await self._page.wait_for_timeout(100)
                         if "[HEURISTIC" in step_result["text"] or "[AI" in step_result["text"]:
                             step_result["text"] += f" | Clicked element: {selector}"
                         else:
@@ -524,10 +598,10 @@ class PlaywrightExecutorService:
                         # Fallback: click by coordinates recorded during Web Studio capture
                         import time
                         t1 = time.time()
-                        self._page.mouse.click(float(x_coord), float(y_coord))
+                        await self._page.mouse.click(float(x_coord), float(y_coord))
                         t2 = time.time()
                         logger.info(f"⏱️ Coordinate click at ({x_coord},{y_coord}): {round((t2-t1)*1000)}ms")
-                        await self._page.wait_for_timeout(50)
+                        await self._page.wait_for_timeout(100)
                         step_result["text"] = f"Clicked at coordinates ({x_coord}, {y_coord})"
                     else:
                         raise ValueError("Selector is missing for click step")
@@ -559,16 +633,22 @@ class PlaywrightExecutorService:
                             else:
                                 type_attr = await el.evaluate("e => e.type ? e.type.toLowerCase() : ''")
                                 if type_attr in ['radio', 'checkbox']:
-                                    await el.check(timeout=timeout, force=True)
+                                    try:
+                                        await el.check(timeout=min(timeout, 3000))
+                                    except Exception:
+                                        await el.check(timeout=timeout, force=True)
                                 else:
-                                    await el.fill(value, timeout=timeout, force=True, no_wait_after=True)
+                                    try:
+                                        await el.fill(value, timeout=min(timeout, 3000))
+                                    except Exception:
+                                        await el.fill(value, timeout=timeout, force=True)
                             t2 = time.time()
                             logger.info(f"⏱️ Type/Select timing: exec={round((t2-t1)*1000)}ms")
                         except Exception as type_err:
-                            logger.warning(f"Forced fill/select failed, error: {type_err}")
+                            logger.warning(f"Fill/select failed, error: {type_err}")
                             raise type_err
-                        # Minimal wait for state
-                        await self._page.wait_for_timeout(50)
+                        # Settle wait for DOM state and micro-animations
+                        await self._page.wait_for_timeout(100)
                         # Mask sensitive fields
                         _sensitive = ('password', 'passwd', 'secret', 'token', 'pin', 'cvv')
                         display_value = '••••••' if any(s in selector.lower() for s in _sensitive) else (value[:60] + ('…' if len(value) > 60 else ''))
@@ -592,7 +672,7 @@ class PlaywrightExecutorService:
                                 original_selector = properties.get('selector')
                                 if is_input:
                                     logger.info(f"🧠 [Smart Fallback] No selector for type step, but an input is focused. Typing directly.")
-                                    self._page.keyboard.type(value)
+                                    await self._page.keyboard.type(value)
                                     step_result["text"] = f"Typed into focused element (no selector provided)"
                                     return step_result # Success
                                 await self._page.wait_for_timeout(200)
@@ -624,7 +704,7 @@ class PlaywrightExecutorService:
                         await el.hover(timeout=timeout)
                         step_result["text"] = f"Hovered over {selector}"
                     elif x_coord is not None and y_coord is not None:
-                        self._page.mouse.move(float(x_coord), float(y_coord))
+                        await self._page.mouse.move(float(x_coord), float(y_coord))
                         step_result["text"] = f"Hovered over coordinates ({x_coord}, {y_coord})"
                     else:
                         raise ValueError("Selector is missing for hover step")
@@ -655,8 +735,8 @@ class PlaywrightExecutorService:
                                 step_result["text"] = "Scrolled to top"
                             else:
                                 if x is not None and y is not None:
-                                    self._page.mouse.move(float(x), float(y))
-                                self._page.mouse.wheel(dx_val, dy_val)
+                                    await self._page.mouse.move(float(x), float(y))
+                                await self._page.mouse.wheel(dx_val, dy_val)
                                 step_result["text"] = f"Scrolled by X:{dx_val} Y:{dy_val}"
                         except Exception as e:
                             logger.warning(f"Scroll via mouse.wheel failed: {e}")
@@ -671,7 +751,7 @@ class PlaywrightExecutorService:
                         await target.locator(selector).first.press(key, timeout=timeout)
                         step_result["text"] = f"Pressed {key} on {selector}"
                     else:
-                        self._page.keyboard.press(key)
+                        await self._page.keyboard.press(key)
                         step_result["text"] = f"Pressed {key} globally"
                         
                 elif step_type == 'assert':
@@ -768,7 +848,7 @@ class PlaywrightExecutorService:
                         raise ValueError("Selector is missing for getAttribute step")
 
                 elif step_type == 'refresh':
-                    self._page.reload(timeout=timeout)
+                    await self._page.reload(timeout=timeout)
                     step_result["text"] = "Page refreshed"
 
                 elif step_type == 'screenshot':
@@ -796,7 +876,7 @@ class PlaywrightExecutorService:
                         idx = int(value)
                         if idx < len(pages):
                             self._page = pages[idx]
-                            self._page.bring_to_front()
+                            await self._page.bring_to_front()
                             step_result["text"] = f"Switched to tab index {idx}"
                         else:
                             raise ValueError(f"Tab index {idx} out of bounds")
@@ -805,7 +885,7 @@ class PlaywrightExecutorService:
                         for p in pages:
                             if value.lower() in p.url.lower():
                                 self._page = p
-                                self._page.bring_to_front()
+                                await self._page.bring_to_front()
                                 step_result["text"] = f"Switched to tab URL containing '{value}'"
                                 found = True
                                 break
@@ -829,7 +909,7 @@ class PlaywrightExecutorService:
                         logger.info(f"      ♿ Running Axe-core Accessibility scan (thresholds: {thresholds})...")
                         
                         # Inject Axe-core script via CDN directly into the page
-                        self._page.add_script_tag(url="https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js")
+                        await self._page.add_script_tag(url="https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.9.1/axe.min.js")
                         
                         # Run evaluation
                         axe_results = await self._page.evaluate("async () => await axe.run()")
@@ -957,6 +1037,15 @@ class PlaywrightExecutorService:
                 existing_text = step_result.get("text", "")
                 step_result["text"] = f"{existing_text}\n{str(e)}".strip()
                 
+                if self._page_errors:
+                    recent_js_err = self._page_errors[-1]
+                    step_result["text"] += f"\n[Browser JS Error: {recent_js_err}]"
+                    step_result["page_errors"] = list(self._page_errors)
+                if self._console_errors:
+                    recent_console = self._console_errors[-1]
+                    step_result["text"] += f"\n[Browser Console: {recent_console}]"
+                    step_result["console_errors"] = list(self._console_errors)
+                
                 if self._page:
                     try:
                         import uuid
@@ -975,10 +1064,13 @@ class PlaywrightExecutorService:
         
         return step_result
 
-    def get_video_path(self):
+    async def get_video_path(self):
         """Returns the path to the recorded video if recording was enabled."""
         if self._page and self._page.video:
-            return self._page.video.path()
+            try:
+                return await self._page.video.path()
+            except Exception as e:
+                logger.warning(f"Error retrieving video path: {e}")
         return None
 
 # We will instantiate this per-flow in FlowExecutorService

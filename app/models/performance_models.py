@@ -1,6 +1,9 @@
 from sqlalchemy import Column, Integer, String, DateTime, JSON, Float
 from sqlalchemy.sql import func
 from app.database import Base
+from app.config import settings
+
+is_postgres = "postgres" in settings.DATABASE_URL.lower()
 
 class PerformanceTestResult(Base):
     __tablename__ = "performance_test_results"
@@ -43,5 +46,10 @@ class PerformanceTestResult(Base):
     api_stats = Column(JSON, nullable=True)
     failed_requests_detail = Column(JSON, nullable=True)
 
-    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    started_at = Column(DateTime(timezone=True), primary_key=is_postgres, server_default=func.now(), index=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        *([{"postgresql_partition_by": "RANGE (started_at)"}] if is_postgres else []),
+    )
+

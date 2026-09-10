@@ -12,6 +12,24 @@ def celery_execute_job(self, schedule_id: int, failed_item_ids: list = None):
     """
     logger.info(f"Celery worker received schedule execution task: {schedule_id}, failed_item_ids: {failed_item_ids}")
     
+    # Dynamically reload services to pick up on-disk code modifications without restarting worker
+    import importlib
+    import sys
+    for mod_name in [
+        'app.services.mobile_diagnostics_service',
+        'app.services.mobile_device_pool_service',
+        'app.services.mobile_vision_service',
+        'app.services.mobile_healing_service',
+        'app.services.appium_executor_service',
+        'app.services.flow_executor_service',
+        'app.services.scheduler_service'
+    ]:
+        if mod_name in sys.modules:
+            try:
+                importlib.reload(sys.modules[mod_name])
+            except Exception as reload_err:
+                logger.warning(f"Failed to reload {mod_name}: {reload_err}")
+
     # Import locally to avoid circular dependencies during Celery initialization
     from app.services.scheduler_service import execute_job_logic
     

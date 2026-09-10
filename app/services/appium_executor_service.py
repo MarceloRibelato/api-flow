@@ -1,6 +1,10 @@
 import logging
 import json
 import time
+import os
+import re
+import uuid
+import base64
 
 logger = logging.getLogger(__name__)
 
@@ -21,14 +25,16 @@ class AppiumExecutorService:
         self._settings = {}
         self._video_dir = None
         self._is_recording = False
+        self._is_first_step = True
+        self._acquired_device_info = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self, video_dir: str = None, db=None, product_id: int = None):
+    async def start(self, video_dir: str = None, db=None, product_id: int = None, device_id: int = None):
         import asyncio
-        return await asyncio.to_thread(self.start_sync, video_dir, db, product_id)
+        return await asyncio.to_thread(self.start_sync, video_dir, db, product_id, device_id)
 
     async def execute_step(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
         import asyncio
@@ -41,12 +47,75 @@ class AppiumExecutorService:
     async def stop(self, trace_path=None):
         return await self.close()
 
-    def start_sync(self, video_dir: str = None, db=None, product_id: int = None):
-        """Inicializa o driver mobile com as configurações do produto."""
+    async def stop_screen_recording(self):
+        import asyncio
+        return await asyncio.to_thread(self._stop_screen_recording)
+
+    async def start_screen_recording(self, video_dir: str = None):
+        import asyncio
+        if video_dir:
+            self._video_dir = video_dir
+        return await asyncio.to_thread(self._start_screen_recording)
+
+    async def restart(self, package_name: str = None):
+        import asyncio
+        return await asyncio.to_thread(self.restart_app, package_name)
+
+    def _get_package_name(self) -> str | None:
+        app_id = self._settings.get("app_identifier", "")
+        if app_id:
+            if "/" in app_id:
+                return app_id.split("/", 1)[0]
+            if not app_id.lower().endswith(".apk") and "\\" not in app_id:
+                return app_id
+        if self._driver:
+            try:
+                pkg = self._driver.capabilities.get("appPackage") or getattr(self._driver, "current_package", None)
+                if pkg:
+                    return pkg
+            except Exception:
+                pass
+        return None
+
+    def restart_app(self, package_name: str = None):
+        """Reinicia o aplicativo para a tela inicial utilizando terminate_app e activate_app."""
+        if not self._driver:
+            return
+        pkg = package_name or self._get_package_name()
+        if not pkg:
+            logger.debug("📱 [Appium] No package name available to restart app.")
+            return
+
         try:
+            try:
+                self._driver.hide_keyboard()
+            except Exception:
+                pass
+            logger.info(f"📱 [Appium] Restarting app '{pkg}' to ensure clean initial state...")
+            try:
+                self._driver.terminate_app(pkg)
+            except Exception as te:
+                logger.debug(f"terminate_app: {te}")
+            time.sleep(1)
+            try:
+                self._driver.activate_app(pkg)
+            except Exception as ae:
+                logger.debug(f"activate_app: {ae}")
+            self._is_first_step = True
+            time.sleep(2)
+            logger.info(f"📱 [Appium] App '{pkg}' restarted successfully.")
+        except Exception as err:
+            logger.warning(f"⚠️ [Appium] Could not restart app '{pkg}': {err}")
+
+    def start_sync(self, video_dir: str = None, db=None, product_id: int = None, device_id: int = None):
+        """Inicializa o driver mobile com as configurações do produto e pool de dispositivos."""
+        try:
+            self._is_first_step = True
             # Load settings from DB if available
             if db and product_id:
                 from app.services.product_service import ProductService
+                from app.services.mobile_device_pool_service import MobileDevicePoolService
+
                 settings_obj = ProductService.get_mobile_settings(db, product_id)
                 self._settings = {
                     "provider": settings_obj.provider or "appium_local",
@@ -58,6 +127,35 @@ class AppiumExecutorService:
                     "app_identifier": settings_obj.app_identifier or "",
                     "custom_capabilities": getattr(settings_obj, "custom_capabilities", None) or "",
                 }
+
+                # Acquire device from pool and reserve dedicated ports
+                try:
+                    self._acquired_device_info = MobileDevicePoolService.acquire_device(
+                        db=db,
+                        product_id=product_id,
+                        device_id=device_id
+                    )
+                    pool_dev = self._acquired_device_info.get("device")
+                    if pool_dev:
+                        if pool_dev.device_name:
+                            self._settings["device_name"] = pool_dev.device_name
+                        if pool_dev.platform_version:
+                            self._settings["platform_version"] = pool_dev.platform_version
+                        if pool_dev.provider_override:
+                            self._settings["provider"] = pool_dev.provider_override
+                        if pool_dev.server_url:
+                            self._settings["server_url"] = pool_dev.server_url
+                        if pool_dev.auth_user:
+                            self._settings["auth_user"] = pool_dev.auth_user
+                        if pool_dev.auth_token:
+                            self._settings["auth_token"] = pool_dev.auth_token
+                        if pool_dev.app_identifier:
+                            self._settings["app_identifier"] = pool_dev.app_identifier
+                        if pool_dev.custom_capabilities:
+                            self._settings["custom_capabilities"] = pool_dev.custom_capabilities
+                except Exception as pool_err:
+                    logger.warning(f"⚠️ [Device Pool] acquire_device notice: {pool_err}")
+
                 self._provider = self._settings["provider"]
                 logger.info(f"📱 [Appium] Loaded settings for product {product_id}: "
                             f"provider={self._provider}, device={self._settings['device_name']}")
@@ -122,46 +220,81 @@ class AppiumExecutorService:
             from appium.options.common.base import AppiumOptions
 
             options = AppiumOptions()
-            options.platform_name = "Android"
+            configured_platform = str(self._settings.get("platform_name", "")).lower()
+            custom_caps_str = str(self._settings.get("custom_capabilities", "")).lower()
+            is_ios = "ios" in configured_platform or "xcuitest" in custom_caps_str or "bundleid" in custom_caps_str
+
+            if is_ios:
+                options.platform_name = "iOS"
+                options.set_capability("appium:automationName", "XCUITest")
+            else:
+                options.platform_name = "Android"
+                options.set_capability("appium:automationName", "UiAutomator2")
+
             options.set_capability("appium:deviceName", self._settings["device_name"])
             if self._settings.get("platform_version"):
                 options.set_capability("appium:platformVersion", self._settings["platform_version"])
             if self._settings.get("app_identifier"):
                 app_id = self._settings["app_identifier"]
-                # Detect if it's an APK file path or an installed package name
-                is_apk_path = (
-                    app_id.lower().endswith('.apk') or
+                # Detect if it's an app file path (.apk/.ipa/.app) or an installed package/bundleId
+                is_app_file = (
+                    app_id.lower().endswith(('.apk', '.ipa', '.app')) or
                     '\\' in app_id or
                     ('/' in app_id and not app_id.startswith('com.') and not app_id.startswith('br.') and not app_id.startswith('io.'))
                 )
-                if is_apk_path:
-                    # Rewrite Windows path for Docker if needed
+                if is_app_file:
                     if app_id.startswith('C:\\') or app_id.startswith('c:\\'):
-                        # APK must be accessible from within the container — warn but still set
-                        logger.warning(f"📱 [Appium] APK path '{app_id}' is a Windows local path. "
+                        logger.warning(f"📱 [Appium] App path '{app_id}' is a Windows local path. "
                                        "Ensure Appium server runs on the host (not inside Docker).")
                     options.set_capability("appium:app", app_id)
-                    logger.info(f"📱 [Appium] Using APK install path: {app_id}")
+                    logger.info(f"📱 [Appium] Using app install path: {app_id}")
                 else:
-                    # e.g. 'br.com.sicoob' or 'com.vibra.app' or 'com.pkg/com.pkg.MainActivity'
-                    if '/' in app_id:
-                        pkg, activity = app_id.split('/', 1)
-                        options.set_capability("appium:appPackage", pkg)
-                        options.set_capability("appium:appActivity", activity)
-                        # Wait for any activity to avoid splash screen timeouts
-                        options.set_capability("appium:appWaitActivity", "*")
-                        logger.info(f"📱 [Appium] Using package: {pkg} and activity: {activity}")
+                    if is_ios:
+                        options.set_capability("appium:bundleId", app_id)
+                        logger.info(f"📱 [Appium] Using iOS bundleId: {app_id}")
                     else:
-                        options.set_capability("appium:appPackage", app_id)
-                        logger.info(f"📱 [Appium] Using installed package: {app_id}")
-            options.set_capability("appium:automationName", "UiAutomator2")
-            options.set_capability("appium:noReset", False)
+                        if '/' in app_id:
+                            pkg, activity = app_id.split('/', 1)
+                            options.set_capability("appium:appPackage", pkg)
+                            options.set_capability("appium:appActivity", activity)
+                            options.set_capability("appium:appWaitActivity", "*")
+                            logger.info(f"📱 [Appium] Using package: {pkg} and activity: {activity}")
+                        else:
+                            options.set_capability("appium:appPackage", app_id)
+                            options.set_capability("appium:appWaitActivity", "*")
+            # Ensure physical/emulator device screen is awake, unlocked, and stays on
+            if not is_ios:
+                try:
+                    dev_name = self._settings.get("device_name")
+                    dev_arg = f"-s {dev_name}" if dev_name and dev_name != "Android Emulator" else ""
+                    import subprocess
+                    subprocess.run(
+                        f"adb {dev_arg} shell 'svc power stayon true; input keyevent 224; wm dismiss-keyguard' 2>/dev/null",
+                        shell=True, timeout=5
+                    )
+                    logger.info(f"📱 [Appium] Sent ADB wake, dismiss-keyguard and stayon commands to device ({dev_name or 'default'})")
+                except Exception as adb_err:
+                    logger.debug(f"Device wake via ADB notice: {adb_err}")
+
+            options.set_capability("appium:noReset", True)
+            options.set_capability("appium:autoGrantPermissions", True)
             options.set_capability("appium:newCommandTimeout", 3600)
             options.set_capability("appium:ignoreUnimportantViews", True)
             options.set_capability("appium:disableWindowAnimation", True)
             options.set_capability("appium:unicodeKeyboard", True)
             options.set_capability("appium:resetKeyboard", True)
             options.set_capability("appium:waitForIdleTimeout", 0)
+
+            # Apply dynamic ports from Device Pool if allocated
+            if getattr(self, '_acquired_device_info', None) and not is_ios:
+                sys_port = self._acquired_device_info.get("system_port")
+                if sys_port:
+                    options.set_capability("appium:systemPort", sys_port)
+                    logger.info(f"🔌 [Appium] Injected dynamic systemPort={sys_port}")
+                mjpeg_port = self._acquired_device_info.get("mjpeg_port")
+                if mjpeg_port:
+                    options.set_capability("appium:mjpegServerPort", mjpeg_port)
+                    logger.info(f"🔌 [Appium] Injected dynamic mjpegServerPort={mjpeg_port}")
 
             # Apply custom capabilities (overrides default options if specified)
             self._apply_custom_capabilities(options)
@@ -199,7 +332,17 @@ class AppiumExecutorService:
             from appium.options.common.base import AppiumOptions
 
             options = AppiumOptions()
-            options.platform_name = "Android"
+            configured_platform = str(self._settings.get("platform_name", "")).lower()
+            custom_caps_str = str(self._settings.get("custom_capabilities", "")).lower()
+            is_ios = "ios" in configured_platform or "xcuitest" in custom_caps_str or "bundleid" in custom_caps_str
+
+            if is_ios:
+                options.platform_name = "iOS"
+                options.set_capability("appium:automationName", "XCUITest")
+            else:
+                options.platform_name = "Android"
+                options.set_capability("appium:automationName", "UiAutomator2")
+
             s = self._settings
 
             options.set_capability("appium:deviceName", s["device_name"])
@@ -207,23 +350,26 @@ class AppiumExecutorService:
                 options.set_capability("appium:platformVersion", s["platform_version"])
             if s.get("app_identifier"):
                 app_id = s["app_identifier"]
-                is_apk_path = (
-                    app_id.lower().endswith('.apk') or
+                is_app_file = (
+                    app_id.lower().endswith(('.apk', '.ipa', '.app')) or
                     '\\' in app_id or
                     ('/' in app_id and not app_id.startswith('com.') and not app_id.startswith('br.') and not app_id.startswith('io.'))
                 )
-                if is_apk_path:
+                if is_app_file:
                     options.set_capability("appium:app", app_id)
                 else:
-                    if '/' in app_id:
-                        pkg, activity = app_id.split('/', 1)
-                        options.set_capability("appium:appPackage", pkg)
-                        options.set_capability("appium:appActivity", activity)
-                        options.set_capability("appium:appWaitActivity", "*")
+                    if is_ios:
+                        options.set_capability("appium:bundleId", app_id)
                     else:
-                        options.set_capability("appium:appPackage", app_id)
-            options.set_capability("appium:automationName", "UiAutomator2")
-            options.set_capability("appium:noReset", False)
+                        if '/' in app_id:
+                            pkg, activity = app_id.split('/', 1)
+                            options.set_capability("appium:appPackage", pkg)
+                            options.set_capability("appium:appActivity", activity)
+                            options.set_capability("appium:appWaitActivity", "*")
+                        else:
+                            options.set_capability("appium:appPackage", app_id)
+            options.set_capability("appium:noReset", True)
+            options.set_capability("appium:autoGrantPermissions", True)
             options.set_capability("appium:newCommandTimeout", 3600)
             options.set_capability("appium:ignoreUnimportantViews", True)
             options.set_capability("appium:disableWindowAnimation", True)
@@ -357,6 +503,7 @@ class AppiumExecutorService:
 
     def execute_step_sync(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
         """Executa um passo nativo no Appium/Cloud."""
+        self._last_strategy_used = 'standard'
         step_type = step_data.get('type')
         props = step_data.get('properties', {})
         step_name = step_data.get('name', step_type)
@@ -378,6 +525,13 @@ class AppiumExecutorService:
                 window_size = self._driver.get_window_size()
                 logger.info(f"📱 [Appium] Screen resolution: {window_size['width']}x{window_size['height']}")
             except: pass
+
+            # Allow grace period for first step to accommodate app cold-boot splash screen
+            if getattr(self, '_is_first_step', False):
+                self._is_first_step = False
+                orig_to = int(props.get('timeout', 5000))
+                props['timeout'] = max(orig_to, 30000)
+                logger.info(f"📱 [Appium] First step grace period applied: timeout={props['timeout']}ms to accommodate app launch/splash screen")
 
             if step_type == 'tap':
                 selector = self._get_platform_selector(props, allow_value_fallback=False)
@@ -586,9 +740,10 @@ class AppiumExecutorService:
                                 except Exception:
                                     pass
                     except Exception as sel_err:
-                        logger.warning(f"⚠️ [Appium] Element '{selector}' not found in DOM ({sel_err}). Trying Vision AI screenshot calculation...")
-                        # Vision AI Fallback on Screenshot when DOM lookup fails
-                        if not tapped:
+                        logger.warning(f"⚠️ [Appium] Element '{selector}' not found in DOM ({sel_err}).")
+                        # Vision AI Fallback on Screenshot ONLY when explicit use_vision_ai is True
+                        if not tapped and use_vision_ai:
+                            logger.info(f"🎨 [Vision AI] Attempting fallback for '{selector}'...")
                             query_target = target_text
                             if not query_target and selector:
                                 raw_s = str(selector)
@@ -760,6 +915,7 @@ class AppiumExecutorService:
 
                 # Strategy 2: Direct send_keys
                 if not typed_success:
+                    self._clear_element_text(el)
                     try:
                         el.send_keys(value)
                         time.sleep(0.25)
@@ -771,6 +927,7 @@ class AppiumExecutorService:
 
                 # Strategy 3: set_value / set_text
                 if not typed_success:
+                    self._clear_element_text(el)
                     try:
                         if hasattr(el, 'set_value'):
                             el.set_value(value)
@@ -785,6 +942,7 @@ class AppiumExecutorService:
 
                 # Strategy 4: Selenium ActionChains
                 if not typed_success:
+                    self._clear_element_text(el)
                     try:
                         from selenium.webdriver.common.action_chains import ActionChains
                         actions = ActionChains(self._driver)
@@ -802,6 +960,7 @@ class AppiumExecutorService:
 
                 # Strategy 5: Active element send_keys
                 if not typed_success:
+                    self._clear_element_text(el)
                     try:
                         active_el = self._driver.switch_to.active_element
                         if active_el:
@@ -815,6 +974,7 @@ class AppiumExecutorService:
 
                 # Strategy 6: Mobile shell ADB input text (Android)
                 if not typed_success:
+                    self._clear_element_text(el)
                     try:
                         adb_value = value.replace(' ', '%s')
                         self._driver.execute_script('mobile: shell', {'command': 'input text', 'args': [adb_value]})
@@ -951,6 +1111,10 @@ class AppiumExecutorService:
                 logger.info(f"📍 Location set to ({lat}, {lon})")
 
             elif step_type == 'assert':
+                try:
+                    self._driver.hide_keyboard()
+                except Exception:
+                    pass
                 selector = self._get_platform_selector(props)
                 operator = props.get('operator', 'visible')
                 expected = props.get('value', '')
@@ -980,6 +1144,10 @@ class AppiumExecutorService:
                         raise AssertionError(f"Element '{selector}' should be disabled")
 
             elif step_type == 'assert_visual':
+                try:
+                    self._driver.hide_keyboard()
+                except Exception:
+                    pass
                 import base64
                 import numpy as np
                 import cv2
@@ -1118,7 +1286,8 @@ class AppiumExecutorService:
                     logger.info(f"🌐 [Appium] Network throttled to: {profile}")
                 except Exception:
                     # BrowserStack uses different API
-                    self._driver.execute_script('browserstack_executor: {"action": "setNetworkConditions", "arguments": {"networkProfile": "' + profile + '"}')
+                    bs_payload = json.dumps({"action": "setNetworkConditions", "arguments": {"networkProfile": profile}})
+                    self._driver.execute_script(f'browserstack_executor: {bs_payload}')
 
             # ─── BIOMETRICS ───
 
@@ -1184,7 +1353,8 @@ class AppiumExecutorService:
                 "reason": "OK",
                 "text": text_res,
                 "warning": step_warning,
-                "screenshot_b64": screenshot_b64
+                "screenshot_b64": screenshot_b64,
+                "strategy_used": getattr(self, '_last_strategy_used', 'standard'),
             }
 
         except AssertionError as ae:
@@ -1197,9 +1367,21 @@ class AppiumExecutorService:
                     logger.info("📸 [Appium] Screenshot on failure captured.")
                     s_url = self._save_screenshot(failure_screenshot, "error_assert")
                     if s_url:
-                        text_res += f"\\n[Screenshot: {s_url}]"
+                        text_res += f"\n[Screenshot: {s_url}]"
                 except Exception:
                     pass
+
+                # Extract native crash diagnostics (logcat / syslog)
+                try:
+                    from app.services.mobile_diagnostics_service import MobileDiagnosticsService
+                    diag = MobileDiagnosticsService.extract_crash_diagnostics(self._driver)
+                    if diag and diag.get("summary"):
+                        text_res += f"\n[Crash Diagnostics: {diag['summary']}]"
+                    if diag and diag.get("log_url"):
+                        text_res += f"\n[Forensic Log: {diag['log_url']}]"
+                except Exception:
+                    pass
+
             return {
                 "status": 400,
                 "reason": "Assertion Error",
@@ -1216,9 +1398,21 @@ class AppiumExecutorService:
                     failure_screenshot = self._driver.get_screenshot_as_base64()
                     s_url = self._save_screenshot(failure_screenshot, "error_fatal")
                     if s_url:
-                        text_res += f"\\n[Screenshot: {s_url}]"
+                        text_res += f"\n[Screenshot: {s_url}]"
                 except Exception:
                     pass
+
+                # Extract native crash diagnostics (logcat / syslog)
+                try:
+                    from app.services.mobile_diagnostics_service import MobileDiagnosticsService
+                    diag = MobileDiagnosticsService.extract_crash_diagnostics(self._driver)
+                    if diag and diag.get("summary"):
+                        text_res += f"\n[Crash Diagnostics: {diag['summary']}]"
+                    if diag and diag.get("log_url"):
+                        text_res += f"\n[Forensic Log: {diag['log_url']}]"
+                except Exception:
+                    pass
+
             return {
                 "status": 500,
                 "reason": "Appium Error",
@@ -1261,92 +1455,25 @@ class AppiumExecutorService:
             return []
 
     def _attempt_self_healing(self, original_selector: str, step_data: dict) -> str:
-        if not step_data:
+        if not step_data or not self._driver:
             return None
-            
+
         # Consider the flow settings passed via execute_step properties or a global _settings flag
-        # For this Enterprise Phase, we check self._settings
-        if not self._settings.get('enable_self_healing', True): # Defaulting to True for the showcase
+        if not self._settings.get('enable_self_healing', True):
             return None
-            
-        step_name = step_data.get('name', '')
-        step_desc = step_data.get('description', '')
-        
-        logger.warning(f"🩹 [Self-Healing] Element not found: '{original_selector}'. Attempting auto-heal for step '{step_name}'.")
+
+        from app.services.mobile_healing_service import MobileHealingEngine
+
         try:
-            import xml.etree.ElementTree as ET
-            import difflib
-            import re
-            
             page_source = self._driver.page_source
-            root = ET.fromstring(page_source.encode('utf-8'))
-            
-            best_node = None
-            keywords = []
-            
-            if original_selector:
-                sel_tokens = [t.lower() for t in re.split(r'[_:\-\s/]+', str(original_selector)) if len(t) >= 3]
-                keywords.extend(sel_tokens)
+        except Exception:
+            return None
 
-            if step_name: keywords.extend(step_name.lower().split())
-            if step_desc: keywords.extend(step_desc.lower().split())
-            
-            stopwords = ['tap', 'click', 'type', 'assert', 'the', 'on', 'in', 'button', 'input', 'field', 'em', 'no', 'na']
-            keywords = [k for k in keywords if k not in stopwords and len(k) >= 3]
-            
-            if not keywords:
-                return None
-                
-            highest_score = 0.0
-            orig_sel_clean = str(original_selector).lower()
-
-            for element in root.iter():
-                text = element.attrib.get('text', '').lower()
-                desc = element.attrib.get('content-desc', '').lower()
-                res_id = element.attrib.get('resource-id', '').lower()
-                
-                node_texts = [t for t in [text, desc, res_id] if t]
-                if not node_texts:
-                    continue
-
-                score = 0.0
-                for kw in keywords:
-                    for target in node_texts:
-                        if kw in target:
-                            score += 2.0
-                        ratio = difflib.SequenceMatcher(None, kw, target).ratio()
-                        if ratio > 0.75:
-                            score += (ratio * 2.0)
-                        
-                        full_ratio = difflib.SequenceMatcher(None, orig_sel_clean, target).ratio()
-                        if full_ratio > 0.7:
-                            score += (full_ratio * 3.0)
-                    
-                if score > highest_score:
-                    highest_score = score
-                    best_node = element
-                    
-            if best_node is not None and highest_score >= 1.5:
-                text_val = best_node.attrib.get('text', '')
-                desc_val = best_node.attrib.get('content-desc', '')
-                res_val = best_node.attrib.get('resource-id', '')
-                
-                healed_selector = None
-                if res_val:
-                    healed_selector = f"//*[@resource-id='{res_val}']"
-                elif desc_val:
-                    healed_selector = f"//*[@content-desc='{desc_val}']"
-                elif text_val:
-                    healed_selector = f"//*[@text='{text_val}']"
-                    
-                if healed_selector:
-                    logger.info(f"✨ [Self-Healing] Universal Healed selector found: {healed_selector} (Score: {highest_score:.2f})")
-                    return healed_selector
-                    
-        except Exception as e:
-            logger.error(f"🩹 [Self-Healing] Failed to heal: {e}")
-            
-        return None
+        return MobileHealingEngine.heal_selector(
+            page_source=page_source,
+            original_selector=original_selector,
+            step_data=step_data
+        )
 
     def _find_element(self, selector: str, timeout_ms: int = 5000, step_data: dict = None):
         """Dynamic multi-strategy element locator with polling until timeout_ms expires."""
@@ -1371,9 +1498,23 @@ class AppiumExecutorService:
             fast_wait = WebDriverWait(self._driver, 0.4)
 
             scrolled_attempt = False
+            alert_check_attempted = False
             while time.time() < deadline:
-                # If element not found in first 40% of timeout duration, perform gentle scroll down to expose off-screen elements
-                if (time.time() - start_time) > (max_duration * 0.4) and not scrolled_attempt:
+                elapsed = time.time() - start_time
+
+                # If element not found after 4s, check if an unexpected native system dialog/alert is blocking the screen
+                if elapsed > 4.0 and not alert_check_attempted:
+                    alert_check_attempted = True
+                    try:
+                        from app.services.mobile_diagnostics_service import MobileDiagnosticsService
+                        if MobileDiagnosticsService.dismiss_system_alerts_if_present(self._driver):
+                            time.sleep(0.5)
+                    except Exception:
+                        pass
+
+                # Only perform gentle scroll down if element is not found after at least 8s and 40% duration,
+                # ensuring initial screen loading / splash screen is not disturbed by inadvertent gestures
+                if elapsed > 8.0 and elapsed > (max_duration * 0.4) and not scrolled_attempt:
                     scrolled_attempt = True
                     try:
                         size = self._driver.get_window_size()
@@ -1510,7 +1651,8 @@ class AppiumExecutorService:
                                 return el
                     except Exception:
                         pass
-                    time.sleep(0.3)
+                    elapsed_now = time.time() - start_time
+                    time.sleep(0.1 if elapsed_now < 1.5 else (0.2 if elapsed_now < 3.0 else 0.3))
                     continue  # Skip all non-XPath strategies below; keep polling until timeout
 
                 # 3. Package Resource ID (contains :id/ or /)
@@ -1590,7 +1732,9 @@ class AppiumExecutorService:
                     except Exception:
                         pass
 
-                time.sleep(0.3)  # Poll every 300ms until timeout_ms expires
+                # Adaptive polling: 100ms early for fast local response, back off to 300ms
+                elapsed_now = time.time() - start_time
+                time.sleep(0.1 if elapsed_now < 1.5 else (0.2 if elapsed_now < 3.0 else 0.3))
 
             # 8. Self-Healing fallback activated automatically when exact lookups fail
             healed_sel = self._attempt_self_healing(clean_selector, step_data)
@@ -1670,88 +1814,35 @@ class AppiumExecutorService:
         """
         Analisa a captura de tela (PNG) e detecta visualmente o contorno do botão
         (retângulo preenchido de cor destacada dentro do container).
-        Calcula as coordenadas (x, y) exatas dinamicamente para qualquer aparelho e resolução.
+        Delega para o MobileVisionService especializado.
         """
         if not self._driver and not screenshot_bytes:
             return None
 
-        try:
-            import io
-            from PIL import Image
-            import numpy as np
+        from app.services.mobile_vision_service import MobileVisionService
 
-            if not screenshot_bytes and self._driver:
-                screenshot_bytes = self._driver.get_screenshot_as_png()
-
-            if not screenshot_bytes:
-                return None
-
-            image = Image.open(io.BytesIO(screenshot_bytes)).convert('RGB')
-            img_w, img_h = image.size
-
-            if container_bounds:
-                cx0 = max(0, int(container_bounds.get('x', 0)))
-                cy0 = max(0, int(container_bounds.get('y', 0)))
-                cw = int(container_bounds.get('width', img_w))
-                ch = int(container_bounds.get('height', img_h))
-                cx1 = min(img_w, cx0 + cw)
-                cy1 = min(img_h, cy0 + ch)
-            else:
-                cx0, cy0, cx1, cy1 = 0, 0, img_w, img_h
-
-            cropped = image.crop((cx0, cy0, cx1, cy1))
-            crop_w, crop_h = cropped.size
-            if crop_w <= 10 or crop_h <= 10:
-                return None
-
-            # Estratégia 1: OpenCV Contour Analysis (Se opencv-python estiver disponível)
+        if not screenshot_bytes and self._driver:
             try:
-                import cv2
-                np_img = np.array(cropped)
-                gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
-                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-                edges = cv2.Canny(blurred, 30, 150)
-                contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                screenshot_bytes = self._driver.get_screenshot_as_png()
+            except Exception:
+                screenshot_bytes = None
 
-                candidate_buttons = []
-                for cnt in contours:
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    aspect_ratio = w / float(h) if h > 0 else 0
-                    if 1.2 <= aspect_ratio <= 12.0 and (crop_w * 0.20) <= w <= (crop_w * 0.98) and 25 <= h <= 140:
-                        # Pontua candidatos que estão localizados no terço/metade inferior do container (padrão de botões de ação)
-                        score = (y + h / 2) + (w * h * 0.05)
-                        candidate_buttons.append((score, x, y, w, h))
+        if not screenshot_bytes:
+            return None
 
-                if candidate_buttons:
-                    candidate_buttons.sort(key=lambda item: item[0], reverse=True)
-                    _, bx, by, bw, bh = candidate_buttons[0]
-                    target_x = cx0 + bx + (bw // 2)
-                    target_y = cy0 + by + (bh // 2)
-                    return target_x, target_y
+        page_source = None
+        if self._driver:
+            try:
+                page_source = self._driver.page_source
             except Exception:
                 pass
 
-            # Estratégia 2: Varredura de baixa variância de cor (Faixa de botão sólido usando Numpy + Pillow)
-            np_img = np.array(cropped)
-            start_row = int(crop_h * 0.5)
-            row_scores = []
-            for r in range(start_row, crop_h - 10):
-                row_pixels = np_img[r, int(crop_w * 0.15):int(crop_w * 0.85)]
-                if len(row_pixels) > 0:
-                    var = np.var(row_pixels, axis=0).mean()
-                    row_scores.append((var, r))
-            
-            if row_scores:
-                row_scores.sort(key=lambda item: item[0])
-                best_r = row_scores[0][1]
-                target_x = cx0 + (crop_w // 2)
-                target_y = cy0 + best_r
-                return target_x, target_y
-
-        except Exception as e:
-            logger.warning(f"⚠️ [Vision AI] Exceção ao detectar botão na screenshot: {e}")
-
-        return None
+        return MobileVisionService.detect_button_coordinates(
+            screenshot_bytes=screenshot_bytes,
+            container_bounds=container_bounds,
+            target_text=target_text,
+            page_source=page_source
+        )
 
     # ------------------------------------------------------------------
     # Video Recording Helpers
@@ -1793,11 +1884,38 @@ class AppiumExecutorService:
 
     def close_sync(self):
         if self._driver:
+            try:
+                self._driver.hide_keyboard()
+            except Exception:
+                pass
             if self._is_recording:
                 self._stop_screen_recording()
+            try:
+                pkg = self._get_package_name()
+                if pkg:
+                    try:
+                        self._driver.terminate_app(pkg)
+                        logger.info(f"📱 [Appium] Terminated app '{pkg}' on session close.")
+                    except Exception as te:
+                        logger.debug(f"terminate_app on close: {te}")
+            except Exception:
+                pass
             try:
                 self._driver.quit()
             except Exception:
                 pass
             self._driver = None
             logger.info(f"📱 [{self._provider}] Driver session closed.")
+
+        if getattr(self, '_acquired_device_info', None):
+            try:
+                from app.services.mobile_device_pool_service import MobileDevicePoolService
+                MobileDevicePoolService.release_device(
+                    device_id=self._acquired_device_info.get("device_id"),
+                    system_port=self._acquired_device_info.get("system_port"),
+                    mjpeg_port=self._acquired_device_info.get("mjpeg_port")
+                )
+                logger.info("📱 [Appium] Released device and ports back to Device Pool.")
+            except Exception as pool_rel_err:
+                logger.debug(f"Device pool release notice: {pool_rel_err}")
+            self._acquired_device_info = None

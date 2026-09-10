@@ -8,6 +8,7 @@ from app.database import get_db
 from app.models.schedule_models import ScheduleModel
 from app.services.scheduler_service import execute_job
 from app.services.pdf_service import PDFService
+from app.services.audit_service import AuditService
 
 router = APIRouter(
     prefix="/execute",
@@ -67,7 +68,7 @@ def trigger_execution(
         target_id=target_id,
         environment_id=req.environment_id,
         cron_expression=None,
-        run_at=datetime.utcnow(), # One-off
+        run_at=datetime.now(timezone.utc), # One-off
         status='active',
         max_concurrency=req.max_concurrency, # Save max_concurrency
         flow_type=req.flow_type or 'api', # Track if this is an E2E or API run
@@ -157,7 +158,7 @@ def get_e2e_execution_pdf(
     )
 
 
-from app.models.api_test_history_models import ApiExecutionHistory
+from app.models.api_test_history_models import ApiExecutionHistory, WebExecutionHistory, MobileExecutionHistory
 
 class RetryExecutionRequest(BaseModel):
     schedule_id: Optional[int] = None
@@ -191,14 +192,25 @@ def retry_execution(
 
     hist_record = None
     if not existing_schedule:
-        if req.batch_id:
-            hist_record = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.batch_id == req.batch_id).first()
-        if not hist_record and req.failed_item_ids:
-            clean_ids = [int(x) for x in req.failed_item_ids if str(x).isdigit()]
-            if clean_ids:
-                hist_record = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.id.in_(clean_ids)).first()
-        if not hist_record and schedule_id:
-            hist_record = db.query(ApiExecutionHistory).filter(ApiExecutionHistory.schedule_id == schedule_id).first()
+        model_candidates = []
+        if req.flow_type == 'mobile':
+            model_candidates = [MobileExecutionHistory, WebExecutionHistory, ApiExecutionHistory]
+        elif req.flow_type in ['e2e', 'web']:
+            model_candidates = [WebExecutionHistory, MobileExecutionHistory, ApiExecutionHistory]
+        else:
+            model_candidates = [ApiExecutionHistory, WebExecutionHistory, MobileExecutionHistory]
+
+        for Model in model_candidates:
+            if req.batch_id and not hist_record:
+                hist_record = db.query(Model).filter(Model.batch_id == req.batch_id).first()
+            if not hist_record and req.failed_item_ids:
+                clean_ids = [int(x) for x in req.failed_item_ids if str(x).isdigit()]
+                if clean_ids:
+                    hist_record = db.query(Model).filter(Model.id.in_(clean_ids)).first()
+            if not hist_record and schedule_id:
+                hist_record = db.query(Model).filter(Model.schedule_id == schedule_id).first()
+            if hist_record:
+                break
 
         if hist_record and hist_record.schedule_id:
             existing_schedule = db.query(ScheduleModel).filter(ScheduleModel.id == hist_record.schedule_id).first()
@@ -281,21 +293,29 @@ def retry_execution(
 
     # Auto-resolve failed_item_ids if not explicitly provided
     if not req.failed_item_ids:
-        query = db.query(ApiExecutionHistory.id)
+        eff_ft = (target_schedule.flow_type if target_schedule else None) or req.flow_type or 'api'
+        if eff_ft == 'mobile':
+            TargetHistoryModel = MobileExecutionHistory
+        elif eff_ft in ['e2e', 'web']:
+            TargetHistoryModel = WebExecutionHistory
+        else:
+            TargetHistoryModel = ApiExecutionHistory
+
+        query = db.query(TargetHistoryModel.id)
         if existing_schedule:
-            query = query.filter(ApiExecutionHistory.schedule_id == existing_schedule.id)
-        elif req.batch_id:
-            query = query.filter(ApiExecutionHistory.batch_id == req.batch_id)
-        elif hist_record and hist_record.schedule_id:
-            query = query.filter(ApiExecutionHistory.schedule_id == hist_record.schedule_id)
-        elif hist_record and hist_record.batch_id:
-            query = query.filter(ApiExecutionHistory.batch_id == hist_record.batch_id)
+            query = query.filter(TargetHistoryModel.schedule_id == existing_schedule.id)
+        if req.batch_id:
+            query = query.filter(TargetHistoryModel.batch_id == req.batch_id)
+        elif not existing_schedule and hist_record and hist_record.schedule_id:
+            query = query.filter(TargetHistoryModel.schedule_id == hist_record.schedule_id)
+        elif not existing_schedule and hist_record and hist_record.batch_id:
+            query = query.filter(TargetHistoryModel.batch_id == hist_record.batch_id)
 
         failed_rows = query.filter(
-            (ApiExecutionHistory.status_code >= 400) | 
-            (ApiExecutionHistory.status_code == 0) |
-            (ApiExecutionHistory.status_code.is_(None)) |
-            ((ApiExecutionHistory.error_message.isnot(None)) & (ApiExecutionHistory.error_message != ''))
+            (TargetHistoryModel.status_code >= 400) | 
+            (TargetHistoryModel.status_code == 0) |
+            (TargetHistoryModel.status_code.is_(None)) |
+            ((TargetHistoryModel.error_message.isnot(None)) & (TargetHistoryModel.error_message != ''))
         ).all()
         if failed_rows:
             req.failed_item_ids = [r[0] for r in failed_rows]

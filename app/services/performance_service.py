@@ -71,6 +71,7 @@ class PerformanceService:
         api_cache_lock = threading.Lock()
         failed_calls = []
         failed_calls_lock = threading.Lock()
+        stats_lock = threading.Lock()
 
         parsed_apis = []
         for api in api_list:
@@ -131,13 +132,19 @@ class PerformanceService:
         # We'll collect coarse time series 
         time_series = []
         
-        # Setup Detailed CSV Logger
+        # Setup Detailed CSV Logger with shared reports directory
         log_queue = queue.Queue()
-        csv_file_path = f"/tmp/{job_id}_detailed.csv"
+        base_reports_dir = "/app/data/reports" if os.path.exists("/app") else os.path.abspath("data/reports")
+        try:
+            os.makedirs(base_reports_dir, exist_ok=True)
+            csv_file_path = os.path.join(base_reports_dir, f"{job_id}_detailed.csv")
+        except Exception:
+            base_reports_dir = "/tmp"
+            csv_file_path = f"/tmp/{job_id}_detailed.csv"
         
         def csv_writer_worker():
             try:
-                os.makedirs("/tmp", exist_ok=True)
+                os.makedirs(os.path.dirname(csv_file_path), exist_ok=True)
                 with open(csv_file_path, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
                     writer.writerow(["Timestamp", "API ID", "Method", "URL", "Status Code", "Latency (ms)", "Error"])
@@ -268,14 +275,21 @@ class PerformanceService:
                                 verify=False
                             )
                             latency = (time.time() - start_t) * 1000
-                            stats["total"] += 1
-                            stats["latencies"].append(latency)
-                            stats_per_api[api["id"]]["total"] += 1
-                            stats_per_api[api["id"]]["latencies"].append(latency)
+                            is_success = resp.status_code < 400
+
+                            with stats_lock:
+                                stats["total"] += 1
+                                stats["latencies"].append(latency)
+                                stats_per_api[api["id"]]["total"] += 1
+                                stats_per_api[api["id"]]["latencies"].append(latency)
+                                if is_success:
+                                    stats["success"] += 1
+                                    stats_per_api[api["id"]]["success"] += 1
+                                else:
+                                    stats["failed"] += 1
+                                    stats_per_api[api["id"]]["failed"] += 1
                             
-                            if resp.status_code < 400:
-                                stats["success"] += 1
-                                stats_per_api[api["id"]]["success"] += 1
+                            if is_success:
                                 log_queue.put([
                                     datetime.now().isoformat(),
                                     api["id"],
@@ -313,8 +327,6 @@ class PerformanceService:
                                                 "extracted_vars": {}
                                             }
                             else:
-                                stats["failed"] += 1
-                                stats_per_api[api["id"]]["failed"] += 1
                                 error_msg = resp.text[:150] or resp.reason or "Non-success status code"
                                 with failed_calls_lock:
                                     if len(failed_calls) < 200:
@@ -340,12 +352,13 @@ class PerformanceService:
                                     logger.error(f"Load test failed with status {resp.status_code}: {resp.text[:200]}")
                         except Exception as e:
                             latency = (time.time() - start_t) * 1000
-                            stats["total"] += 1
-                            stats["failed"] += 1
-                            stats["latencies"].append(latency)
-                            stats_per_api[api["id"]]["total"] += 1
-                            stats_per_api[api["id"]]["failed"] += 1
-                            stats_per_api[api["id"]]["latencies"].append(latency)
+                            with stats_lock:
+                                stats["total"] += 1
+                                stats["failed"] += 1
+                                stats["latencies"].append(latency)
+                                stats_per_api[api["id"]]["total"] += 1
+                                stats_per_api[api["id"]]["failed"] += 1
+                                stats_per_api[api["id"]]["latencies"].append(latency)
                             with failed_calls_lock:
                                 if len(failed_calls) < 200:
                                     failed_calls.append({
@@ -408,16 +421,31 @@ class PerformanceService:
                     pass
                 
                 time.sleep(1)
-                curr_total = stats["total"]
-                curr_success = stats["success"]
-                curr_failed = stats["failed"]
-                curr_latencies_len = len(stats["latencies"])
+                with stats_lock:
+                    curr_total = stats["total"]
+                    curr_success = stats["success"]
+                    curr_failed = stats["failed"]
+                    curr_latencies_len = len(stats["latencies"])
+                    recent_latencies = list(stats["latencies"][last_latencies_len:curr_latencies_len])
+                    
+                    api_snapshot = {}
+                    for api_id, s in stats_per_api.items():
+                        c_tot = s["total"]
+                        c_len = len(s["latencies"])
+                        rec_lats = list(s["latencies"][last_stats_per_api[api_id]["latencies_len"]:c_len])
+                        api_snapshot[api_id] = {
+                            "total": c_tot,
+                            "len": c_len,
+                            "recent_lats": rec_lats,
+                            "name": s["name"],
+                            "url": s["url"],
+                            "method": s["method"]
+                        }
 
                 rps = curr_total - last_total
                 success_ps = curr_success - last_success
                 errors_ps = curr_failed - last_failed
                 
-                recent_latencies = stats["latencies"][last_latencies_len:curr_latencies_len]
                 avg_latency = sum(recent_latencies) / len(recent_latencies) if recent_latencies else 0
 
                 last_total = curr_total
@@ -435,21 +463,20 @@ class PerformanceService:
                     active_users = virtual_users
 
                 api_metrics = {}
-                for api_id, s in stats_per_api.items():
-                    curr_api_total = s["total"]
-                    curr_api_latencies_len = len(s["latencies"])
+                for api_id, snap in api_snapshot.items():
+                    curr_api_total = snap["total"]
+                    curr_api_latencies_len = snap["len"]
                     
                     api_rps = curr_api_total - last_stats_per_api[api_id]["total"]
-                    
-                    recent_api_latencies = s["latencies"][last_stats_per_api[api_id]["latencies_len"]:curr_api_latencies_len]
+                    recent_api_latencies = snap["recent_lats"]
                     api_avg_latency = sum(recent_api_latencies) / len(recent_api_latencies) if recent_api_latencies else 0
                     
                     api_metrics[api_id] = {
                         "rps": api_rps,
                         "avg_latency": api_avg_latency,
-                        "name": s["name"],
-                        "url": s["url"],
-                        "method": s["method"]
+                        "name": snap["name"],
+                        "url": snap["url"],
+                        "method": snap["method"]
                     }
                     
                     last_stats_per_api[api_id]["total"] = curr_api_total
@@ -487,19 +514,36 @@ class PerformanceService:
 
         actual_duration = time.time() - start_exec_time
 
-        # Compute final stats
+        # Compute final stats safely
         def percentile(data, p):
             if not data: return 0.0
-            if len(data) == 1: return data[0]
+            if len(data) == 1: return float(data[0])
             k = (len(data) - 1) * p
             f = int(k)
             c = f + 1
-            if f == c: return data[int(k)]
+            if f >= len(data) - 1: return float(data[-1])
             d0 = data[f] * (c - k)
             d1 = data[c] * (k - f)
-            return d0 + d1
+            return float(d0 + d1)
 
-        latencies = stats["latencies"]
+        with stats_lock:
+            latencies = list(stats["latencies"])
+            total_reqs = stats["total"]
+            success_reqs = stats["success"]
+            failed_reqs = stats["failed"]
+            api_stats_copy = {
+                api_id: {
+                    "total": s["total"],
+                    "success": s["success"],
+                    "failed": s["failed"],
+                    "latencies": list(s["latencies"]),
+                    "name": s["name"],
+                    "url": s["url"],
+                    "method": s["method"]
+                }
+                for api_id, s in stats_per_api.items()
+            }
+
         if latencies:
             latencies.sort()
             result.avg_latency = sum(latencies) / len(latencies)
@@ -511,7 +555,7 @@ class PerformanceService:
             result.p99_latency = percentile(latencies, 0.99)
             
         final_api_stats = {}
-        for api_id, s in stats_per_api.items():
+        for api_id, s in api_stats_copy.items():
             api_lats = s["latencies"]
             api_lats.sort()
             final_api_stats[api_id] = {
@@ -534,11 +578,11 @@ class PerformanceService:
         result.api_stats = final_api_stats
         result.failed_requests_detail = failed_calls
         
-        result.total_requests = stats["total"]
-        result.success_requests = stats["success"]
-        result.failed_requests = stats["failed"]
+        result.total_requests = total_reqs
+        result.success_requests = success_reqs
+        result.failed_requests = failed_reqs
         if actual_duration > 0:
-            result.requests_per_second = stats["total"] / actual_duration
+            result.requests_per_second = total_reqs / actual_duration
         
         result.time_series_data = time_series
         if result.status != "stopped":
