@@ -1,34 +1,82 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 from app.database import get_db
 from app.services.skill_service import SkillService
 from app.services.ai_task_manager import ai_task_manager
 from app.services.analysis_service import AnalysisService
+from app.auth import get_current_user
+from app.models.user_models import UserDB
 import uuid
 import json
 import random
 import re
 import copy
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analysis/skills", tags=["Analysis Skills"])
 
+def _resolve_user_and_company(
+    current_user: UserDB,
+    user_id: Optional[int] = None,
+    company_id: Optional[int] = None
+) -> tuple[int, int]:
+    """
+    Validates that current_user is authorized for the requested user_id and company_id,
+    preventing BOLA (Broken Object Level Authorization).
+    Non-admin users can only operate on their own behalf and within their own organization.
+    """
+    eff_user_id = current_user.id
+    if user_id is not None and user_id != current_user.id:
+        if current_user.role != "admin":
+            raise HTTPException(
+                status_code=403, 
+                detail="Acesso não autorizado: você não tem permissão para operar em nome de outro usuário."
+            )
+        eff_user_id = user_id
+
+    eff_company_id = current_user.company_id
+    if company_id is not None and company_id != current_user.company_id:
+        if current_user.role != "admin":
+            raise HTTPException(
+                status_code=403, 
+                detail="Acesso não autorizado: você não tem permissão para operar em outra organização."
+            )
+        eff_company_id = company_id
+
+    return eff_user_id, eff_company_id
+
 @router.get("/debug_settings")
-def debug_settings(db: Session = Depends(get_db)):
+def debug_settings(
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito a administradores.")
     from app.models.agent_models import AgentSettingsDB
-    settings = db.query(AgentSettingsDB).first()
+    settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == current_user.id).first()
     if not settings:
-        return {"error": "No settings found"}
+        return {"configured": False}
+    masked_key = f"{settings.ai_api_key[:3]}...{settings.ai_api_key[-3:]}" if settings.ai_api_key and len(settings.ai_api_key) > 6 else ("***" if settings.ai_api_key else None)
     return {
         "user_id": settings.user_id,
         "provider": settings.ai_provider,
         "model": settings.ai_model,
-        "key": settings.ai_api_key,
-        "url": settings.ai_base_url
+        "key_configured": bool(settings.ai_api_key),
+        "key_masked": masked_key,
+        "url": settings.ai_base_url,
+        "ai_enabled": settings.ai_enabled
     }
 
 @router.get("/dump-flow")
-def dump_flow(db: Session = Depends(get_db)):
+def dump_flow(
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito a administradores.")
     from app.models.flow_models import FlowDB, FlowEdgeDB
     import uuid
     flow = db.query(FlowDB).order_by(FlowDB.updated_at.desc()).first()
@@ -68,8 +116,13 @@ def dump_flow(db: Session = Depends(get_db)):
     return {"status": "all_connected"}
 
 @router.get("/clean-ghosts")
-def clean_ghosts(db: Session = Depends(get_db)):
-    from app.models.flow_models import FlowDB, FlowNodeDB, FlowCardDataDB, FlowE2EStepDB
+def clean_ghosts(
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito a administradores.")
+    from app.models.flow_models import FlowDB, FlowNodeDB, FlowCardDataDB, FlowEdgeDB, FlowE2EStepDB
     from sqlalchemy import desc
     
     # 1. Encontra cards órfãos (que não tem um Node correspondente no fluxo)
@@ -116,8 +169,14 @@ def clean_ghosts(db: Session = Depends(get_db)):
         "deleted_ghost_cards": ghost_cards_count,
         "deleted_duplicate_flows": deleted_flows_count
     }
+
 @router.get("/debug-db")
-def debug_db(db: Session = Depends(get_db)):
+def debug_db(
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito a administradores.")
     from app.models.flow_models import FlowDB, FlowNodeDB, FlowCardDataDB
     from sqlalchemy import func
     
@@ -139,7 +198,8 @@ def debug_db(db: Session = Depends(get_db)):
 
 @router.get("/list")
 def list_skills(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
     """Returns the list of available specialist skills dynamically from skills directory."""
     import os
@@ -174,34 +234,46 @@ def list_skills(
 def execute_skill(
     flow_id: int,
     skill_id: str,
-    user_id: int = Query(...),
-    company_id: int = Query(1),
-    db: Session = Depends(get_db)
+    user_id: Optional[int] = Query(None),
+    company_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
-    """Executes a generic skill (returns text/insights)."""
+    """Executes a generic skill (returns text/insights) with proper flow pruning and context."""
+    eff_user_id, eff_company_id = _resolve_user_and_company(current_user, user_id, company_id)
     try:
+        from app.models.flow_models import FlowDB
         from app.services.flow_service import FlowService
-        flow = FlowService.load(db, None, company_id, flow_id, "api")
-        if not flow or not flow.get("nodes"):
-            flow = FlowService.load(db, None, company_id, flow_id, "e2e")
-            
-        nodes = flow.get("nodes", [])
-        cardData = flow.get("cardData", {})
-        flow_type = flow.get("flow_type") or "e2e"
         
+        flow_db = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
+        if not flow_db:
+            raise HTTPException(status_code=404, detail="Fluxo não encontrado.")
+            
+        flow_type = flow_db.flow_type or "api"
+        flow_data = FlowService.load(db, flow_db.project_id, eff_company_id, flow_id, flow_type)
+        pruned_data = SkillService._prune_flow_for_llm(flow_data)
+        blueprint = SkillService.build_flow_blueprint(flow_db.name, flow_type, pruned_data)
+
+        nodes = pruned_data.get("nodes", [])
+        cardData = pruned_data.get("cardData", {})
         mapping_payload = {"nodes": nodes, "cardData": cardData, "flow_type": flow_type}
+
         generation_context = {
-            "blueprint": "Logical Blueprint Context",
+            "blueprint": json.dumps(blueprint, ensure_ascii=False),
             "nodes": nodes,
             "cardData": cardData,
-            "mapping_context": json.dumps(mapping_payload),
+            "mapping_context": json.dumps(mapping_payload, ensure_ascii=False),
             "flow_type": flow_type,
-            "project_id": flow.get("project_id")
+            "project_id": flow_db.project_id
         }
         
-        result = SkillService.execute_skill(db, user_id, skill_id, generation_context)
+        # Analytical skills run in isolated one-shot mode (flow_id=None) to prevent conversation memory pollution
+        result = SkillService.execute_skill(db, eff_user_id, skill_id, generation_context, flow_id=None)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error executing skill {skill_id} on flow {flow_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 from pydantic import BaseModel
@@ -217,49 +289,57 @@ def chat_with_skill(
     flow_id: int,
     skill_id: str,
     req: ChatRequestSchema,
-    user_id: int = Query(...),
-    company_id: int = Query(1),
-    db: Session = Depends(get_db)
+    user_id: Optional[int] = Query(None),
+    company_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
-    """Executes a chat message within a skill context, with memory."""
+    """Executes a chat message within a skill context, with explicit session memory and clean pruning."""
+    eff_user_id, eff_company_id = _resolve_user_and_company(current_user, user_id, company_id)
     try:
+        from app.models.flow_models import FlowDB
         from app.services.flow_service import FlowService
         
+        flow_db = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
+        flow_type = flow_db.flow_type if flow_db else "e2e"
+        
         # Use live context from frontend if available, else load from DB
-        flow_type = "e2e"
         if req.live_context and "nodes" in req.live_context:
-            nodes = req.live_context.get("nodes", [])
-            cardData = req.live_context.get("cardData", {})
-            flow_type = req.live_context.get("flow_type") or "e2e"
+            raw_flow = {
+                "nodes": req.live_context.get("nodes", []),
+                "edges": req.live_context.get("edges", []),
+                "cardData": req.live_context.get("cardData", {}),
+                "flow_type": req.live_context.get("flow_type") or flow_type
+            }
+            flow_type = raw_flow["flow_type"]
+            pruned_data = SkillService._prune_flow_for_llm(raw_flow)
         else:
-            flow = FlowService.load(db, None, company_id, flow_id, "api")
-            if not flow or not flow.get("nodes"):
-                flow = FlowService.load(db, None, company_id, flow_id, "e2e")
-            nodes = flow.get("nodes", [])
-            cardData = flow.get("cardData", {})
-            flow_type = flow.get("flow_type") or "e2e"
-            
-        # Limit the size of context to prevent context window overflow
-        if len(nodes) > 10:
-            nodes = nodes[:10]
-            
+            flow_data = FlowService.load(db, flow_db.project_id if flow_db else None, eff_company_id, flow_id, flow_type)
+            pruned_data = SkillService._prune_flow_for_llm(flow_data)
+
+        nodes = pruned_data.get("nodes", [])
+        cardData = pruned_data.get("cardData", {})
+        flow_name = flow_db.name if flow_db else "Flow"
+        blueprint = SkillService.build_flow_blueprint(flow_name, flow_type, pruned_data)
+
         mapping_payload = {"nodes": nodes, "cardData": cardData, "flow_type": flow_type}
         if req.live_context and "execution_results" in req.live_context:
             mapping_payload["execution_results"] = req.live_context["execution_results"]
 
         generation_context = {
-            "mapping_context": json.dumps(mapping_payload),
+            "blueprint": json.dumps(blueprint, ensure_ascii=False),
+            "mapping_context": json.dumps(mapping_payload, ensure_ascii=False),
             "nodes": nodes,
             "cardData": cardData,
             "flow_type": flow_type,
             "user_message": req.message
         }
         
-        # We pass flow_id=None to disable the automatic database memory injection,
+        # We pass flow_id=None to disable automatic database memory injection,
         # because we are passing the explicit `history` from the frontend session.
         result = SkillService.execute_skill(
             db, 
-            user_id, 
+            eff_user_id, 
             skill_id, 
             generation_context, 
             flow_id=None, 
@@ -267,18 +347,21 @@ def chat_with_skill(
         )
         return {"response": result}
     except Exception as e:
+        logger.error(f"Error in chat_with_skill: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/flow/{flow_id}/generate-alternatives")
 def generate_alternatives(
     flow_id: int,
-    user_id: int = Query(...),
-    company_id: int = Query(1),
-    db: Session = Depends(get_db)
+    user_id: Optional[int] = Query(None),
+    company_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
     """Executes the specialist mapping -> generation workflow for a specific flow."""
+    eff_user_id, eff_company_id = _resolve_user_and_company(current_user, user_id, company_id)
     try:
-        alternatives = SkillService.generate_alternatives_workflow(db, user_id, flow_id, company_id)
+        alternatives = SkillService.generate_alternatives_workflow(db, eff_user_id, flow_id, eff_company_id)
         return alternatives
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
@@ -294,29 +377,39 @@ def generate_alternatives(
 
 @router.get("/user-active-task")
 def get_user_active_task(
-    user_id: int = Query(...)
+    user_id: Optional[int] = Query(None),
+    current_user: UserDB = Depends(get_current_user)
 ):
     """Returns any active (PENDING or PROCESSING) AI task for the user."""
-    active_task = ai_task_manager.get_active_task_for_user(user_id)
+    eff_user_id, _ = _resolve_user_and_company(current_user, user_id, None)
+    active_task = ai_task_manager.get_active_task_for_user(eff_user_id)
     return {"active_task": active_task}
 
 @router.get("/tasks/{task_id}")
 def get_ai_task_status(
-    task_id: str
+    task_id: str,
+    current_user: UserDB = Depends(get_current_user)
 ):
     """Returns status and result of a specific AI task."""
     task = ai_task_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task de IA não encontrada.")
+    if task.get("user_id") != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Acesso não autorizado a esta tarefa de IA.")
     return {"task": task}
 
 @router.post("/tasks/{task_id}/cancel")
 def cancel_ai_task(
     task_id: str,
-    user_id: int = Query(...)
+    user_id: Optional[int] = Query(None),
+    current_user: UserDB = Depends(get_current_user)
 ):
     """Cancels a pending or processing AI task for a user."""
-    success = ai_task_manager.cancel_task(task_id, user_id)
+    eff_user_id, _ = _resolve_user_and_company(current_user, user_id, None)
+    task = ai_task_manager.get_task(task_id)
+    if task and task.get("user_id") != eff_user_id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Acesso não autorizado para cancelar esta tarefa.")
+    success = ai_task_manager.cancel_task(task_id, eff_user_id)
     if not success:
         raise HTTPException(status_code=400, detail="Não foi possível cancelar a task (não encontrada ou já finalizada).")
     return {"status": "cancelled", "message": "Solicitação cancelada pelo usuário."}
@@ -324,21 +417,24 @@ def cancel_ai_task(
 @router.post("/flow/{flow_id}/generate-alternatives-async")
 def generate_alternatives_async(
     flow_id: int,
-    user_id: int = Query(...),
-    company_id: int = Query(1)
+    user_id: Optional[int] = Query(None),
+    company_id: Optional[int] = Query(None),
+    current_user: UserDB = Depends(get_current_user)
 ):
     """Initiates asynchronous alternatives generation in a background worker."""
+    eff_user_id, eff_company_id = _resolve_user_and_company(current_user, user_id, company_id)
+
     def _worker(db, u_id, f_id, c_id):
         return SkillService.generate_alternatives_workflow(db, u_id, f_id, c_id)
 
     task = ai_task_manager.start_task(
-        user_id,
+        eff_user_id,
         flow_id,
         "generate_alternatives_skill",
         _worker,
-        user_id,
+        eff_user_id,
         flow_id,
-        company_id
+        eff_company_id
     )
     return task
 
@@ -346,39 +442,59 @@ def generate_alternatives_async(
 def execute_skill_async(
     flow_id: int,
     skill_id: str,
-    user_id: int = Query(...),
-    company_id: int = Query(1),
-    db: Session = Depends(get_db)
+    user_id: Optional[int] = Query(None),
+    company_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
-    """Initiates asynchronous generic skill execution in a background worker."""
+    """Initiates asynchronous generic skill execution in a background worker with proper flow pruning and context."""
+    eff_user_id, eff_company_id = _resolve_user_and_company(current_user, user_id, company_id)
+    from app.models.flow_models import FlowDB
     from app.services.flow_service import FlowService
-    flow = FlowService.load(db, None, company_id, flow_id, "api")
-    if not flow or not flow.get("nodes"):
-        flow = FlowService.load(db, None, company_id, flow_id, "e2e")
-        
+    
+    flow_db = db.query(FlowDB).filter(FlowDB.id == flow_id).first()
+    if not flow_db:
+        raise HTTPException(status_code=404, detail="Fluxo não encontrado.")
+
+    flow_type = flow_db.flow_type or "api"
+    flow_data = FlowService.load(db, flow_db.project_id, eff_company_id, flow_id, flow_type)
+    pruned_data = SkillService._prune_flow_for_llm(flow_data)
+    blueprint = SkillService.build_flow_blueprint(flow_db.name, flow_type, pruned_data)
+
+    nodes = pruned_data.get("nodes", [])
+    cardData = pruned_data.get("cardData", {})
+    mapping_payload = {"nodes": nodes, "cardData": cardData, "flow_type": flow_type}
+
     generation_context = {
-        "blueprint": "Logical Blueprint Context",
-        "nodes": flow.get("nodes", []),
-        "cardData": flow.get("cardData", {}),
-        "project_id": flow.get("project_id")
+        "blueprint": json.dumps(blueprint, ensure_ascii=False),
+        "nodes": nodes,
+        "cardData": cardData,
+        "mapping_context": json.dumps(mapping_payload, ensure_ascii=False),
+        "flow_type": flow_type,
+        "project_id": flow_db.project_id
     }
 
     def _worker(db_session, u_id, sk_id, ctx, f_id):
-        raw_res = SkillService.execute_skill(db_session, u_id, sk_id, ctx, flow_id=f_id)
+        # Isolate analytical one-shot background skills from conversational history (flow_id=None)
+        raw_res = SkillService.execute_skill(db_session, u_id, sk_id, ctx, flow_id=None)
         parsed_res = raw_res
         if isinstance(raw_res, str) and ('{' in raw_res or '[' in raw_res):
             try:
-                parsed_res = json.loads(raw_res)
+                from app.services.skill_service import _robust_json_parse
+                parsed_res = _robust_json_parse(raw_res)
             except Exception:
-                pass
+                try:
+                    parsed_res = json.loads(raw_res)
+                except Exception:
+                    pass
         return parsed_res
 
     task = ai_task_manager.start_task(
-        user_id,
+        eff_user_id,
         flow_id,
         skill_id,
         _worker,
-        user_id,
+        eff_user_id,
         skill_id,
         generation_context,
         flow_id
@@ -404,24 +520,64 @@ def _normalize_card_data(card_data: dict):
         e2e_steps = cd.get("e2eSteps")
         if isinstance(e2e_steps, list):
             import uuid
+            node_type = cd.get("nodeType") or ""
             for idx, step in enumerate(e2e_steps):
                 if not isinstance(step, dict): continue
                 if "id" not in step:
                     step["id"] = f"ai-step-{uuid.uuid4().hex[:6]}"
-                if "type" not in step:
-                    step["type"] = "action"
-                if "name" not in step:
-                    step["name"] = f"Passo {idx+1}"
+                
+                # Resolve true action type
+                step_type = step.get("type")
+                step_action = step.get("action")
+                if not step_action and isinstance(step.get("properties"), dict):
+                    step_action = step.get("properties", {}).get("action")
+                
+                if not step_type or step_type in ["action", "step", "custom", "interaction"]:
+                    if step_action and step_action not in ["action", "step", "custom"]:
+                        step_type = step_action
+                    elif node_type == "mobile":
+                        step_type = "tap"
+                    else:
+                        step_type = "click"
+                step["type"] = step_type
+
                 if "properties" not in step or not isinstance(step.get("properties"), dict):
                     step["properties"] = {}
+                props = step["properties"]
                 
                 # Move hallucinated root properties into the 'properties' dictionary
-                if "selector" in step and "selector" not in step["properties"]:
-                    step["properties"]["selector"] = step.pop("selector")
-                if "value" in step and "value" not in step["properties"]:
-                    step["properties"]["value"] = step.pop("value")
-                if "text" in step and "value" not in step["properties"]:
-                    step["properties"]["value"] = step.pop("text")
+                for k in ["selector", "android_selector", "ios_selector", "value", "operator", "direction", "distance", "timeout", "url", "clear_first", "hide_keyboard"]:
+                    if k in step and k not in props:
+                        props[k] = step.pop(k)
+                if "text" in step and "value" not in props:
+                    props["value"] = step.pop("text")
+
+                # For mobile, keep selector and android_selector synchronized
+                if node_type == "mobile" or "mobile" in card_id.lower() or "mobile" in step_type.lower():
+                    if props.get("selector") and not props.get("android_selector"):
+                        props["android_selector"] = props["selector"]
+                    elif props.get("android_selector") and not props.get("selector"):
+                        props["selector"] = props["android_selector"]
+
+                # Ensure a human-readable, non-empty semantic name
+                current_name = (step.get("name") or "").strip()
+                if not current_name or current_name.lower() in [f"passo {idx+1}", "passo 1", "passo", "action", "step"]:
+                    target_sel = props.get("android_selector") or props.get("selector") or ""
+                    val = props.get("value") or ""
+                    if step_type == "type" and val:
+                        step["name"] = f"Digitar '{val}'" + (f" em {target_sel}" if target_sel else "")
+                    elif step_type == "tap" and target_sel:
+                        step["name"] = f"Tocar em {target_sel}"
+                    elif step_type == "click" and target_sel:
+                        step["name"] = f"Clicar em {target_sel}"
+                    elif step_type == "assert":
+                        step["name"] = f"Validar {val or target_sel or 'Elemento'}"
+                    elif step_type == "swipe":
+                        step["name"] = f"Deslizar tela ({props.get('direction', 'up')})"
+                    elif step_type == "browser" and props.get("url"):
+                        step["name"] = f"Navegar para {props.get('url')}"
+                    elif not current_name:
+                        step["name"] = f"Passo {idx+1} ({step_type.upper()})"
                 
         # 2. Normalize API Calls
         all_api_calls_lists = []
@@ -546,13 +702,15 @@ def _find_best_matching_orig_node(gen_n: dict, gen_card_data: dict, orig_custom_
 @router.post("/save-generated-flow")
 def save_generated_flow(
     payload: Dict[str, Any],
-    user_id: int = Query(...),
-    company_id: int = Query(1),
+    user_id: Optional[int] = Query(None),
+    company_id: Optional[int] = Query(None),
     flow_id: int = Query(None),
     parent_node_id: Optional[str] = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
     """Saves a flow that was generated by the AI skill."""
+    eff_user_id, eff_company_id = _resolve_user_and_company(current_user, user_id, company_id)
     from app.services.flow_service import FlowService
     from app.schemas.flow_schemas import FlowSaveSchema
     from app.models.flow_models import FlowDB
@@ -621,101 +779,106 @@ def save_generated_flow(
                 id_mapping = {}
                 suffix = f"_alt_{uuid.uuid4().hex[:6]}"
                 orig_node_pos = {str(n.get("id")): n.get("position", {}) for n in orig_nodes_list if isinstance(n, dict) and n.get("id")}
-                
+                has_valid_explicit_parent = explicit_parent_id and (explicit_parent_id in orig_node_ids or explicit_parent_id == "start")
+
                 new_nodes = []
-                for gen_n in payload.get("nodes", []):
+                node_to_matched_orig = {}
+                for i, gen_n in enumerate(payload.get("nodes", [])):
                     if not isinstance(gen_n, dict):
                         continue
                     old_id = str(gen_n.get("id"))
                     if old_id == "start":
                         id_mapping["start"] = "start"
-                        continue # Skip adding a duplicate start node
-                        
-                    if explicit_parent_id and explicit_parent_id in orig_node_ids:
+                        continue  # Skip adding a duplicate start node
+
+                    if has_valid_explicit_parent:
                         matched_orig_id = explicit_parent_id
                     else:
                         matched_orig = _find_best_matching_orig_node(gen_n, gen_card_data, orig_custom_nodes, scenario_name=payload.get("name", ""))
                         matched_orig_id = str(matched_orig.get("id")) if matched_orig else old_id
-                    
-                    new_id = f"{matched_orig_id}{suffix}"
+
+                    # Assign globally unique ID for each generated node to prevent collisions
+                    new_id = f"node_{uuid.uuid4().hex[:8]}"
                     id_mapping[old_id] = new_id
                     gen_n["id"] = new_id
-                    
-                    # Spread nodes apart using the matched original node's position and a random Y offset
-                    base_pos = orig_node_pos.get(matched_orig_id, {})
-                    if isinstance(base_pos, dict) and "x" in base_pos and "y" in base_pos:
-                        y_shift = random.randint(150, 350)
-                        gen_n["position"] = {"x": base_pos.get("x", 0), "y": base_pos.get("y", 0) + y_shift}
+                    node_to_matched_orig[new_id] = matched_orig_id
+
+                    # Compute relative position:
+                    # First node placed relative to matched_orig_id (below existing siblings), subsequent nodes horizontally
+                    if i == 0 or len(new_nodes) == 0:
+                        base_pos = orig_node_pos.get(matched_orig_id, {"x": 100, "y": 100})
+                        siblings_count = sum(1 for oe in orig_edges_list if isinstance(oe, dict) and str(oe.get("source")) == matched_orig_id)
+                        y_offset = (siblings_count + 1) * 140
+                        gen_n["position"] = {
+                            "x": base_pos.get("x", 100) + 280,
+                            "y": base_pos.get("y", 100) + y_offset
+                        }
+                    else:
+                        prev_pos = new_nodes[-1].get("position", {"x": 100, "y": 100})
+                        gen_n["position"] = {
+                            "x": prev_pos.get("x", 100) + 280,
+                            "y": prev_pos.get("y", 100)
+                        }
+
                     gen_n["type"] = "startNode" if (gen_n.get("id") == "start" or gen_n.get("type") == "startNode") else "custom"
                     if "data" not in gen_n or not isinstance(gen_n.get("data"), dict):
                         gen_n["data"] = {"name": gen_n.get("id", "Node"), "color": "#10b981", "childCount": 0, "isCollapsed": False, "nodeType": payload["flow_type"]}
                     else:
                         gen_n["data"]["nodeType"] = gen_n["data"].get("nodeType") or payload["flow_type"]
-                    
+
                     new_nodes.append(gen_n)
-                
+
+                ai_custom_nodes = [n for n in new_nodes if n.get("type", "custom") != "startNode" and n.get("id") != "start"]
+                all_valid_node_ids = orig_node_ids | {str(n.get("id")) for n in new_nodes} | {"start"}
+
                 new_edges = []
+                connected_new_targets = set()
+
                 for gen_e in payload.get("edges", []):
                     if not isinstance(gen_e, dict):
                         continue
-                    # AI might use from_node and to_node instead of source and target
                     if "source" not in gen_e and "from_node" in gen_e:
                         gen_e["source"] = gen_e.pop("from_node")
                     if "target" not in gen_e and "to_node" in gen_e:
                         gen_e["target"] = gen_e.pop("to_node")
-                        
+
                     old_source = str(gen_e.get("source"))
                     old_target = str(gen_e.get("target"))
-                    
-                    # Remap target
-                    target_id = id_mapping.get(old_target, old_target)
-                    
-                    # Find matched original node ID for target_id
-                    target_orig_id = next((k for k, v in id_mapping.items() if v == target_id and k in orig_node_ids), None)
-                    
-                    # Remap source: If user explicitly selected parent_node_id, use that!
-                    if old_source == "start":
-                        if explicit_parent_id and (explicit_parent_id in orig_node_ids or explicit_parent_id == "start"):
-                            source_id = explicit_parent_id
-                        elif target_orig_id and target_orig_id in orig_incoming_sources:
-                            parents = orig_incoming_sources[target_orig_id]
-                            source_id = parents[0] if parents else "start"
-                        else:
-                            source_id = "start"
-                    else:
-                        source_id = id_mapping.get(old_source, old_source)
 
-                    gen_e["source"] = source_id
-                    gen_e["target"] = target_id
-                    gen_e["id"] = f"{gen_e.get('id', f'edge_{uuid.uuid4().hex[:4]}')}{suffix}"
-                    gen_e["type"] = "buttonedge"
-                    gen_e["animated"] = True
-                    gen_e["markerEnd"] = {"type": "arrowclosed"}
-                    new_edges.append(gen_e)
-                    
-                ai_custom_nodes = [n for n in new_nodes if n.get("type", "custom") != "startNode" and n.get("id") != "start"]
-                
-                # Combine edges first
-                payload["edges"] = orig_edges_list + new_edges
-                
-                connected_targets = {e.get("target") for e in payload["edges"] if isinstance(e, dict) and e.get("target")}
-                for i, n in enumerate(new_nodes):
+                    target_id = id_mapping.get(old_target, old_target)
+                    if target_id not in all_valid_node_ids:
+                        continue
+
+                    if old_source in id_mapping and id_mapping[old_source] != target_id:
+                        source_id = id_mapping[old_source]
+                    elif has_valid_explicit_parent:
+                        source_id = explicit_parent_id
+                    elif old_source in orig_node_ids or old_source == "start":
+                        source_id = old_source
+                    else:
+                        source_id = "start"
+
+                    if source_id in all_valid_node_ids and source_id != target_id:
+                        gen_e["source"] = source_id
+                        gen_e["target"] = target_id
+                        gen_e["id"] = f"edge_{uuid.uuid4().hex[:8]}"
+                        gen_e["type"] = "buttonedge"
+                        gen_e["animated"] = True
+                        gen_e["markerEnd"] = {"type": "arrowclosed"}
+                        new_edges.append(gen_e)
+                        connected_new_targets.add(target_id)
+
+                # Ensure every custom generated node has a valid incoming edge
+                for i, n in enumerate(ai_custom_nodes):
                     nid = n.get("id")
-                    if n.get("type", "custom") != "startNode" and nid != "start":
-                        if nid not in connected_targets:
-                            matched_orig_id = next((k for k, v in id_mapping.items() if v == nid and k in orig_node_ids), None)
-                            prev_n = new_nodes[i-1] if (i > 0 and isinstance(new_nodes[i-1], dict)) else {}
-                            
-                            if explicit_parent_id and (explicit_parent_id in orig_node_ids or explicit_parent_id == "start"):
-                                source_id = explicit_parent_id
-                            elif matched_orig_id and matched_orig_id in orig_incoming_sources and orig_incoming_sources[matched_orig_id]:
-                                source_id = orig_incoming_sources[matched_orig_id][0]
-                            elif i == 0 or prev_n.get("id") == "start":
-                                source_id = "start"
-                            else:
-                                source_id = prev_n.get("id", "start")
-                                
-                            payload["edges"].append({
+                    if nid not in connected_new_targets:
+                        if i == 0:
+                            source_id = explicit_parent_id if has_valid_explicit_parent else "start"
+                        else:
+                            source_id = ai_custom_nodes[i - 1]["id"]
+
+                        if source_id in all_valid_node_ids and source_id != nid:
+                            new_edges.append({
                                 "id": f"edge_auto_{uuid.uuid4().hex[:6]}",
                                 "source": source_id,
                                 "target": nid,
@@ -723,7 +886,23 @@ def save_generated_flow(
                                 "animated": True,
                                 "markerEnd": {"type": "arrowclosed"}
                             })
-                            connected_targets.add(nid)
+                            connected_new_targets.add(nid)
+
+                # Combine edges and deduplicate by (source, target), filtering out invalid/ghost references
+                seen_edge_pairs = set()
+                combined_edges = []
+                for e in (orig_edges_list + new_edges):
+                    if not isinstance(e, dict):
+                        continue
+                    s = str(e.get("source"))
+                    t = str(e.get("target"))
+                    if s in all_valid_node_ids and t in all_valid_node_ids and s != t:
+                        pair = (s, t)
+                        if pair not in seen_edge_pairs:
+                            seen_edge_pairs.add(pair)
+                            combined_edges.append(e)
+
+                payload["edges"] = combined_edges
 
                 new_card_data = {}
                 ai_card_data = payload.get("cardData") or {}
@@ -736,13 +915,19 @@ def save_generated_flow(
                 for n in new_nodes:
                     if n.get("type", "custom") != "startNode" and n.get("id") != "start":
                         n_id = n.get("id")
-                        matched_orig_id = next((k for k, v in id_mapping.items() if v == n_id and k in orig_card_data), None)
+                        old_ai_id = next((k for k, v in id_mapping.items() if v == n_id), None)
+                        matched_orig_id = (
+                            node_to_matched_orig.get(n_id)
+                            or next((k for k, v in id_mapping.items() if v == n_id and k in orig_card_data), None)
+                        )
                         if not matched_orig_id and suffix in n_id:
                             matched_orig_id = n_id.split(suffix)[0]
+                        if not matched_orig_id and has_valid_explicit_parent:
+                            matched_orig_id = explicit_parent_id
 
                         # AI provided card data for this node (by AI key, node name, or scenario name)
                         node_name = n.get("data", {}).get("name") or ""
-                        ai_c = ai_card_data.get(n_id) or ai_card_data.get(node_name)
+                        ai_c = ai_card_data.get(n_id) or (ai_card_data.get(old_ai_id) if old_ai_id else None) or ai_card_data.get(node_name)
                         if not ai_c:
                             for k, v in ai_card_data.items():
                                 if isinstance(v, dict) and v.get("name") == node_name:
@@ -771,9 +956,14 @@ def save_generated_flow(
 
                     card["nodeType"] = card.get("nodeType") or payload["flow_type"]
                     
-                    matched_orig_id = next((k for k, v in id_mapping.items() if v == new_key and k in orig_card_data), None)
+                    matched_orig_id = (
+                        node_to_matched_orig.get(new_key)
+                        or next((k for k, v in id_mapping.items() if v == new_key and k in orig_card_data), None)
+                    )
                     if not matched_orig_id and suffix in new_key:
                         matched_orig_id = new_key.split(suffix)[0]
+                    if not matched_orig_id and has_valid_explicit_parent:
+                        matched_orig_id = explicit_parent_id
                         
                     orig_c = orig_card_data.get(matched_orig_id, {}) if (matched_orig_id and isinstance(orig_card_data.get(matched_orig_id), dict)) else {}
 
@@ -797,17 +987,28 @@ def save_generated_flow(
                         if isinstance(new_steps, list) and isinstance(orig_steps, list):
                             for i, n_step in enumerate(new_steps):
                                 if not isinstance(n_step, dict): continue
+                                n_props = n_step.get("properties")
+                                if not isinstance(n_props, dict):
+                                    n_step["properties"] = {}
+                                    n_props = n_step["properties"]
+
                                 if i < len(orig_steps) and isinstance(orig_steps[i], dict):
-                                    o_props = orig_steps[i].get("properties") or {}
+                                    o_step = orig_steps[i]
+                                    o_props = o_step.get("properties") or {}
+
+                                    if not n_step.get("type") or n_step.get("type") in ["action", "step", "custom"]:
+                                        n_step["type"] = o_step.get("type") or o_step.get("action") or ("tap" if payload["flow_type"] == "mobile" else "click")
+
                                     o_selector = o_props.get("selector") if isinstance(o_props, dict) else None
-                                    
-                                    n_props = n_step.get("properties")
-                                    if not isinstance(n_props, dict):
-                                        n_step["properties"] = {}
-                                        n_props = n_step["properties"]
+                                    o_android = o_props.get("android_selector") if isinstance(o_props, dict) else None
+                                    o_ios = o_props.get("ios_selector") if isinstance(o_props, dict) else None
 
                                     if o_selector and "selector" not in n_step and "selector" not in n_props:
-                                        n_step["properties"]["selector"] = o_selector
+                                        n_props["selector"] = o_selector
+                                    if o_android and "android_selector" not in n_step and "android_selector" not in n_props:
+                                        n_props["android_selector"] = o_android
+                                    if o_ios and "ios_selector" not in n_step and "ios_selector" not in n_props:
+                                        n_props["ios_selector"] = o_ios
 
                     # API Flow Calls
                     elif payload["flow_type"] == "api":
@@ -863,16 +1064,16 @@ def save_generated_flow(
 
         # The AI returns a structure compatible with FlowSaveSchema
         save_schema = FlowSaveSchema(**payload)
-        result = FlowService.save(db, save_schema, company_id, user_id)
+        result = FlowService.save(db, save_schema, eff_company_id, eff_user_id)
 
         try:
             from app.models.user_models import UserDB
             from app.services.audit_service import AuditService
-            user = db.query(UserDB).filter(UserDB.id == user_id).first()
+            user = db.query(UserDB).filter(UserDB.id == eff_user_id).first()
             if user:
                 AuditService.log_action(
                     db=db,
-                    company_id=company_id,
+                    company_id=eff_company_id,
                     user=user,
                     action="SAVE_AI_GENERATED_FLOW",
                     resource_type="flow",
@@ -883,10 +1084,14 @@ def save_generated_flow(
         except Exception as audit_err:
             pass
 
+        if isinstance(result, dict):
+            first_target_id = new_nodes[0]["id"] if ('new_nodes' in locals() and new_nodes) else None
+            result["target_node_id"] = first_target_id
+            result["new_node_ids"] = [n["id"] for n in new_nodes] if ('new_nodes' in locals() and new_nodes) else []
+
         return result
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Failed to save generated flow: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to save generated flow: {str(e)}")
 
 from pydantic import BaseModel
@@ -895,35 +1100,58 @@ class FeedbackSchema(BaseModel):
     reason: str
 
 @router.post("/flow/{flow_id}/feedback")
-def submit_ai_feedback(flow_id: int, payload: FeedbackSchema, user_id: int = Query(...)):
-    import os
-    import json
-    from app.services.skill_service import SkillService
-    
-    memory_dir = os.path.join(SkillService.SKILLS_DIR, "memory")
-    os.makedirs(memory_dir, exist_ok=True)
-    
-    feedback_file = os.path.join(memory_dir, f"feedback_flow_{flow_id}.json")
-    
-    feedbacks = []
-    if os.path.exists(feedback_file):
-        try:
-            with open(feedback_file, "r", encoding="utf-8") as f:
-                feedbacks = json.load(f)
-        except:
-            feedbacks = []
+def submit_ai_feedback(
+    flow_id: int, 
+    payload: FeedbackSchema, 
+    user_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    eff_user_id, _ = _resolve_user_and_company(current_user, user_id, None)
+
+    # 1. Persist in database AgentMemoryDB for multi-tenant and multi-instance durability
+    try:
+        from app.models.agent_models import AgentMemoryDB
+        feedback_memory = AgentMemoryDB(
+            user_id=eff_user_id,
+            flow_id=flow_id,
+            role="feedback_rejected",
+            content=json.dumps({
+                "suggestion_name": payload.suggestion_name,
+                "reason": payload.reason
+            })
+        )
+        db.add(feedback_memory)
+        db.commit()
+    except Exception as db_err:
+        logger.error(f"Failed to persist feedback in DB: {db_err}")
+
+    # 2. Persist in local file for backward compatibility
+    try:
+        import os
+        from app.services.skill_service import SkillService
+        memory_dir = os.path.join(SkillService.SKILLS_DIR, "memory")
+        os.makedirs(memory_dir, exist_ok=True)
+        feedback_file = os.path.join(memory_dir, f"feedback_flow_{flow_id}.json")
+        feedbacks = []
+        if os.path.exists(feedback_file):
+            try:
+                with open(feedback_file, "r", encoding="utf-8") as f:
+                    feedbacks = json.load(f)
+            except:
+                feedbacks = []
+                
+        feedbacks.append({
+            "suggestion_name": payload.suggestion_name,
+            "reason": payload.reason,
+            "timestamp": __import__("datetime").datetime.utcnow().isoformat()
+        })
+        if len(feedbacks) > 20:
+            feedbacks = feedbacks[-20:]
             
-    feedbacks.append({
-        "suggestion_name": payload.suggestion_name,
-        "reason": payload.reason,
-        "timestamp": __import__("datetime").datetime.utcnow().isoformat()
-    })
-    
-    # Keep only the last 20 feedbacks to avoid prompt overflow
-    if len(feedbacks) > 20:
-        feedbacks = feedbacks[-20:]
-        
-    with open(feedback_file, "w", encoding="utf-8") as f:
-        json.dump(feedbacks, f, indent=4)
-        
+        with open(feedback_file, "w", encoding="utf-8") as f:
+            json.dump(feedbacks, f, indent=4)
+    except Exception as file_err:
+        logger.warning(f"Failed to write local feedback fallback: {file_err}")
+
     return {"status": "success", "message": "Feedback saved."}

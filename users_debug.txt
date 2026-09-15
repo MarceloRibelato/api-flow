@@ -2,7 +2,7 @@
   {
     "id": 3,
     "username": "admin",
-    "email": "admin@flow.local",
+    "email": "admin@flow.com",
     "role": "admin",
     "status": "active"
   },
@@ -17,7 +17,7 @@
     "id": 2,
     "username": "testuser@gmail.com",
     "email": "testuser@gmail.com",
-    "role": "admin",
+    "role": "viewer",
     "status": "active"
   }
 ]

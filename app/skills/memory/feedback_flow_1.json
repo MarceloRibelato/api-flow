@@ -1,0 +1,17 @@
+[
+    {
+        "suggestion_name": "Cen\u00e1rio de Teste Inv\u00e1lido",
+        "reason": "Esta API n\u00e3o aceita campos vazios na regra de neg\u00f3cio.",
+        "timestamp": "2026-09-10T23:29:33.688863"
+    },
+    {
+        "suggestion_name": "Cen\u00e1rio de Teste Inv\u00e1lido",
+        "reason": "Esta API n\u00e3o aceita campos vazios na regra de neg\u00f3cio.",
+        "timestamp": "2026-09-10T23:47:19.384451"
+    },
+    {
+        "suggestion_name": "Cen\u00e1rio de Teste Inv\u00e1lido",
+        "reason": "Esta API n\u00e3o aceita campos vazios na regra de neg\u00f3cio.",
+        "timestamp": "2026-09-11T00:09:00.414909"
+    }
+]

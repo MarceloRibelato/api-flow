@@ -52,7 +52,7 @@ class HeuristicHealerService:
                         if (['button', 'a', 'input', 'label', 'select', 'textarea'].includes(tag) || ['button', 'link', 'radio', 'checkbox', 'switch'].includes(role) || el.onclick || el.getAttribute('ng-click') || el.getAttribute('@click')) {
                             isMatch = true;
                         }
-                    } else if (stepType === 'type') {
+                    } else if (stepType === 'type' || stepType === 'fill') {
                         if (['input', 'textarea', 'select'].includes(tag) || role === 'textbox' || el.isContentEditable) {
                             if (tag === 'input' && ['hidden', 'submit', 'button', 'image'].includes(type)) {
                                 isMatch = false; // Not a typical text input
@@ -96,13 +96,18 @@ class HeuristicHealerService:
                 logger.info("🔍 [Heuristic-Heal] No valid candidates found in DOM.")
                 return None, []
                 
-            # User Request 2: Regex parsing of broken selector
+            # Regex parsing of broken selector (CSS & XPath)
             expected_ids = re.findall(r'#([a-zA-Z0-9_-]+)', broken_selector)
+            expected_ids.extend(re.findall(r'@id=["\']([^"\']+)["\']', broken_selector))
+            
             expected_classes = re.findall(r'\.([a-zA-Z0-9_:\/-]+)', broken_selector)
+            expected_classes.extend(re.findall(r'@class=["\']([^"\']+)["\']', broken_selector))
+            
             expected_names = re.findall(r'\[name=["\']?([a-zA-Z0-9_-]+)["\']?\]', broken_selector)
+            expected_names.extend(re.findall(r'@name=["\']([^"\']+)["\']', broken_selector))
             
             # If no ID/Class/Name prefix is found, treat the whole raw string as potential id/class/name
-            is_raw = not any(p in broken_selector for p in ['#', '.', '[', '>'])
+            is_raw = not any(p in broken_selector for p in ['#', '.', '[', '>', '/', '@'])
             if is_raw:
                 expected_ids.append(broken_selector)
                 expected_classes.append(broken_selector)
@@ -142,6 +147,10 @@ class HeuristicHealerService:
                         m = re.search(r'text=["\']([^"\']+)["\']', broken_selector)
                         if not m:
                             m = re.search(r'has-text\((["\']?)([^"\']+)\1\)', broken_selector)
+                        if not m:
+                            m = re.search(r'text\(\)=["\']([^"\']+)["\']', broken_selector)
+                        if not m:
+                            m = re.search(r'contains\(text\(\),\s*["\']([^"\']+)["\']', broken_selector)
                         if m:
                             expected_text = m.group(1) if len(m.groups()) == 1 else m.group(2)
                             
@@ -158,8 +167,8 @@ class HeuristicHealerService:
                                 safe_text = c['text'].replace('"', '\\"')
                                 scored_candidates.append((sim, f"{c['tag']}:has-text(\"{safe_text}\")"))
                             
-                # Text fallback for types (placeholder)
-                if step_type == 'type' and c['placeholder']:
+                # Text fallback for types and fills (placeholder)
+                if step_type in ('type', 'fill') and c['placeholder']:
                     expected_pls = re.findall(r'\[placeholder=["\']?([^"\']+)["\']?\]', broken_selector)
                     for expected_pl in expected_pls:
                         sim = difflib.SequenceMatcher(None, expected_pl, c['placeholder']).ratio()

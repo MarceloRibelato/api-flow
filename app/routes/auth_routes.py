@@ -68,7 +68,8 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         raise DuplicateResourceError("Username")
 
     if user.email:
-        existing_email = db.query(UserDB).filter(UserDB.email == user.email).first()
+        email_clean = user.email.strip().lower()
+        existing_email = db.query(UserDB).filter(UserDB.email.ilike(email_clean)).first()
         if existing_email:
             raise DuplicateResourceError("Email")
 
@@ -106,8 +107,17 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         db.rollback()
         error_msg = str(e)
         if "unique constraint" in error_msg.lower() or "integrityerror" in error_msg.lower():
-             logger.warning(f"Integrity Error: {error_msg}")
-             raise DuplicateResourceError(detail="Dados duplicados (Usuário, Email ou CPF já existem).")
+            logger.warning(f"Integrity Error: {error_msg}")
+            if "cnpj" in error_msg.lower():
+                raise DuplicateResourceError("CNPJ")
+            elif "cpf" in error_msg.lower():
+                raise DuplicateResourceError("CPF")
+            elif "email" in error_msg.lower():
+                raise DuplicateResourceError("Email")
+            elif "username" in error_msg.lower():
+                raise DuplicateResourceError("Username")
+            else:
+                raise DuplicateResourceError(detail="Dados duplicados já existem no sistema.")
         
         logger.error(f"Database error: {error_msg}")
         raise FlowException(detail="Erro interno do servidor", status_code=500)

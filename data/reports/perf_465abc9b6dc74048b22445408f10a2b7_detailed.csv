@@ -1,0 +1,191 @@
+Timestamp,API ID,Method,URL,Status Code,Latency (ms),Error
+2026-09-13T16:48:04.412918,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10160.37,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.413480,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10152.82,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.416490,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10174.55,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.417415,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10158.61,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.509880,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10261.3,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.519362,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10262.52,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.531823,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10269.35,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.534209,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10287.43,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.537867,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10287.35,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.543508,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10288.83,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:04.792578,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,277.72,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:04.795310,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,277.11,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:04.797766,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,284.38,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:04.800694,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,283.85,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:04.867018,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,256.79,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:04.894541,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,262.52,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:04.897331,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,259.27,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:04.899923,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,280.36,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:04.903677,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,259.99,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:05.025039,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,390.62,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:14.804101,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10008.71,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:14.812584,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10019.93,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:14.812761,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10014.94,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:14.813086,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10012.32,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:14.878944,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10011.84,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:14.901263,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10006.64,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:14.906098,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10008.7,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:14.911684,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10011.71,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:14.916385,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10012.64,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:15.037119,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10011.96,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:15.171323,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,267.0,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:15.241568,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,262.39,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:15.273371,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,261.5,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:15.283278,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,277.06,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:15.285436,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,268.84,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:15.343751,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,429.69,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:15.360355,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,445.44,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:15.385287,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,383.86,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:15.393362,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,256.02,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:15.465947,step-1,POST,http://uitestingplayground.com/ajaxdata/invalid,404,553.16,"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""utf-8"">
+<title>Error</title>
+</head>
+<body>
+<"
+2026-09-13T16:48:25.183227,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10011.82,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:25.252507,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10010.86,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:25.285105,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10011.66,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:25.296455,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10010.94,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:25.296556,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10013.22,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:25.355058,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10011.24,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:25.372112,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10011.69,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:25.396998,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10011.64,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:25.405129,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10011.69,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"
+2026-09-13T16:48:25.478128,e98acfa7-e2b8-407c-b9ae-aef51b956abb,GET,http://uitestingplayground.com/ajaxdata,0,10012.09,"HTTPConnectionPool(host='uitestingplayground.com', port=80): Read timed out. (read timeout=10)"

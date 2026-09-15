@@ -16,6 +16,10 @@ router = APIRouter(prefix="/analysis", tags=["AI Insights"])
 from app.auth import get_current_user
 from app.models.user_models import UserDB
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 @router.get("/flow/{flow_id}")
 def analyze_flow(
     flow_id: int, 
@@ -29,11 +33,29 @@ def analyze_flow(
     return AnalysisService.analyze_flow_redundancy(db, flow_id, current_user.id)
 
 @router.get("/history")
-def analyze_history(project_id: Optional[int] = None, db: Session = Depends(get_db)):
+def analyze_history(
+    project_id: Optional[int] = None, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """
     Analyzes execution history for performance trends.
     """
-    return AnalysisService.analyze_performance_trends(db, project_id)
+    if project_id:
+        from app.models.product_models import ProductModel
+        from app.models.feature_models import FeatureModel
+        is_owner = db.query(ProductModel).filter(
+            ProductModel.id == project_id,
+            ProductModel.company_id == current_user.company_id
+        ).first() is not None
+        if not is_owner:
+            is_owner = db.query(FeatureModel).join(ProductModel).filter(
+                FeatureModel.id == project_id,
+                ProductModel.company_id == current_user.company_id
+            ).first() is not None
+        if not is_owner and current_user.role != "admin":
+            raise HTTPException(status_code=403, detail="Acesso negado ao projeto solicitado.")
+    return AnalysisService.analyze_performance_trends(db, project_id, company_id=current_user.company_id)
 
 @router.get("/flow/{flow_id}/suggest-tests")
 def suggest_tests(
@@ -73,20 +95,11 @@ def implement_test(
             raise HTTPException(status_code=400, detail="Failed to implement test scenario: LLM returned empty response or invalid format.")
         return result
     except ValueError as e:
-        import traceback
-        try:
-            with open("/app/error_new.log", "a") as f:
-                f.write(f"ValueError in implement_test: {e}\n{traceback.format_exc()}\n")
-        except: pass
+        logger.warning(f"ValueError in implement_test: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        try:
-            with open("/app/error_new.log", "a") as f:
-                f.write(f"Error in implement_test: {e}\n{tb}\n")
-        except: pass
-        raise HTTPException(status_code=500, detail=f"Erro interno: {e}\nTraceback: {tb}")
+        logger.error(f"Error in implement_test: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro interno ao implementar cenário de teste: {str(e)}")
 
 @router.post("/assertions")
 def generate_assertions(

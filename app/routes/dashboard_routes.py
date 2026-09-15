@@ -13,12 +13,20 @@ def _parse_dates(start: str, end: str):
     s, e = None, None
     if start:
         try:
-            s = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            cleaned = str(start).strip().replace("Z", "+00:00")
+            if len(cleaned) == 10:  # YYYY-MM-DD
+                s = datetime.fromisoformat(cleaned).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+            else:
+                s = datetime.fromisoformat(cleaned)
         except:
             pass
     if end:
         try:
-            e = datetime.fromisoformat(end.replace("Z", "+00:00"))
+            cleaned = str(end).strip().replace("Z", "+00:00")
+            if len(cleaned) == 10:  # YYYY-MM-DD
+                e = datetime.fromisoformat(cleaned).replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc)
+            else:
+                e = datetime.fromisoformat(cleaned)
         except:
             pass
     return s, e
@@ -31,6 +39,9 @@ def _resolve_timeframe(days: Any, start: str, end: str):
         if not s:
             now_utc = datetime.now(timezone.utc)
             s = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        if not e:
+            now_utc = datetime.now(timezone.utc)
+            e = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
     elif days is not None:
         try:
             num_days = int(days)

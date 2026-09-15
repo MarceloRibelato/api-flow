@@ -1,5 +1,6 @@
 import logging
 import json
+import re
 import time as _time
 from playwright.async_api import async_playwright
 import playwright_stealth
@@ -470,6 +471,148 @@ class PlaywrightExecutorService:
 
         return resolved_selector
 
+    @staticmethod
+    def _normalize_text(s: str) -> str:
+        if not s:
+            return ""
+        s = s.replace('\u00a0', ' ')
+        s = s.replace('‘', "'").replace('’', "'").replace('“', '"').replace('”', '"')
+        s = re.sub(r'\s+', ' ', s)
+        return s.strip()
+
+    def _text_matches(self, expected: str, actual: str) -> bool:
+        if not expected:
+            return True
+        if not actual:
+            return False
+        if expected in actual:
+            return True
+        norm_expected = self._normalize_text(expected)
+        norm_actual = self._normalize_text(actual)
+        if norm_expected in norm_actual:
+            return True
+        if norm_expected.lower() in norm_actual.lower():
+            return True
+        return False
+
+    async def _extract_element_candidates(self, locator, timeout=5000) -> list:
+        try:
+            candidates = await locator.first.evaluate("""el => {
+                const arr = [];
+                if (el.innerText) arr.push(el.innerText);
+                if (el.textContent && el.textContent !== el.innerText) arr.push(el.textContent);
+                if (el.value !== undefined && el.value !== null && el.value !== '') arr.push(String(el.value));
+                if (el.validationMessage) arr.push(el.validationMessage);
+                if (el.placeholder) arr.push(el.placeholder);
+                if (el.title) arr.push(el.title);
+                return arr;
+            }""", timeout=timeout)
+            if isinstance(candidates, list) and candidates:
+                return candidates
+        except Exception:
+            pass
+        try:
+            txt = await locator.first.inner_text(timeout=timeout)
+            return [txt] if txt else []
+        except Exception:
+            return []
+
+    async def _extract_element_text(self, locator, timeout=5000) -> str:
+        candidates = await self._extract_element_candidates(locator, timeout=timeout)
+        return " | ".join(candidates)
+
+    async def _collect_all_page_text(self, target) -> str:
+        texts = []
+        if self._last_dialog_message:
+            texts.append(self._last_dialog_message)
+
+        js_script = """() => {
+            const collected = [];
+            if (document.body) {
+                if (document.body.innerText) collected.push(document.body.innerText);
+                if (document.documentElement && document.documentElement.innerText && document.documentElement.innerText !== document.body.innerText) {
+                    collected.push(document.documentElement.innerText);
+                }
+            }
+            try {
+                const controls = document.querySelectorAll('input, select, textarea, button, form, fieldset, [name]');
+                for (const el of controls) {
+                    if (el.validationMessage) {
+                        collected.push(el.validationMessage);
+                    }
+                    if (el.value && el.type !== 'password') {
+                        collected.push(String(el.value));
+                    }
+                    if (el.placeholder) {
+                        collected.push(el.placeholder);
+                    }
+                    if (el.title) {
+                        collected.push(el.title);
+                    }
+                }
+            } catch (e) {}
+            try {
+                const labelled = document.querySelectorAll('[aria-label], [data-tooltip], [role="alert"], [role="tooltip"], [aria-live], .tooltip, .toast, .alert, .popover');
+                for (const el of labelled) {
+                    const aria = el.getAttribute('aria-label');
+                    if (aria) collected.push(aria);
+                    const dt = el.getAttribute('data-tooltip');
+                    if (dt) collected.push(dt);
+                    if (el.textContent) collected.push(el.textContent);
+                }
+            } catch (e) {}
+            try {
+                function scanShadow(node) {
+                    if (!node) return;
+                    if (node.shadowRoot) {
+                        if (node.shadowRoot.innerText) collected.push(node.shadowRoot.innerText);
+                        scanShadow(node.shadowRoot);
+                    }
+                    const children = node.children || [];
+                    for (let i = 0; i < children.length; i++) {
+                        scanShadow(children[i]);
+                    }
+                }
+                if (document.body) scanShadow(document.body);
+            } catch (e) {}
+            return collected.join('\\n');
+        }"""
+
+        try:
+            if hasattr(target, 'evaluate'):
+                main_text = await target.evaluate(js_script)
+                if main_text:
+                    texts.append(main_text)
+            elif hasattr(self, '_page') and self._page:
+                main_text = await self._page.evaluate(js_script)
+                if main_text:
+                    texts.append(main_text)
+        except Exception:
+            try:
+                if hasattr(target, 'locator'):
+                    body_text = await target.locator("body").inner_text()
+                elif self._page:
+                    body_text = await self._page.locator("body").inner_text()
+                if body_text:
+                    texts.append(body_text)
+            except Exception:
+                pass
+
+        if hasattr(self, '_page') and self._page:
+            try:
+                for frame in self._page.frames:
+                    if frame != self._page.main_frame:
+                        try:
+                            f_text = await frame.evaluate(js_script)
+                            if f_text:
+                                texts.append(f_text)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        return "\n".join(texts)
+
     async def execute_step(self, step, capture_screenshot: bool = False, db=None, user_id=None):
         """
         Executes a single E2E step using the persistent page.
@@ -512,7 +655,9 @@ class PlaywrightExecutorService:
             retries_val = 0
             
         MAX_ATTEMPTS = max(1, retries_val + 1)
-        for attempt in range(MAX_ATTEMPTS):
+        has_healed = False
+        attempt = 0
+        while attempt < MAX_ATTEMPTS:
             try:
                 await self.start() # Ensure started
                 
@@ -685,7 +830,8 @@ class PlaywrightExecutorService:
                     selector = properties.get('selector', '')
                     if selector:
                         await target.locator(selector).first.wait_for(timeout=timeout)
-                        step_result["text"] = f"Element {selector} is now present"
+                        heal_prefix = f"{step_result['text']}| " if ("[HEURISTIC" in step_result["text"] or "[AI" in step_result["text"]) else ""
+                        step_result["text"] = f"{heal_prefix}Element {selector} is now present"
                     else:
                         raise ValueError("Selector is missing for wait_selector step")
                     
@@ -702,7 +848,8 @@ class PlaywrightExecutorService:
                     if selector:
                         el = target.locator(selector).first
                         await el.hover(timeout=timeout)
-                        step_result["text"] = f"Hovered over {selector}"
+                        heal_prefix = f"{step_result['text']}| " if ("[HEURISTIC" in step_result["text"] or "[AI" in step_result["text"]) else ""
+                        step_result["text"] = f"{heal_prefix}Hovered over {selector}"
                     elif x_coord is not None and y_coord is not None:
                         await self._page.mouse.move(float(x_coord), float(y_coord))
                         step_result["text"] = f"Hovered over coordinates ({x_coord}, {y_coord})"
@@ -713,7 +860,8 @@ class PlaywrightExecutorService:
                     selector = properties.get('selector', '')
                     if selector:
                         await target.locator(selector).first.scroll_into_view_if_needed(timeout=timeout)
-                        step_result["text"] = f"Scrolled to {selector}"
+                        heal_prefix = f"{step_result['text']}| " if ("[HEURISTIC" in step_result["text"] or "[AI" in step_result["text"]) else ""
+                        step_result["text"] = f"{heal_prefix}Scrolled to {selector}"
                     else:
                         dx = properties.get('deltaX', 0)
                         dy = properties.get('deltaY', properties.get('value', 0))
@@ -762,15 +910,27 @@ class PlaywrightExecutorService:
                     if not selector and not expected_value:
                         raise ValueError("Assertion needs either a selector or a value")
                     
+                    poll_max = min(timeout / 1000.0, 5.0) if timeout else 5.0
+                    import time
+
                     if operator == 'visible':
                         if selector:
                             await target.locator(selector).first.wait_for(state="visible", timeout=timeout)
                             step_result["text"] = f"Assertion passed: {selector} is visible"
                         else:
-                            # If no selector, evaluate innerText of the frame/body
-                            eval_target = target if hasattr(target, 'evaluate') else target.locator("body")
-                            content = await eval_target.evaluate("el => el.innerText || document.body.innerText")
-                            if expected_value in content:
+                            start_t = time.time()
+                            found = False
+                            content = ""
+                            while True:
+                                content = await self._collect_all_page_text(target)
+                                if self._text_matches(expected_value, content):
+                                    found = True
+                                    break
+                                if (time.time() - start_t) >= poll_max:
+                                    break
+                                await asyncio.sleep(0.1)
+
+                            if found:
                                 step_result["text"] = f"Assertion passed: text '{expected_value}' found on page"
                             else:
                                 raise ValueError(f"Text '{expected_value}' not found on page")
@@ -784,51 +944,89 @@ class PlaywrightExecutorService:
                             
                     elif operator == 'equals':
                         if selector == 'dialog.message':
-                            if self._last_dialog_message == expected_value:
+                            if self._normalize_text(self._last_dialog_message or "") == self._normalize_text(expected_value):
                                 step_result["text"] = f"Assertion passed: modal message equals '{expected_value}'"
                             else:
                                 raise ValueError(f"Assertion failed: expected modal '{expected_value}', but found '{self._last_dialog_message}'")
                         elif selector == 'document.title':
                             actual_value = await target.evaluate("document.title", timeout=timeout)
-                            if actual_value == expected_value:
+                            if self._normalize_text(actual_value) == self._normalize_text(expected_value):
                                 step_result["text"] = f"Assertion passed: title equals '{expected_value}'"
                             else:
                                 raise ValueError(f"Assertion failed: expected title '{expected_value}', but found '{actual_value}'")
                         elif selector:
-                            actual_value = await target.locator(selector).first.inner_text(timeout=timeout)
-                            if actual_value == expected_value:
+                            candidates = await self._extract_element_candidates(target.locator(selector), timeout=timeout)
+                            norm_expected = self._normalize_text(expected_value)
+                            matched = any(self._normalize_text(c) == norm_expected for c in candidates)
+                            if matched:
                                 step_result["text"] = f"Assertion passed: text for {selector} equals '{expected_value}'"
                             else:
-                                raise ValueError(f"Assertion failed: expected '{expected_value}', but found '{actual_value}'")
+                                actual_val = candidates[0] if candidates else ""
+                                raise ValueError(f"Assertion failed: expected '{expected_value}', but found '{actual_val}'")
                         else:
                             raise ValueError("Selector is missing for 'equals' assertion")
                             
-                    elif operator == 'contains':
+                    elif operator in ['contains', 'includes']:
                         if selector == 'dialog.message':
                             actual = self._last_dialog_message or ""
-                            if expected_value in actual:
+                            if self._text_matches(expected_value, actual):
                                 step_result["text"] = f"Assertion passed: modal message contains '{expected_value}'"
                             else:
                                 raise ValueError(f"Assertion failed: '{expected_value}' not found in modal message '{actual}'")
                         elif selector == 'document.title':
                             actual_value = await target.evaluate("document.title", timeout=timeout)
-                            if expected_value in actual_value:
+                            if self._text_matches(expected_value, actual_value):
                                 step_result["text"] = f"Assertion passed: title contains '{expected_value}'"
                             else:
                                 raise ValueError(f"Assertion failed: '{expected_value}' not found in title '{actual_value}'")
                         elif selector:
-                            actual_value = await target.locator(selector).first.inner_text(timeout=timeout)
-                            if expected_value in actual_value:
+                            start_t = time.time()
+                            found = False
+                            actual_value = ""
+                            while True:
+                                actual_value = await self._extract_element_text(target.locator(selector), timeout=timeout)
+                                if self._text_matches(expected_value, actual_value):
+                                    found = True
+                                    break
+                                if (time.time() - start_t) >= poll_max:
+                                    break
+                                await asyncio.sleep(0.1)
+
+                            if found:
                                 step_result["text"] = f"Assertion passed: text for {selector} contains '{expected_value}'"
                             else:
                                 raise ValueError(f"Assertion failed: '{expected_value}' not found in '{actual_value}'")
                         else:
-                            # Use Frame-safe innerText
-                            actual_value = await target.locator("body").inner_text()
-                            if expected_value in actual_value:
+                            start_t = time.time()
+                            found = False
+                            actual_value = ""
+                            while True:
+                                actual_value = await self._collect_all_page_text(target)
+                                if self._text_matches(expected_value, actual_value):
+                                    found = True
+                                    break
+                                if (time.time() - start_t) >= poll_max:
+                                    break
+                                await asyncio.sleep(0.1)
+
+                            if found:
                                 step_result["text"] = f"Assertion passed: page content contains '{expected_value}'"
                             else:
                                 raise ValueError(f"Assertion failed: '{expected_value}' not found on page")
+
+                    elif operator in ['not_contains', 'notcontains']:
+                        if selector:
+                            actual_value = await self._extract_element_text(target.locator(selector), timeout=timeout)
+                            if not self._text_matches(expected_value, actual_value):
+                                step_result["text"] = f"Assertion passed: text for {selector} does not contain '{expected_value}'"
+                            else:
+                                raise ValueError(f"Assertion failed: '{expected_value}' found in '{actual_value}'")
+                        else:
+                            actual_value = await self._collect_all_page_text(target)
+                            if not self._text_matches(expected_value, actual_value):
+                                step_result["text"] = f"Assertion passed: page content does not contain '{expected_value}'"
+                            else:
+                                raise ValueError(f"Assertion failed: '{expected_value}' was found on page")
                             
                 elif step_type == 'getText':
                     selector = properties.get('selector', '')
@@ -964,72 +1162,100 @@ class PlaywrightExecutorService:
                 break
 
             except Exception as e:
-                # Only retry on certain types of errors (Timeout, etc)
-                if attempt < MAX_ATTEMPTS - 1:
-                    logger.warning(f"⚠️ Step '{name}' failed (Attempt {attempt+1}/{MAX_ATTEMPTS}). Retrying... Error: {str(e)}")
-                    
-                    # 🤖 AI Auto-Healing Check
-                    err_str = str(e).lower()
-                    is_healable_error = ("timeout" in err_str or "locator" in err_str or "waiting for" in err_str or "strict mode" in err_str or "not attached" in err_str or "hidden" in err_str)
-                    is_healable_step = step_type in ['click', 'type', 'fill', 'wait_selector', 'hover', 'scroll', 'assert', 'getText', 'getAttribute']
-                    
-                    logger.info(f"DEBUG Auto-Heal check: type={step_type} (valid={is_healable_step}), err_match={is_healable_error}, db={bool(db)}, user_id={user_id}, broken_selector={properties.get('selector')}")
-                    if is_healable_error and is_healable_step:
-                        broken_selector = properties.get('selector', '')
-                        if db and user_id and broken_selector:
-                            action_val = properties.get('value', '')
-                            
-                            logger.info(f"🤖 [Auto-Heal] Triggering Expert Heuristic to fix broken selector: {broken_selector}")
-                            try:
-                                from app.services.heuristic_healer_service import HeuristicHealerService
-                                new_selector, candidates = await HeuristicHealerService.attempt_heal(self._page, broken_selector, action_val, step_type)
-                            except Exception as h_err:
-                                logger.error(f"Heuristic failed: {h_err}")
-                                new_selector, candidates = None, []
-                                
-                            if new_selector:
-                                logger.info(f"✨ [Auto-Heal] Fast Heuristic Success! Replacing '{broken_selector}' with '{new_selector}'")
-                                properties['selector'] = new_selector
-                                step['properties'] = properties
-                                step_result["text"] = f"[HEURISTIC-HEALED -> {new_selector}] "
-                                orig_sel = step.get('_original_properties', {}).get('selector', broken_selector)
-                                step_result["healed_selector"] = f"{orig_sel}:::{new_selector}"
-                            else:
-                                logger.info(f"🤖 [Auto-Heal] Heuristic failed or was ambiguous. Falling back to AI model.")
-                                try:
-                                    import traceback
-                                    import json
-                                    from app.services.analysis_service import AnalysisService
-                                    
-                                    # Fallback: Instead of sending the full DOM, we send the highly-filtered JSON array of candidates!
-                                    # This is insanely faster, uses 95% less tokens, and reduces hallucinations.
-                                    clean_html = json.dumps(candidates[:50], indent=2) if candidates else "[]"
-                                    
-                                    logger.info(f"🤖 [Auto-Heal] Triggering AI model fallback with {min(len(candidates or []), 50)} candidates")
-                                    new_selector = AnalysisService.heal_selector(db, user_id, broken_selector, action_val, step_type, clean_html)
-                                    
-                                    if new_selector and new_selector != broken_selector and "```" not in new_selector:
-                                        logger.info(f"✨ [Auto-Heal] AI Success! Replacing '{broken_selector}' with '{new_selector}'")
-                                        properties['selector'] = new_selector
-                                        step['properties'] = properties
-                                        orig_sel = step.get('_original_properties') or {}
-                                        orig_sel_str = orig_sel.get('selector', broken_selector) if isinstance(orig_sel, dict) else broken_selector
-                                        step_result["text"] = f"[AI-HEALED -> {new_selector}] "
-                                        step_result["healed_selector"] = f"{orig_sel_str}:::{new_selector}"
-                                    else:
-                                        logger.warning(f"❌ [Auto-Heal] AI could not find a valid alternative selector.")
-                                        step_result["text"] = "[AI-HEAL FAILED] "
-                                except Exception as heal_err:
-                                    import traceback
-                                    logger.error(f"🤖 [Auto-Heal] Fatal AI Exception: {heal_err}")
-                                    logger.error(traceback.format_exc())
-                                    step_result["text"] = f"[AI-HEAL ERROR: {str(heal_err)}] "
+                err_str = str(e).lower()
+                is_healable_error = (
+                    "timeout" in err_str or 
+                    "locator" in err_str or 
+                    "waiting for" in err_str or 
+                    "strict mode" in err_str or 
+                    "not attached" in err_str or 
+                    "hidden" in err_str or
+                    "not visible" in err_str or
+                    "could not be found" in err_str or
+                    "element is not" in err_str
+                )
+                is_healable_step = step_type in ['click', 'type', 'fill', 'wait_selector', 'hover', 'scroll', 'assert', 'getText', 'getAttribute']
+                broken_selector = properties.get('selector', '')
+                
+                logger.info(f"🔍 [Auto-Heal Check] step='{name}' ({step_type}) attempt={attempt+1}/{MAX_ATTEMPTS} has_healed={has_healed} healable_step={is_healable_step} healable_err={is_healable_error} selector='{broken_selector}'")
 
-                    # Wait a bit before retry
-                    await self._page.wait_for_timeout(1000)
+                if not has_healed and is_healable_error and is_healable_step and broken_selector and self._page:
+                    logger.info(f"🤖 [Auto-Heal] Triggering self-healing for broken selector: {broken_selector}")
+                    new_selector = None
+                    candidates = []
+                    action_val = properties.get('value', '')
+                    
+                    # 1. Fast Local Heuristic Healing
+                    try:
+                        from app.services.heuristic_healer_service import HeuristicHealerService
+                        new_selector, candidates = await HeuristicHealerService.attempt_heal(self._page, broken_selector, action_val, step_type)
+                    except Exception as h_err:
+                        logger.error(f"❌ [Auto-Heal] Heuristic healing failed: {h_err}")
+                        new_selector, candidates = None, []
+                        
+                    if new_selector:
+                        logger.info(f"✨ [Auto-Heal] Fast Heuristic Success! Replacing '{broken_selector}' with '{new_selector}'")
+                        orig_sel_data = step.get('_original_properties')
+                        orig_sel = orig_sel_data.get('selector', broken_selector) if isinstance(orig_sel_data, dict) else broken_selector
+                        properties['selector'] = new_selector
+                        step['properties'] = properties
+                        step_result["healed_selector"] = f"{orig_sel}:::{new_selector}"
+                        step_result["text"] = f"[HEURISTIC-HEALED -> {new_selector}] "
+                        has_healed = True
+                        if self._page:
+                            await self._page.wait_for_timeout(300)
+                        continue
+                    else:
+                        logger.info(f"🤖 [Auto-Heal] Heuristic healing could not resolve a unique selector. Falling back to AI model...")
+                        # 2. AI Model Healing Fallback
+                        local_db = None
+                        try:
+                            import json
+                            from app.services.analysis_service import AnalysisService
+                            
+                            active_db = db
+                            if not active_db:
+                                from app.database import SessionLocal
+                                local_db = SessionLocal()
+                                active_db = local_db
+                                
+                            active_user_id = user_id or 1
+                            clean_html = json.dumps(candidates[:50], indent=2) if candidates else "[]"
+                            
+                            logger.info(f"🤖 [Auto-Heal] Triggering AI model fallback with {min(len(candidates or []), 50)} candidates for user_id={active_user_id}")
+                            ai_selector = AnalysisService.heal_selector(active_db, active_user_id, broken_selector, action_val, step_type, clean_html)
+                            
+                            if ai_selector and ai_selector != broken_selector and "```" not in ai_selector:
+                                logger.info(f"✨ [Auto-Heal] AI Success! Replacing '{broken_selector}' with '{ai_selector}'")
+                                orig_sel_data = step.get('_original_properties')
+                                orig_sel = orig_sel_data.get('selector', broken_selector) if isinstance(orig_sel_data, dict) else broken_selector
+                                properties['selector'] = ai_selector
+                                step['properties'] = properties
+                                step_result["healed_selector"] = f"{orig_sel}:::{ai_selector}"
+                                step_result["text"] = f"[AI-HEALED -> {ai_selector}] "
+                                has_healed = True
+                                if self._page:
+                                    await self._page.wait_for_timeout(300)
+                                continue
+                            else:
+                                logger.warning(f"❌ [Auto-Heal] AI could not find a valid alternative selector.")
+                                step_result["text"] = "[AI-HEAL FAILED] "
+                        except Exception as ai_err:
+                            logger.error(f"❌ [Auto-Heal] Fatal AI Exception: {ai_err}")
+                            step_result["text"] = f"[AI-HEAL ERROR: {str(ai_err)}] "
+                        finally:
+                            if local_db:
+                                local_db.close()
+
+                # If healing was not triggered, or healing failed, respect user-configured retry attempts
+                if attempt < MAX_ATTEMPTS - 1:
+                    attempt += 1
+                    logger.warning(f"⚠️ Step '{name}' failed (Attempt {attempt+1}/{MAX_ATTEMPTS}). Retrying... Error: {str(e)}")
+                    if self._page:
+                        await self._page.wait_for_timeout(1000)
                     continue
                 
-                # If last attempt, log and return error result
+                # If all attempts and healing exhausted, log and return error result
                 logger.error(f"❌ E2E Execution Permanent Failure: {str(e)}")
                 step_result["status"] = 500
                 step_result["reason"] = "E2E Error"

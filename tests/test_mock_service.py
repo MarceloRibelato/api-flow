@@ -572,5 +572,132 @@ def test_process_mock_request_proxy_disabled_returns_mock_default():
     assert added_log.is_proxied is False
 
 
+def test_match_rule_with_api_version_prefix_normalization():
+    # Regra cadastrada como /pet (ex: importada via Swagger Petstore)
+    rule_pet = MockRuleDB(
+        id=201,
+        name="[201 Created] Add Pet",
+        method="POST",
+        path_pattern="/pet",
+        priority=1,
+        is_active=True,
+        match_headers=None,
+        response_status=201,
+        response_body='{"id": "101", "status": "created"}'
+    )
+
+    rules = [rule_pet]
+
+    # Chamada enviada pelo cliente com /api/v3/pet
+    matched = MockExecutionEngine.match_rule(
+        rules=rules,
+        method="POST",
+        path="/api/v3/pet",
+        headers={},
+        query_params={},
+        body_text=""
+    )
+
+    assert matched is not None
+    assert matched.id == 201
+    assert matched.response_status == 201
+
+
+def test_mock_engine_matches_body_field_and_stringified_conditions():
+    import json
+
+    body = json.dumps({
+        "id": 10,
+        "name": "doggie",
+        "category": {"id": 1, "name": "Dogs"},
+        "tags": [{"id": 1, "name": "João Silva"}]
+    })
+
+    rule_default = MockRuleDB(
+        id=1,
+        mock_id=1,
+        name="[201 Created] Default Pet",
+        method="POST",
+        path_pattern="/pet",
+        priority=1,
+        match_headers=None,
+        match_query_params=None,
+        response_status=201,
+        response_body='{"status": "created"}',
+        is_active=True
+    )
+
+    # Regra 404 com condition em match_headers serializado como string JSON
+    rule_404_str = MockRuleDB(
+        id=2,
+        mock_id=1,
+        name="[404 Not Found] Pet Not Found",
+        method="POST",
+        path_pattern="/pet",
+        priority=4,
+        match_headers=json.dumps([{"target": "body", "field": "name", "operator": "equals", "value": "doggie"}]),
+        match_query_params=None,
+        response_status=404,
+        response_body='{"error": "Pet not found"}',
+        is_active=True
+    )
+
+    # 1. Deve acionar a regra 404 quando o body tiver name == "doggie"
+    matched_404 = MockExecutionEngine.match_rule(
+        rules=[rule_default, rule_404_str],
+        method="POST",
+        path="/api/v3/pet",
+        headers={},
+        query_params={},
+        body_text=body
+    )
+    assert matched_404 is not None
+    assert matched_404.id == 2
+    assert matched_404.response_status == 404
+
+    # 2. Deve cair no fallback 201 quando o body tiver name diferente
+    matched_201 = MockExecutionEngine.match_rule(
+        rules=[rule_default, rule_404_str],
+        method="POST",
+        path="/api/v3/pet",
+        headers={},
+        query_params={},
+        body_text=json.dumps({"id": 10, "name": "other_pet"})
+    )
+    assert matched_201 is not None
+    assert matched_201.id == 1
+    assert matched_201.response_status == 201
+
+
+def test_mock_engine_nested_body_and_bracket_notation():
+    body = '{"category": {"name": "Dogs"}, "tags": [{"name": "Rex"}]}'
+
+    rule_cat = MockRuleDB(
+        id=10,
+        mock_id=1,
+        name="[200 OK] Category match",
+        method="POST",
+        path_pattern="/pet",
+        priority=1,
+        match_headers=[{"target": "body", "field": "category.name", "operator": "equals", "value": "Dogs"}],
+        response_status=200,
+        response_body="{}",
+        is_active=True
+    )
+
+    matched = MockExecutionEngine.match_rule(
+        rules=[rule_cat],
+        method="POST",
+        path="/pet",
+        headers={},
+        query_params={},
+        body_text=body
+    )
+    assert matched is not None
+    assert matched.id == 10
+
+
+
+
 
 

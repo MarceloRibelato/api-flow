@@ -160,10 +160,25 @@ class SkillService:
     def execute_skill(db: Session, user_id: int, skill_id: str, context: Dict[str, Any], flow_id: int = None, chat_history: list = None) -> str:
         # 1. Check AI Configuration
         settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
+        if not settings:
+            try:
+                settings = AgentSettingsDB(
+                    user_id=user_id,
+                    ai_enabled=True,
+                    ai_provider="flow_ia",
+                    ai_model="qwen2.5:14b-instruct-q4_K_M"
+                )
+                db.add(settings)
+                db.commit()
+                db.refresh(settings)
+            except Exception as e:
+                db.rollback()
+                settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
+
         if not settings or not settings.ai_enabled:
             raise ValueError("O assistente de IA está desabilitado nas configurações.")
         
-        if not settings.ai_api_key and settings.ai_provider != "ollama":
+        if not settings.ai_api_key and settings.ai_provider not in ("ollama", "flow_ia"):
             raise ValueError(f"IA habilitada ({settings.ai_provider}), mas nenhuma Chave de API foi configurada.")
 
         skill_def = SkillService.get_skill_definition(skill_id)
@@ -252,16 +267,19 @@ class SkillService:
     @staticmethod
     def _prune_flow_for_llm(flow_data: Dict[str, Any]) -> Dict[str, Any]:
         """Prunes unnecessary binary assets, styling, and heavy logs from flow_data before sending to LLM."""
+        flow_type = flow_data.get("flow_type") or "api"
         pruned_nodes = []
         for node in flow_data.get("nodes", []):
             if not isinstance(node, dict):
                 continue
             data = node.get("data") or {}
+            node_type = data.get("nodeType") or flow_type
             p_node = {
-                "id": node.get("id"),
+                "id": str(node.get("id")),
                 "type": node.get("type"),
                 "data": {
-                    "name": data.get("name") or data.get("label") or data.get("title") or node.get("id"),
+                    "name": data.get("name") or data.get("label") or data.get("title") or str(node.get("id")),
+                    "nodeType": node_type,
                     "isMainFlow": data.get("isMainFlow", False)
                 }
             }
@@ -271,8 +289,10 @@ class SkillService:
         for card_id, card in flow_data.get("cardData", {}).items():
             if not isinstance(card, dict):
                 continue
+            card_type = card.get("nodeType") or flow_type
             p_card = {
                 "name": card.get("name"),
+                "nodeType": card_type,
                 "description": card.get("description")
             }
             
@@ -285,15 +305,15 @@ class SkillService:
                         if isinstance(body, str) and len(body) > 1000:
                             body = body[:1000] + "...[truncated]"
                         pruned_apis.append({
-                            "id": api.get("id"),
-                            "name": api.get("name"),
-                            "method": api.get("method"),
-                            "url": api.get("url"),
+                            "id": str(api.get("id") or ""),
+                            "name": api.get("name") or "API Request",
+                            "method": (api.get("method") or "GET").upper(),
+                            "url": api.get("url") or "",
                             "body": body,
-                            "headers": api.get("headers"),
-                            "params": api.get("params"),
-                            "assertions": api.get("assertions"),
-                            "extracts": api.get("extracts")
+                            "headers": api.get("headers") or [],
+                            "params": api.get("params") or [],
+                            "assertions": api.get("assertions") or [],
+                            "extracts": api.get("extracts") or []
                         })
                 p_card["apiCalls"] = pruned_apis
 
@@ -309,11 +329,12 @@ class SkillService:
                         props.pop("html_snippet", None)
                         if isinstance(props.get("value"), str) and len(props["value"]) > 500:
                             props["value"] = props["value"][:500] + "...[truncated]"
+                        action_name = step.get("action") or props.get("action") or step.get("type") or "action"
                         pruned_steps.append({
-                            "id": step.get("id"),
-                            "name": step.get("name"),
-                            "type": step.get("type"),
-                            "action": step.get("action"),
+                            "id": str(step.get("id") or ""),
+                            "name": step.get("name") or "Step",
+                            "type": step.get("type") or "action",
+                            "action": action_name,
                             "properties": props
                         })
                 p_card["e2eSteps"] = pruned_steps
@@ -321,12 +342,47 @@ class SkillService:
             if "dbQueries" in card:
                 p_card["dbQueries"] = card["dbQueries"]
 
-            pruned_card_data[card_id] = p_card
+            pruned_card_data[str(card_id)] = p_card
 
         return {
+            "flow_type": flow_type,
             "nodes": pruned_nodes,
             "edges": flow_data.get("edges", []),
             "cardData": pruned_card_data
+        }
+
+    @staticmethod
+    def build_flow_blueprint(flow_name: str, flow_type: str, pruned_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Builds a rich, semantic blueprint representing the flow's goal, topology, and critical touchpoints."""
+        nodes = pruned_data.get("nodes", [])
+        cards = pruned_data.get("cardData", {})
+        node_names = []
+        touchpoints = []
+        for n in nodes:
+            nid = str(n.get("id"))
+            c = cards.get(nid, {})
+            name = c.get("name") or n.get("data", {}).get("name") or nid
+            node_names.append(name)
+
+            if flow_type == "api" and c.get("apiCalls"):
+                for api in c["apiCalls"]:
+                    m = api.get("method", "GET")
+                    u = api.get("url", "")
+                    touchpoints.append(f"{m} {u}")
+            elif flow_type in ("mobile", "e2e", "web") and c.get("e2eSteps"):
+                for st in c["e2eSteps"]:
+                    act = st.get("action") or st.get("name")
+                    sel = st.get("properties", {}).get("selector") or st.get("properties", {}).get("url") or ""
+                    if act:
+                        touchpoints.append(f"{act}({sel[:35]})" if sel else act)
+
+        return {
+            "goal": f"Automação de testes para o fluxo '{flow_name}' na plataforma {flow_type.upper()}.",
+            "platform": flow_type,
+            "total_nodes": len(nodes),
+            "flow_sequence": " -> ".join(node_names) if node_names else "Sequência padrão",
+            "key_touchpoints": touchpoints[:12],
+            "logic_summary": f"O fluxo '{flow_name}' ({flow_type}) abrange os passos: {', '.join(node_names[:10]) if node_names else 'Nenhum passo definido'}."
         }
 
     @staticmethod
@@ -342,29 +398,43 @@ class SkillService:
         flow_data = FlowService.load(db, flow.project_id, company_id, flow.id, flow.flow_type)
         pruned_data = SkillService._prune_flow_for_llm(flow_data)
         
-        # 2. Build Python Blueprint (Fast & lightweight, avoiding redundant 1st LLM call)
-        node_names = [n.get("data", {}).get("name", n.get("id")) for n in pruned_data.get("nodes", []) if n.get("data", {}).get("name")]
-        blueprint = {
-            "goal": f"Test automation scenario for flow '{flow.name}' ({flow.flow_type})",
-            "platform": flow.flow_type,
-            "logic_summary": f"Flow '{flow.name}' containing steps: {', '.join(node_names) if node_names else 'Standard flow nodes'}"
-        }
+        # 2. Build Python Blueprint
+        blueprint = SkillService.build_flow_blueprint(flow.name, flow.flow_type, pruned_data)
 
-        # 3. Load feedback memory
+        # 3. Load feedback memory (Database-backed multi-tenant persistence)
         feedback_context = "No previous feedback."
-        memory_dir = os.path.join(SkillService.SKILLS_DIR, "memory")
-        feedback_file = os.path.join(memory_dir, f"feedback_flow_{flow_id}.json")
-        if os.path.exists(feedback_file):
-            try:
-                with open(feedback_file, "r", encoding="utf-8") as fb:
-                    feedbacks = json.load(fb)
-                    if feedbacks:
-                        feedback_lines = []
-                        for idx, fb_item in enumerate(feedbacks):
-                            feedback_lines.append(f"{idx+1}. REJECTED SUGGESTION: '{fb_item.get('suggestion_name')}' -> REASON: {fb_item.get('reason')}")
-                        feedback_context = "\n".join(feedback_lines)
-            except Exception as e:
-                logger.error(f"Failed to load feedback memory: {e}")
+        feedback_lines = []
+        try:
+            from app.models.agent_models import AgentMemoryDB
+            memories = db.query(AgentMemoryDB).filter(
+                AgentMemoryDB.flow_id == flow_id,
+                AgentMemoryDB.role == "feedback_rejected"
+            ).order_by(AgentMemoryDB.timestamp.desc()).limit(20).all()
+            for idx, m in enumerate(reversed(memories)):
+                try:
+                    fb_data = json.loads(m.content)
+                    feedback_lines.append(f"{idx+1}. REJECTED SUGGESTION: '{fb_data.get('suggestion_name')}' -> REASON: {fb_data.get('reason')}")
+                except Exception:
+                    pass
+        except Exception as db_err:
+            logger.error(f"Failed to load DB feedback memory: {db_err}")
+
+        # Fallback to local file for historical compatibility
+        if not feedback_lines:
+            memory_dir = os.path.join(SkillService.SKILLS_DIR, "memory")
+            feedback_file = os.path.join(memory_dir, f"feedback_flow_{flow_id}.json")
+            if os.path.exists(feedback_file):
+                try:
+                    with open(feedback_file, "r", encoding="utf-8") as fb:
+                        feedbacks = json.load(fb)
+                        if feedbacks:
+                            for idx, fb_item in enumerate(feedbacks):
+                                feedback_lines.append(f"{idx+1}. REJECTED SUGGESTION: '{fb_item.get('suggestion_name')}' -> REASON: {fb_item.get('reason')}")
+                except Exception as e:
+                    logger.error(f"Failed to load fallback feedback memory: {e}")
+
+        if feedback_lines:
+            feedback_context = "\n".join(feedback_lines)
 
         # 4. Generate Alternatives (Single Fast LLM Call)
         generation_context = {

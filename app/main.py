@@ -143,7 +143,7 @@ async def lifespan(app: FastAPI):
                         if not admin_by_name:
                             conn.execute(text("""
                                 INSERT INTO users (username, email, hashed_password, full_name, role, status, accepted_terms, token_version)
-                                VALUES ('admin', 'admin@flow.local', :pwd, 'Administrator', 'admin', 'active', true, 1);
+                                VALUES ('admin', 'admin@flow.com', :pwd, 'Administrator', 'admin', 'active', true, 1);
                             """), {"pwd": hashed_pw})
                             logger.info("⚡ [Startup] Usuário 'admin' criado com sucesso (senha: 'admin').")
                         else:
@@ -417,11 +417,11 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    import traceback
+    from fastapi.encoders import jsonable_encoder
     logger.error(f"❌ Validation Error for request {request.method} {request.url}: {exc.errors()}")
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors()},
+        content={"detail": jsonable_encoder(exc.errors())},
     )
 
 # Incluir rotas (com suporte para prefixo normal e /api para evitar 404 via proxy/direto)

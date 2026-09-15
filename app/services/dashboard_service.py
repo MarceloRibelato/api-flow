@@ -182,7 +182,7 @@ class DashboardService:
         return [
             {
                 "id": e.id,
-                "api_name": e.api_name or "Unknown API",
+                "api_name": e.api_name or e.feature_name or e.node_name or "Execução",
                 "flow_id": e.flow_id,
                 "created_at": e.created_at,
                 "status_code": e.status_code,
@@ -241,10 +241,13 @@ class DashboardService:
                         execution_type: str = None,
                         search_term: str = None, status_code: str = None, last_execution_only: bool = False, trigger_origin: str = None,
                         company_id: Optional[int] = None) -> List[Dict[str, Any]]:
-        if str(days).lower() == "today":
+        is_today = str(days).lower() == "today"
+        if is_today:
             days = 1
             if not start_date:
                 start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            if not end_date:
+                end_date = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=999999)
         else:
             try:
                 days = int(days)
@@ -282,9 +285,18 @@ class DashboardService:
                  stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
 
         for row in raw_data:
-            day_str = row.created_at.strftime('%Y-%m-%d')
+            day_str = row.created_at.strftime('%Y-%m-%d') if row.created_at else None
+            if not day_str:
+                continue
+
+            # When querying specifically 'today' or a single 24-hour day range, map all matched rows to the day_str of the range
+            if is_today or (start_date and end_date and (end_date - start_date).days == 0):
+                target_day = start_date.strftime('%Y-%m-%d') if start_date else (datetime.now(timezone.utc).strftime('%Y-%m-%d'))
+                if target_day in stats_map:
+                    day_str = target_day
+
             if day_str not in stats_map:
-                 stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
+                stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
             
             stats_map[day_str]["total"] += 1
             

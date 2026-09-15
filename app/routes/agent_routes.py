@@ -7,18 +7,46 @@ from app.models.user_models import UserDB
 from app.models.agent_models import AgentSettingsDB
 from app.schemas.agent_schemas import AgentSettingsUpdate, AgentSettingsResponse
 from app.services.agent_service import AgentService
+from typing import Optional, Dict, Any
 from pydantic import BaseModel
+from app.services.mcp_playwright_service import MCPPlaywrightService
+import os
 
 router = APIRouter(prefix="/agent", tags=["AI Agent"])
 logger = logging.getLogger(__name__)
 
 class PlannerRequest(BaseModel):
-    url: str
+    url: Optional[str] = ""
+    start_mode: Optional[str] = "scratch"
+    existing_flow_context: Optional[Dict[str, Any]] = None
+    instruction: Optional[str] = None
+    start_node_id: Optional[str] = None
 
 class HealerRequest(BaseModel):
     flow_id: int
-    step_index: int
-    error_message: str
+    step_index: int = 0
+    error_message: str = ""
+    node_id: Optional[str] = None
+    failed_selector: Optional[str] = None
+    action_type: Optional[str] = None
+    target_url: Optional[str] = None
+    apply_fix: bool = False
+
+@router.get("/mcp-status")
+async def get_mcp_status(
+    current_user: UserDB = Depends(get_current_user)
+):
+    """Returns the current connection status to the Playwright MCP server."""
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        import sys
+        import importlib
+        if 'app.services.mcp_playwright_service' in sys.modules:
+            try:
+                importlib.reload(sys.modules['app.services.mcp_playwright_service'])
+            except Exception as e:
+                logger.warning(f"Could not reload mcp_playwright_service: {e}")
+    from app.services.mcp_playwright_service import MCPPlaywrightService
+    return await MCPPlaywrightService.get_mcp_status()
 
 @router.get("/settings", response_model=AgentSettingsResponse)
 @router.get("/settings/", response_model=AgentSettingsResponse)
@@ -41,8 +69,26 @@ async def run_planner(
     current_user: UserDB = Depends(get_current_user)
 ):
     """Runs the AI Planner Agent via MCP."""
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        import sys
+        import importlib
+        for mod in ['app.services.skill_service', 'app.services.analysis_service', 'app.services.mcp_playwright_service', 'app.services.agent_service']:
+            if mod in sys.modules:
+                try:
+                    importlib.reload(sys.modules[mod])
+                except Exception:
+                    pass
+    from app.services.agent_service import AgentService
     try:
-        plan = await AgentService.run_planner(db, current_user.id, req.url)
+        plan = await AgentService.run_planner(
+            db=db, 
+            user_id=current_user.id, 
+            url=req.url or "",
+            start_mode=req.start_mode or "scratch",
+            existing_flow_context=req.existing_flow_context,
+            instruction=req.instruction,
+            start_node_id=req.start_node_id
+        )
         return plan
     except Exception as e:
         logger.error(f"Error in Planner route: {e}")
@@ -55,8 +101,28 @@ async def run_healer(
     current_user: UserDB = Depends(get_current_user)
 ):
     """Runs the AI Healer Agent via MCP."""
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        import sys
+        import importlib
+        for mod in ['app.services.skill_service', 'app.services.analysis_service', 'app.services.mcp_playwright_service', 'app.services.agent_service']:
+            if mod in sys.modules:
+                try:
+                    importlib.reload(sys.modules[mod])
+                except Exception:
+                    pass
     try:
-        fix = await AgentService.run_healer(db, current_user.id, req.flow_id, req.step_index, req.error_message)
+        fix = await AgentService.run_healer(
+            db=db,
+            user_id=current_user.id,
+            flow_id=req.flow_id,
+            step_index=req.step_index,
+            error_message=req.error_message,
+            node_id=req.node_id,
+            failed_selector=req.failed_selector,
+            action_type=req.action_type,
+            target_url=req.target_url,
+            apply_fix=req.apply_fix
+        )
         return fix
     except Exception as e:
         logger.error(f"Error in Healer route: {e}")

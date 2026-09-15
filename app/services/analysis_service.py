@@ -116,7 +116,22 @@ class AnalysisService:
         from app.models.agent_models import AgentMemoryDB
         
         settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
-        if not settings or (not settings.ai_api_key and settings.ai_provider != "ollama"):
+        if not settings:
+            try:
+                settings = AgentSettingsDB(
+                    user_id=user_id,
+                    ai_enabled=True,
+                    ai_provider="flow_ia",
+                    ai_model="qwen2.5:14b-instruct-q4_K_M"
+                )
+                db.add(settings)
+                db.commit()
+                db.refresh(settings)
+            except Exception:
+                db.rollback()
+                settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
+
+        if not settings or not settings.ai_enabled or (not settings.ai_api_key and settings.ai_provider not in ("ollama", "flow_ia")):
             return None
 
         # Build messages array with history if flow_id is provided
@@ -124,13 +139,14 @@ class AnalysisService:
         if chat_history is not None:
             messages.extend(chat_history)
         elif flow_id:
-            # Fetch last 10 messages for this flow and user to prevent context overflow
+            # Fetch last 10 messages for this flow and user (filtering strictly valid LLM roles in chronological order)
             history = db.query(AgentMemoryDB).filter(
                 AgentMemoryDB.user_id == user_id, 
-                AgentMemoryDB.flow_id == flow_id
-            ).order_by(AgentMemoryDB.timestamp.asc()).limit(10).all()
+                AgentMemoryDB.flow_id == flow_id,
+                AgentMemoryDB.role.in_(["user", "assistant"])
+            ).order_by(AgentMemoryDB.timestamp.desc()).limit(10).all()
             
-            for msg in history:
+            for msg in reversed(history):
                 messages.append({"role": msg.role, "content": msg.content})
                 
         # Append current prompt
@@ -203,17 +219,44 @@ class AnalysisService:
             elif settings.ai_provider == "flow_ia":
                 url, headers, base_url = _build_flow_ia_request_params(db, user_id, settings)
                 model_name = _detect_model(base_url)
-                data = {"messages": messages, "stream": False, "model": model_name, "max_tokens": 4096, "options": {"num_predict": 4096}}
-                resp = requests.post(url, headers=headers, json=data, timeout=300)
-                if resp.status_code == 200:
-                    result_text = resp.json()["choices"][0]["message"]["content"]
+                data = {
+                    "messages": messages, 
+                    "stream": False, 
+                    "model": model_name, 
+                    "temperature": temperature,
+                    "max_tokens": 2048, 
+                    "options": {"num_predict": 2048, "temperature": temperature}
+                }
+                
+                resp = None
+                try:
+                    # Attempt License Manager proxy first
+                    resp = requests.post(url, headers=headers, json=data, timeout=300)
+                    if resp.status_code == 200:
+                        result_text = resp.json()["choices"][0]["message"]["content"]
+                        if flow_id:
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                            db.commit()
+                        return result_text
+                    else:
+                        logger.warning(f"Flow-IA License Manager returned HTTP {resp.status_code}: {resp.text}. Falling back to direct Ollama.")
+                except Exception as lme:
+                    logger.warning(f"Flow-IA License Manager request failed ({lme}). Falling back to direct Ollama.")
+
+                # Resilient fallback: Direct host Ollama
+                direct_url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                direct_headers = {"Content-Type": "application/json"}
+                direct_resp = requests.post(direct_url, headers=direct_headers, json=data, timeout=300)
+                if direct_resp.status_code == 200:
+                    result_text = direct_resp.json()["choices"][0]["message"]["content"]
                     if flow_id:
                         db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
                         db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
                         db.commit()
                     return result_text
                 else:
-                    raise Exception(f"Flow-IA Error: {resp.status_code} - {resp.text}")
+                    raise Exception(f"Direct Ollama Error: {direct_resp.status_code} - {direct_resp.text}")
 
             elif settings.ai_provider == "ollama":
                 from app.config import settings as app_settings
@@ -244,45 +287,56 @@ class AnalysisService:
                         "X-Target-Url": base_url,
                         "X-User-Identifier": user_ident,
                     }
-                    data = {"messages": messages, "stream": False, "max_tokens": 2560, "options": {"num_predict": 2560}}
+                    data = {
+                        "messages": messages, 
+                        "stream": False, 
+                        "temperature": temperature,
+                        "max_tokens": 2048, 
+                        "options": {"num_predict": 2048, "temperature": temperature}
+                    }
                     if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3"):
                         data["model"] = settings.ai_model
                     else:
                         data["model"] = _detect_model(base_url)
-                    resp = requests.post(url, headers=headers, json=data, timeout=600)
-                    if resp.status_code == 200:
-                        result_text = resp.json()["choices"][0]["message"]["content"]
-                        if flow_id:
-                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
-                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
-                            db.commit()
-                        return result_text
-                    else:
-                        logger.error(f"License Manager returned error: {resp.status_code} - {resp.text}")
-                        raise Exception(f"License Manager Error: {resp.status_code} - {resp.text}")
+                    try:
+                        resp = requests.post(url, headers=headers, json=data, timeout=600)
+                        if resp.status_code == 200:
+                            result_text = resp.json()["choices"][0]["message"]["content"]
+                            if flow_id:
+                                db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                                db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                                db.commit()
+                            return result_text
+                        else:
+                            logger.warning(f"License Manager returned error: {resp.status_code} - {resp.text}. Falling back to direct Ollama.")
+                    except Exception as lme:
+                        logger.warning(f"License Manager request failed ({lme}). Falling back to direct Ollama.")
+                
+                # Direct Ollama host fallback
+                default_url = "http://host.docker.internal:11434/v1"
+                base_url = settings.ai_base_url if settings.ai_base_url else default_url
+                if "localhost" in base_url or "127.0.0.1" in base_url:
+                    base_url = base_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+                if not base_url.endswith("/"): base_url += "/"
+                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
+                headers = {"Content-Type": "application/json"}
+                if settings.ai_api_key:
+                    headers["Authorization"] = f"Bearer {settings.ai_api_key}"
+                data = {"messages": messages, "stream": False, "max_tokens": 2560, "options": {"num_predict": 2560}}
+                if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3"):
+                    data["model"] = settings.ai_model
                 else:
-                    default_url = "http://host.docker.internal:11434/v1"
-                    base_url = settings.ai_base_url if settings.ai_base_url else default_url
-                    if not base_url.endswith("/"): base_url += "/"
-                    url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-                    headers = {"Content-Type": "application/json"}
-                    if settings.ai_api_key:
-                        headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                    data = {"messages": messages, "stream": False, "max_tokens": 2560, "options": {"num_predict": 2560}}
-                    if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3"):
-                        data["model"] = settings.ai_model
-                    else:
-                        data["model"] = _detect_model(base_url)
-                    resp = requests.post(url, headers=headers, json=data, timeout=600)
-                    if resp.status_code == 200:
-                        result_text = resp.json()["choices"][0]["message"]["content"]
-                        if flow_id:
-                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
-                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
-                            db.commit()
-                        return result_text
-                    else:
-                        raise Exception(f"Local Ollama Error: {resp.status_code} - {resp.text}")
+                    data["model"] = _detect_model(base_url)
+                resp = requests.post(url, headers=headers, json=data, timeout=600)
+                if resp.status_code == 200:
+                    result_text = resp.json()["choices"][0]["message"]["content"]
+                    if flow_id:
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                        db.commit()
+                    return result_text
+                else:
+                    raise Exception(f"Local Ollama Error: {resp.status_code} - {resp.text}")
                         
             raise Exception(f"Unsupported AI Provider: {settings.ai_provider}")
 
@@ -654,7 +708,22 @@ class AnalysisService:
 
         settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
         if not settings:
-            logger.warning(f"⚠️ [Auto-Heal] Aborted: No AgentSettings found for user_id={user_id}")
+            try:
+                settings = AgentSettingsDB(
+                    user_id=user_id,
+                    ai_enabled=True,
+                    ai_provider="flow_ia",
+                    ai_model="qwen2.5:14b-instruct-q4_K_M"
+                )
+                db.add(settings)
+                db.commit()
+                db.refresh(settings)
+            except Exception:
+                db.rollback()
+                settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
+
+        if not settings or not settings.ai_enabled:
+            logger.warning(f"⚠️ [Auto-Heal] Aborted: AI is disabled for user_id={user_id}")
             return None
         
         logger.info(f"🤖 [Auto-Heal] Provider Found: '{settings.ai_provider}'")
@@ -662,7 +731,7 @@ class AnalysisService:
         trimmed_key = (settings.ai_api_key[:5] + "...") if settings.ai_api_key else "EMPTY"
         logger.info(f"🤖 [Auto-Heal] API Key Check: {trimmed_key}")
         
-        if not settings.ai_api_key and settings.ai_provider != "ollama":
+        if not settings.ai_api_key and settings.ai_provider not in ("ollama", "flow_ia"):
             logger.warning(f"⚠️ [Auto-Heal] Aborted: AI API Key is missing for provider {settings.ai_provider}")
             return None
             
@@ -692,138 +761,20 @@ class AnalysisService:
         """
         
         try:
-            print(f"🤖 [Auto-Heal] Firing request to provider: {settings.ai_provider}")
-            if settings.ai_provider == "openai":
-                headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
-                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
-                base_url = settings.ai_base_url if settings.ai_base_url else "https://api.openai.com/v1"
-                if not base_url.endswith("/"): base_url += "/"
-                url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-                resp = requests.post(url, headers=headers, json=data, timeout=20)
-                if resp.status_code == 200:
-                    return _clean(resp.json()["choices"][0]["message"]["content"])
-
-            elif settings.ai_provider == "anthropic":
-                headers = {"x-api-key": settings.ai_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
-                data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 100}
-                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=20)
-                if resp.status_code == 200:
-                    return _clean(resp.json()["content"][0]["text"])
-
-            elif settings.ai_provider == "gemini":
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
-                data = {"contents": [{"parts": [{"text": prompt}]}]}
-                resp = requests.post(url, json=data, timeout=20)
-                if resp.status_code == 200:
-                    text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                    return _clean(text)
-            
-            elif settings.ai_provider == "deepseek":
-                 headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
-                 data = {"model": settings.ai_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.0, "max_tokens": 100}
-                 resp = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data, timeout=20)
-                 if resp.status_code == 200:
-                     return _clean(resp.json()["choices"][0]["message"]["content"])
-            
-            elif settings.ai_provider == "flow_ia":
-                default_url = "http://host.docker.internal:11434/v1"
-                base_url = settings.ai_base_url if settings.ai_base_url else default_url
-                if "localhost" in base_url or "127.0.0.1" in base_url:
-                    base_url = base_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
-                if not base_url.endswith("/"): base_url += "/"
-                from urllib.parse import urlparse
-                parsed = urlparse(base_url)
-                if parsed.path == "" or parsed.path == "/":
-                    base_url += "v1/"
-                
-                from app.config import settings as app_settings
-                custom_license = _get_custom_license_key(db, user_id)
-                license_url = app_settings.LICENSE_MANAGER_URL
-                if license_url:
-                    url = f"{license_url.rstrip('/')}/api/ai/chat"
-                    headers = {
-                        "Content-Type": "application/json",
-                        "X-License-Key": custom_license,
-                        "X-Target-Url": base_url,
-                        "X-User-Identifier": f"user_{user_id}"
-                    }
-                else:
-                    url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-                    headers = {
-                        "Content-Type": "application/json",
-                        "Authorization": "Bearer local-dummy-token"
-                    }
-                
-                # Auto-detect model
-                model_name = _detect_model(base_url)
-                data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
-                
-                logger.info(f"📡 [Auto-Heal] Flow-IA Req: {url} using model {model_name}")
-                resp = requests.post(url, headers=headers, json=data, timeout=300)
-                if resp.status_code == 200:
-                    selector = _clean(resp.json()["choices"][0]["message"]["content"])
-                    logger.info(f"✨ [Auto-Heal] Flow-IA Returned: {selector}")
-                    return selector
-                else:
-                    logger.error(f"❌ [Auto-Heal] Flow-IA Error: {resp.status_code} - {resp.text}")
-            
-            elif settings.ai_provider == "ollama":
-                from app.config import settings as app_settings
-                
-                license_url = settings.ai_base_url or app_settings.LICENSE_MANAGER_URL
-                license_key = _get_custom_license_key(db, user_id)
-                    
-                if license_url and license_key:
-                    url = f"{license_url.rstrip('/')}/api/ai/chat"
-                    user_ident = "unknown"
-                    try:
-                        if settings.user:
-                            user_ident = settings.user.email or settings.user.username or f"user_{settings.user_id}"
-                        else:
-                            user_ident = f"user_{settings.user_id}"
-                    except Exception as ue:
-                        logger.warning(f"Could not retrieve user info: {ue}")
-                    headers = {
-                        "Content-Type": "application/json",
-                        "X-License-Key": license_key,
-                        "X-User-Identifier": user_ident
-                    }
-                    model_name = settings.ai_model if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3") else _detect_model(license_url or "http://host.docker.internal:11434/v1")
-                    data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
-                    resp = requests.post(url, headers=headers, json=data, timeout=300)
-                    if resp.status_code == 200:
-                        selector = _clean(resp.json()["choices"][0]["message"]["content"])
-                        return selector
-                    else:
-                        logger.error(f"License Manager returned error: {resp.status_code} - {resp.text}")
-                else:
-                    # Inside Docker, 'localhost' points to the container. Ollama is usually on the host.
-                    default_url = "http://host.docker.internal:11434/v1"
-                    base_url = settings.ai_base_url if settings.ai_base_url else default_url
-                    if not base_url.endswith("/"): base_url += "/"
-                    url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
-                    headers = {"Content-Type": "application/json"}
-                    if settings.ai_api_key: headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                    model_name = settings.ai_model if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3") else _detect_model(base_url)
-                    data = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "stream": False}
-                    
-                    logger.info(f"📡 [Auto-Heal] Ollama Req: {url}")
-                    resp = requests.post(url, headers=headers, json=data, timeout=300)
-                    if resp.status_code == 200:
-                        selector = _clean(resp.json()["choices"][0]["message"]["content"])
-                        logger.info(f"✨ [Auto-Heal] Ollama Returned: {selector}")
-                        return selector
-                    else:
-                        logger.error(f"❌ [Auto-Heal] Ollama Error: {resp.status_code} - {resp.text}")
+            logger.info(f"🤖 [Auto-Heal] Firing selector heal request via _call_llm for provider: {settings.ai_provider}")
+            raw_result = AnalysisService._call_llm(db, user_id, prompt, temperature=0.0)
+            if raw_result:
+                selector = _clean(raw_result)
+                logger.info(f"✨ [Auto-Heal] AI Returned selector: {selector}")
+                return selector
             else:
-                logger.warning(f"❌ [Auto-Heal] Unrecognized Provider: {settings.ai_provider}")
-
+                logger.warning(f"❌ [Auto-Heal] AI Provider returned empty response.")
+                return None
         except Exception as e:
             logger.error(f"💥 [Auto-Heal] LLM Fatal Error: {e}")
             import traceback
             logger.error(traceback.format_exc())
-        
-        return None
+            return None
 
     @staticmethod
     def resolve_ambiguity(db: Session, user_id: int, generic_selector: str, action_value: str, step_type: str, candidates_html: str) -> str:
@@ -840,7 +791,7 @@ class AnalysisService:
             return None
 
         settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
-        if not settings or (not settings.ai_api_key and settings.ai_provider != "ollama"):
+        if not settings or not settings.ai_enabled or (not settings.ai_api_key and settings.ai_provider not in ("ollama", "flow_ia")):
             return None
             
         prompt = f"""
@@ -1196,7 +1147,7 @@ class AnalysisService:
         return suggestions
 
     @staticmethod
-    def analyze_performance_trends(db: Session, project_id: int = None, limit: int = 50):
+    def analyze_performance_trends(db: Session, project_id: int = None, limit: int = 50, company_id: int = None):
         """
         Analyzes execution history to find performance regressions.
         Compares last 10 runs vs previous 10 runs.
@@ -1211,6 +1162,14 @@ class AnalysisService:
         
         if project_id:
             query = query.filter(ApiExecutionHistory.project_id == project_id)
+        elif company_id:
+            from app.models.product_models import ProductModel
+            from app.models.feature_models import FeatureModel
+            product_ids = [p[0] for p in db.query(ProductModel.id).filter(ProductModel.company_id == company_id).all()]
+            feature_ids = [f[0] for f in db.query(FeatureModel.id).join(ProductModel).filter(ProductModel.company_id == company_id).all()]
+            all_ids = set(product_ids + feature_ids)
+            if all_ids:
+                query = query.filter(ApiExecutionHistory.project_id.in_(list(all_ids)))
             
         # Get recent history
         history_items = query.order_by(ApiExecutionHistory.created_at.desc()).limit(limit * 4).all()

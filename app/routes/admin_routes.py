@@ -65,6 +65,19 @@ def delete_user(
         raise HTTPException(status_code=400, detail="Você não pode excluir a si mesmo.")
         
     try:
+        from app.models.agent_models import AgentSettingsDB, AgentMemoryDB
+        from app.models.service_token_models import ServiceTokenDB
+        from app.models.auth_models import BlacklistedToken
+        from app.models.audit_models import AuditLogDB
+        from app.models.flow_models import FlowDB
+
+        db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).delete(synchronize_session=False)
+        db.query(AgentMemoryDB).filter(AgentMemoryDB.user_id == user_id).delete(synchronize_session=False)
+        db.query(ServiceTokenDB).filter(ServiceTokenDB.user_id == user_id).delete(synchronize_session=False)
+        db.query(BlacklistedToken).filter(BlacklistedToken.user_id == user_id).delete(synchronize_session=False)
+        db.query(AuditLogDB).filter(AuditLogDB.user_id == user_id).update({AuditLogDB.user_id: None}, synchronize_session=False)
+        db.query(FlowDB).filter(FlowDB.user_id == user_id).update({FlowDB.user_id: None}, synchronize_session=False)
+
         db.delete(user)
         db.commit()
     except Exception as e:

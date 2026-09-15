@@ -306,8 +306,12 @@ class MockExecutionEngine:
 
         if op in ["equals", "igual", "=="]:
             return str_actual == str_expected or str_actual.lstrip("/") == str_expected.lstrip("/")
+        elif op in ["not_equals", "!=", "diferente"]:
+            return str_actual != str_expected and str_actual.lstrip("/") != str_expected.lstrip("/")
         elif op in ["starts_with", "inicia_com", "startswith"]:
             return str_actual.startswith(str_expected) or str_actual.lstrip("/").startswith(str_expected.lstrip("/"))
+        elif op in ["ends_with", "termina_com", "endswith"]:
+            return str_actual.endswith(str_expected)
         elif op in ["contains", "contem", "includes"]:
             return str_expected in str_actual
         return str_actual == str_expected
@@ -318,16 +322,127 @@ class MockExecutionEngine:
             return data
         if not isinstance(data, (dict, list)):
             return str(data)
-        parts = path.split('.')
+        
+        clean_path = path.strip()
+        for prefix in ["req.body.", "request.body.", "body."]:
+            if clean_path.startswith(prefix):
+                clean_path = clean_path[len(prefix):]
+                break
+
+        normalized = re.sub(r"\[([0-9a-zA-Z_\-]+)\]", r".\1", clean_path).strip(".")
+        parts = normalized.split(".")
         curr = data
         for p in parts:
-            if isinstance(curr, dict) and p in curr:
-                curr = curr[p]
+            if isinstance(curr, dict):
+                if p in curr:
+                    curr = curr[p]
+                else:
+                    matched_key = next((k for k in curr.keys() if k.lower() == p.lower()), None)
+                    if matched_key is not None:
+                        curr = curr[matched_key]
+                    else:
+                        return None
             elif isinstance(curr, list) and p.isdigit() and int(p) < len(curr):
                 curr = curr[int(p)]
             else:
                 return None
         return curr
+
+    @classmethod
+    def get_rule_conditions(cls, rule: Any) -> List[Dict[str, Any]]:
+        """
+        Extrai de forma unificada e resiliente a lista de condições de ativação de uma regra.
+        Suporta:
+        - match_headers como List[dict], JSON string ou dict
+        - match_query_params como List[dict], JSON string ou dict
+        Retorna uma lista de condições estruturadas: [{"target": ..., "field": ..., "operator": ..., "value": ...}].
+        """
+        conditions: List[Dict[str, Any]] = []
+
+        def _parse_source(raw: Any, default_target: str):
+            if not raw:
+                return
+            parsed = raw
+            if isinstance(raw, str):
+                s = raw.strip()
+                if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+                    try:
+                        parsed = json.loads(s)
+                    except Exception:
+                        return
+                else:
+                    return
+
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        conditions.append(item)
+            elif isinstance(parsed, dict):
+                if "target" in parsed or "field" in parsed or "operator" in parsed:
+                    conditions.append(parsed)
+                else:
+                    for k, v in parsed.items():
+                        conditions.append({
+                            "target": default_target,
+                            "field": k,
+                            "operator": "equals",
+                            "value": str(v)
+                        })
+
+        _parse_source(getattr(rule, "match_headers", None), "header")
+        _parse_source(getattr(rule, "match_query_params", None), "query")
+
+        return conditions
+
+    @staticmethod
+    def match_path_segments(request_path: str, rule_path: str) -> tuple[bool, int]:
+        """
+        Avalia se a rota da requisição bate com o pattern da regra de forma 100% dinâmica e agnóstica a qualquer API:
+        1. Match Exato: '/api/v3/pet' == '/api/v3/pet' (maior score)
+        2. Match com Parâmetros: '/api/v3/pet/101' casa com '/api/v3/pet/{id}'
+        3. Match com Variação de Prefixo (BasePath):
+           - A requisição inclui basePath que a regra não tem: req='/api/v3/pet', regra='/pet'
+           - Ou a regra tem basePath e a requisição não: req='/pet', regra='/api/v3/pet'
+        Retorna (matched: bool, specificity_score: int).
+        """
+        if rule_path == "*":
+            return True, 1
+
+        clean_req = request_path.strip("/")
+        clean_rule = rule_path.strip("/")
+
+        req_segs = [s for s in clean_req.split("/") if s]
+        rule_segs = [s for s in clean_rule.split("/") if s]
+
+        if not req_segs and not rule_segs:
+            return True, 100
+        if not req_segs or not rule_segs:
+            return False, 0
+
+        def _seg_matches(req_seg: str, rule_seg: str) -> bool:
+            if rule_seg in ("*", ".*"):
+                return True
+            pattern = re.sub(r'\{[a-zA-Z0-9_]+\}', '[^/]+', rule_seg)
+            return bool(re.fullmatch(f"^{pattern}$", req_seg))
+
+        # 1. Match de mesmo comprimento (tamanho idêntico de segmentos)
+        if len(req_segs) == len(rule_segs):
+            if all(_seg_matches(r, s) for r, s in zip(req_segs, rule_segs)):
+                return True, 100 + len(rule_segs)
+
+        # 2. Requisição contém prefixo de basePath que a regra não tem (ex: req='/api/v3/pet', rule='/pet')
+        if len(req_segs) > len(rule_segs):
+            tail = req_segs[-len(rule_segs):]
+            if all(_seg_matches(r, s) for r, s in zip(tail, rule_segs)):
+                return True, len(rule_segs)
+
+        # 3. Regra contém prefixo de basePath que a requisição omitiu (ex: req='/pet', rule='/api/v3/pet')
+        if len(rule_segs) > len(req_segs):
+            tail = rule_segs[-len(req_segs):]
+            if all(_seg_matches(r, s) for r, s in zip(req_segs, tail)):
+                return True, len(req_segs)
+
+        return False, 0
 
     @classmethod
     def match_rule(
@@ -372,52 +487,49 @@ class MockExecutionEngine:
             if not rule_path.startswith("/") and rule_path != "*":
                 rule_path = f"/{rule_path}"
 
-            pattern = rule_path.replace("*", ".*")
-            pattern = re.sub(r'\{[a-zA-Z0-9_]+\}', '[^/]+', pattern)
-
             # Verificar se a regra possui condição que avalia URL/Path
-            has_url_condition = False
-            raw_conditions = rule.match_headers if isinstance(rule.match_headers, list) else (
-                rule.match_query_params if isinstance(rule.match_query_params, list) else None
+            has_url_condition = any(
+                str(c.get("target", "")).lower() in ["url", "path", "rota"]
+                for c in cls.get_rule_conditions(rule)
             )
-            if raw_conditions:
-                for c in raw_conditions:
-                    if isinstance(c, dict) and c.get("target", "").lower() in ["url", "path", "rota"]:
-                        has_url_condition = True
-                        break
 
-            # Se bate com a rota, ou se o path_pattern é curinga (*), ou se tem condição de URL e path_pattern genérico
-            if (
-                re.fullmatch(f"^{pattern}$", clean_path)
-                or clean_path == rule.path_pattern
-                or clean_path == rule_path
-                or rule.path_pattern == "*"
-                or (has_url_condition and rule_path in ["/", "/*", "*"])
-            ):
-                matching_path_rules.append(rule)
+            # Avaliação genérica e agnóstica de rota (suporta match exato, parâmetros e variação de basePath)
+            matched_path, score = cls.match_path_segments(clean_path, rule_path)
 
-        # ORDENAR POR PRIORIDADE CRESCENTE (1 = Primeiro a ser avaliado)
-        matching_path_rules.sort(key=lambda r: (r.priority if (r.priority is not None and r.priority > 0) else 99))
+            if matched_path or (has_url_condition and rule_path in ["/", "/*", "*"]):
+                matching_path_rules.append((rule, score))
+
+        # Ordenar por prioridade crescente (1 primeiro) e maior especificidade de rota
+        matching_path_rules.sort(key=lambda item: (
+            item[0].priority if (item[0].priority is not None and item[0].priority > 0) else 99,
+            -item[1]  # Maior score de especificidade primeiro (match exato antes de match parcial)
+        ))
+
+        ordered_rules = [item[0] for item in matching_path_rules]
 
         # PASS 1: Testar Regras COM Condições Específicas (Ordem de Prioridade 1 -> 6+)
-        for rule in matching_path_rules:
-            rule_conditions = None
-            if isinstance(rule.match_headers, list):
-                rule_conditions = rule.match_headers
-            elif isinstance(rule.match_query_params, list):
-                rule_conditions = rule.match_query_params
+        for rule in ordered_rules:
+            rule_conditions = cls.get_rule_conditions(rule)
 
-            if rule_conditions and isinstance(rule_conditions, list) and len(rule_conditions) > 0:
+            if rule_conditions and len(rule_conditions) > 0:
                 cond_failed = False
                 for cond in rule_conditions:
-                    target = cond.get("target", "header").lower()
-                    field = cond.get("field", "").strip()
-                    operator = cond.get("operator", "equals")
+                    target = str(cond.get("target", "header")).lower().strip()
+                    field = str(cond.get("field", "")).strip()
+                    operator = str(cond.get("operator", "equals")).strip()
                     expected = str(cond.get("value", ""))
 
                     if target == "header":
+                        for prefix in ["req.headers.", "request.headers.", "headers."]:
+                            if field.lower().startswith(prefix):
+                                field = field[len(prefix):]
+                                break
                         actual = headers_lower.get(field.lower())
                     elif target == "query":
+                        for prefix in ["req.query.", "request.query.", "query."]:
+                            if field.lower().startswith(prefix):
+                                field = field[len(prefix):]
+                                break
                         actual = query_params.get(field)
                     elif target == "body":
                         if field:
@@ -430,7 +542,7 @@ class MockExecutionEngine:
                         full_request_url = raw_url if raw_url else full_path
 
                         # Captura a URL inteira (sem chave)
-                        if operator in ["contains", "contem", "includes"]:
+                        if operator.lower() in ["contains", "contem", "includes"]:
                             exp_lower = expected.lower().strip()
                             if (
                                 exp_lower in clean_path.lower()
@@ -440,7 +552,7 @@ class MockExecutionEngine:
                                 actual = exp_lower
                             else:
                                 actual = full_path
-                        elif operator in ["starts_with", "inicia_com", "startswith"]:
+                        elif operator.lower() in ["starts_with", "inicia_com", "startswith"]:
                             actual = clean_path
                         else:
                             actual = full_path
@@ -459,13 +571,8 @@ class MockExecutionEngine:
                     return rule
 
         # PASS 2: Se nenhuma condição bateu, busca a Regra SEM Condições (Default 200 OK da rota)
-        for rule in matching_path_rules:
-            rule_conditions = None
-            if isinstance(rule.match_headers, list):
-                rule_conditions = rule.match_headers
-            elif isinstance(rule.match_query_params, list):
-                rule_conditions = rule.match_query_params
-
+        for rule in ordered_rules:
+            rule_conditions = cls.get_rule_conditions(rule)
             has_conditions = (rule_conditions and len(rule_conditions) > 0) or bool(rule.match_body_pattern)
 
             # Se não tem condições específicas, é a resposta padrão da rota!
@@ -473,7 +580,7 @@ class MockExecutionEngine:
                 return rule
 
         # PASS 3: Se houver qualquer regra de sucesso (status < 400) para a rota, usa ela
-        for rule in matching_path_rules:
+        for rule in ordered_rules:
             if rule.response_status < 400:
                 return rule
 

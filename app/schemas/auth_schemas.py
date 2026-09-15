@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr
 
 class UserBase(BaseModel):
     username: str
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     full_name: Optional[str] = None
     cpf: Optional[str] = None
     company: Optional[str] = None
@@ -25,7 +25,7 @@ class LoginRequest(BaseModel):
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     company: Optional[str] = None
     cnpj: Optional[str] = None
     phone: Optional[str] = None

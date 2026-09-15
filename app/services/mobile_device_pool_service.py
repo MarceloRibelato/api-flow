@@ -45,6 +45,10 @@ class MobileDevicePoolService:
         candidates.extend([
             os.path.expanduser("~/Android/Sdk/platform-tools/adb"),
             "/home/server/Android/Sdk/platform-tools/adb",
+            os.path.expanduser("~/.local/bin/adb"),
+            "/home/server/.local/bin/adb",
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "platform-tools", "adb")),
+            "/home/server/Desktop/Projetos/Flow/platform-tools/adb",
             "/usr/bin/adb",
             "/usr/local/bin/adb",
             "/opt/android-sdk/platform-tools/adb",
@@ -64,11 +68,18 @@ class MobileDevicePoolService:
         adb_bin = cls._find_adb_binary()
         devices = []
         try:
+            env = os.environ.copy()
+            if "ANDROID_USER_HOME" not in env:
+                env["ANDROID_USER_HOME"] = os.path.expanduser("~/.android")
+            if "HOME" not in env:
+                env["HOME"] = os.path.expanduser("~")
+
             res = subprocess.run(
                 [adb_bin, "devices", "-l"],
                 capture_output=True,
                 text=True,
-                timeout=6
+                timeout=6,
+                env=env
             )
             lines = res.stdout.strip().split("\n")
             # Primeira linha é 'List of devices attached'
@@ -83,6 +94,12 @@ class MobileDevicePoolService:
                     state = parts[1]
 
                     details = {"serial": serial, "state": state, "raw": line}
+                    details = {
+                        "serial": serial,
+                        "udid": serial,
+                        "state": state,
+                        "raw": line
+                    }
                     for token in parts[2:]:
                         if ":" in token:
                             k, v = token.split(":", 1)
@@ -92,6 +109,29 @@ class MobileDevicePoolService:
                     logger.info(f"📱 [Device Pool] Detected connected ADB device: {serial} ({state})")
         except Exception as e:
             logger.warning(f"⚠️ [Device Pool] Could not list connected ADB devices via {adb_bin}: {e}")
+
+        # Fallback diagnostics: if adb returned empty, check if physical USB android device is attached
+        if not devices:
+            try:
+                usb_res = subprocess.run(
+                    ["lsusb"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3
+                )
+                for line in usb_res.stdout.splitlines():
+                    if any(term in line.lower() for term in ["android", "samsung", "xiaomi", "motorola", "google", "huawei", "oneplus", "lg electronics"]):
+                        devices.append({
+                            "serial": "USB-DETECTED",
+                            "udid": "USB-DETECTED",
+                            "state": "unauthorized",
+                            "model": line.split(":", 2)[-1].strip() if ":" in line else line,
+                            "raw": line,
+                            "hint": "Dispositivo detectado via USB, mas o ADB não o listou. Ative a Depuração USB no celular."
+                        })
+                        break
+            except Exception:
+                pass
 
         return devices
 

@@ -66,16 +66,29 @@ class AuthService:
             role = "viewer"
             status = "pending"
 
-        if user.company:
+        if user.company or cnpj_clean:
             from app.models.company_models import CompanyDB
-            existing_company = db.query(CompanyDB).filter(CompanyDB.name == user.company).first()
+            existing_company = None
+            
+            # 1. Search by CNPJ first if provided (CNPJ is globally unique per company)
+            if cnpj_clean:
+                existing_company = db.query(CompanyDB).filter(CompanyDB.cnpj == cnpj_clean).first()
+                
+            # 2. If not found by CNPJ, search by company name (case-insensitive)
+            if not existing_company and user.company:
+                existing_company = db.query(CompanyDB).filter(CompanyDB.name.ilike(user.company.strip())).first()
             
             if existing_company:
                 company_id = existing_company.id
+                # If existing company didn't have CNPJ but it was provided now, update it
+                if not existing_company.cnpj and cnpj_clean:
+                    existing_company.cnpj = cnpj_clean
+                    db.flush()
             else:
                 # Create new company
+                company_name = user.company.strip() if user.company else f"Empresa {cnpj_clean}"
                 new_company = CompanyDB(
-                    name=user.company,
+                    name=company_name,
                     cnpj=cnpj_clean # Assign CNPJ to company
                 )
                 db.add(new_company)
@@ -95,7 +108,7 @@ class AuthService:
             hashed_password=hashed_pwd,
             full_name=user.full_name,
             cpf=cpf_clean,
-            company=user.company, # Legacy text field
+            company=existing_company.name if (user.company and existing_company) else user.company,
             company_id=company_id,
             role=role,
             status=status,

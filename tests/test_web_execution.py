@@ -413,3 +413,87 @@ async def test_execute_step_switch_tab():
     assert executor._page == tab1
     tab1.bring_to_front.assert_awaited_once()
     assert "Switched to tab index 1" in result["text"]
+
+
+# =====================================================================
+# 5. Testes de Validação HTML5 e Captura Abrangente de Texto
+# =====================================================================
+
+def test_normalize_text_and_matches():
+    """Valida normalização de aspas tipográficas (curly quotes), espaços e matching flexível."""
+    executor = PlaywrightExecutorService(headless=True)
+    
+    # Teste de normalização
+    raw = "Please include an ‘@’ in the email address. “test”\u00a0is invalid."
+    norm = executor._normalize_text(raw)
+    assert norm == "Please include an '@' in the email address. \"test\" is invalid."
+    
+    # Teste de matches direto e com aspas tipográficas
+    assert executor._text_matches("Please include an '@' in", raw)
+    assert executor._text_matches("please include an '@' in", raw)
+    assert not executor._text_matches("Nonexistent text", raw)
+
+
+@pytest.mark.anyio
+async def test_execute_step_assert_page_contains_html5_validation():
+    """Valida que asserção 'contains' a nível de página captura mensagens de validação nativas HTML5."""
+    executor = PlaywrightExecutorService(headless=True)
+    executor.start = AsyncMock()
+
+    mock_page = MagicMock()
+    # Simula o evaluate de coleta do documento retornando a mensagem de validação do input
+    mock_page.evaluate = AsyncMock(
+        return_value="Login Page\nPlease include an '@' in the email address. 'user_without_at' is missing an '@'."
+    )
+    mock_page.frames = []
+    executor._page = mock_page
+
+    step = {
+        "type": "assert",
+        "name": "Assert Page Contains HTML5 Validation",
+        "properties": {
+            "selector": "",
+            "operator": "contains",
+            "value": "Please include an '@' in",
+            "timeout": 1000
+        }
+    }
+
+    result = await executor.execute_step(step, capture_screenshot=False)
+    assert result["status"] == 200
+    assert "Assertion passed: page content contains 'Please include an \'@\' in'" in result["text"]
+
+
+@pytest.mark.anyio
+async def test_execute_step_assert_input_element_validation_message():
+    """Valida que asserção com seletor apontando para input captura validationMessage (quando innerText é vazio)."""
+    executor = PlaywrightExecutorService(headless=True)
+    executor.start = AsyncMock()
+
+    mock_page = MagicMock()
+    mock_locator = MagicMock()
+    mock_el = MagicMock()
+    # Em input tags, inner_text costuma ser vazio no DOM, mas validationMessage contém o erro
+    mock_el.evaluate = AsyncMock(return_value=[
+        "Please fill out this field.",
+        "placeholder@email.com"
+    ])
+    mock_locator.first = mock_el
+    mock_page.locator = MagicMock(return_value=mock_locator)
+    executor._page = mock_page
+
+    step = {
+        "type": "assert",
+        "name": "Assert Input Has Validation",
+        "properties": {
+            "selector": "input#email",
+            "operator": "contains",
+            "value": "Please fill out this field",
+            "timeout": 1000
+        }
+    }
+
+    result = await executor.execute_step(step, capture_screenshot=False)
+    assert result["status"] == 200
+    assert "Assertion passed: text for input#email contains 'Please fill out this field'" in result["text"]
+
