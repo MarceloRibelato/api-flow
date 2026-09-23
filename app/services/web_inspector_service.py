@@ -5,11 +5,26 @@ import time
 import sys
 import traceback
 import asyncio
+import ipaddress
+from urllib.parse import urlparse
 from typing import Dict, List, Any, Optional
-from playwright.async_api import async_playwright, Page, BrowserContext, Browser
-import playwright_stealth
+try:
+    from playwright.async_api import async_playwright, Page, BrowserContext, Browser
+except ImportError:
+    async_playwright = None
+    Page = Any
+    BrowserContext = Any
+    Browser = Any
 
-from app.services.playwright_executor_service import PlaywrightExecutorService
+try:
+    import playwright_stealth
+except ImportError:
+    playwright_stealth = None
+
+try:
+    from app.services.playwright_executor_service import PlaywrightExecutorService
+except ImportError:
+    PlaywrightExecutorService = None
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +33,44 @@ _session_lock = asyncio.Lock()
 _active_sessions: Dict[str, Any] = {}
 _session_progress: Dict[str, Dict[str, Any]] = {}
 _playwright_instance = None  # Persistent playwright instance
+_shared_browser = None  # Persistent shared Chromium instance
 _last_cleanup_time = 0
+
+BLOCKED_HOSTNAMES = {
+    "localhost", "flow-backend", "flow-db", "flow-redis", 
+    "flow-celery-worker", "flow-frontend", "flow-db-migration",
+    "host.docker.internal", "127.0.0.1", "0.0.0.0"
+}
+
+def _validate_url(url: str):
+    """Protects against SSRF by validating the URL hostname and resolved IP address."""
+    if not url:
+        return
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{url}")
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"Protocolo não permitido: {scheme}. Use apenas http ou https.")
+    
+    hostname = (parsed.hostname or "").lower().strip()
+    if not hostname:
+        raise ValueError("URL inválida: hostname não especificado.")
+    
+    if hostname in BLOCKED_HOSTNAMES:
+        raise ValueError(f"Navegação bloqueada: acesso a host interno proibido ({hostname}).")
+    
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            raise ValueError(f"Navegação bloqueada: endereço IP restrito ou privado ({ip}).")
+        if str(ip) == "169.254.169.254":
+            raise ValueError("Navegação bloqueada: endpoint de metadados de nuvem restrito.")
+    except ValueError as ve:
+        if "Navegação bloqueada" in str(ve):
+            raise ve
+        # Hostname is a valid domain string
+        pass
 
 QA_FLOW_EXTRACTOR_SCRIPT = """window.__getQAFlowSnapshot = () => {
 const results = [];
@@ -40,7 +92,7 @@ const results = [];
                 };
 
                 const allNodes = collectAllElements(document.body);
-                const queryStr = 'button, input, select, textarea, a, [onclick], [role="button"], [class*="btn" i], [class*="button" i], [role="link"], [role="menuitem"], [role="tab"], [role="switch"], [role="checkbox"]';
+                const queryStr = 'button, input, select, textarea, a, [onclick], [role="button"], [class*="btn" i], [class*="button" i], [role="link"], [role="menuitem"], [role="tab"], [role="switch"], [role="checkbox"], [role="menuitemcheckbox"], [role="menuitemradio"], [aria-haspopup], [data-icon], svg[onclick]';
                 
                 const interactables = allNodes.filter(el => {
                     try { 
@@ -60,27 +112,65 @@ const results = [];
                             // But we keep it as a fallback if no children are found.
                             return true; 
                         }
+                        if (el.hasAttribute('tabindex') && el.getAttribute('tabindex') !== '-1') return true;
                         return false;
                     } catch (e) { return false; }
                 });
                 
-                interactables.forEach((el, index) => {
-                    const rect = el.getBoundingClientRect();
-                    const style = window.getComputedStyle(el);
-                    if (rect.width === 0 || rect.height === 0 || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
+                // Phase 1: Imprint JIT locators without triggering layout recalculations
+                for (let i = 0; i < interactables.length; i++) {
+                    interactables[i].setAttribute('data-lws-id', `lws-${i}`);
+                }
 
-                    // Imprint JIT locator for deferred Playwright targeting
-                    el.setAttribute('data-lws-id', `lws-${index}`);
+                // Phase 2: Batch read layout and styles (Zero Layout Thrashing)
+                for (let index = 0; index < interactables.length; index++) {
+                    const el = interactables[index];
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+
+                    // Extract icon metadata from SVG or icon fonts
+                    let iconAttr = '';
+                    try {
+                        const elTitle = el.getAttribute('title') || '';
+                        const elAriaLabel = el.getAttribute('aria-label') || '';
+                        const svgEl = el.querySelector('svg');
+                        if (svgEl) {
+                            const svgLabel = svgEl.getAttribute('aria-label') || svgEl.getAttribute('data-icon') || svgEl.getAttribute('name') || '';
+                            const svgTitle = svgEl.querySelector('title')?.textContent || '';
+                            const svgClass = typeof svgEl.className === 'string' ? svgEl.className : (svgEl.className?.baseVal || '');
+                            const classMatch = svgClass.match(/(?:lucide|fa|bi|icon|feather|heroicon)[-_]([a-z0-9-]+)/i);
+                            iconAttr = svgLabel || svgTitle || (classMatch ? classMatch[1] : '') || elTitle || elAriaLabel;
+                        }
+                        if (!iconAttr) {
+                            const iconEl = el.querySelector('i, span[class*="icon"], span[class*="fa-"], span[class*="bi-"], span[class*="lucide-"]');
+                            if (iconEl) {
+                                const iClass = typeof iconEl.className === 'string' ? iconEl.className : '';
+                                const match = iClass.match(/(?:fa[srbld]?\\s+fa-|bi-|lucide-|icon-)([a-z0-9-]+)/i);
+                                iconAttr = iconEl.getAttribute('aria-label') || iconEl.getAttribute('title') || (match ? match[1] : '') || '';
+                            }
+                        }
+                        if (!iconAttr) {
+                            iconAttr = el.getAttribute('data-icon') || el.getAttribute('data-testid') || elTitle || '';
+                        }
+                    } catch(e) {}
+
+                    let extractedText = el.innerText?.substring(0, 50).trim() || el.value?.substring(0, 50).trim() || '';
+                    if (!extractedText && iconAttr) {
+                        extractedText = `[icon: ${iconAttr}]`;
+                    }
 
                     results.push({
                         id: `lws-${index}`, // Store our JIT pointer mapped to React
                         tagName: el.tagName,
                         type: el.type || '',
-                        text: el.innerText?.substring(0, 50).trim() || el.value?.substring(0, 50).trim() || '',
+                        text: extractedText,
+                        iconAttr: (iconAttr || '').substring(0, 50),
                         placeholder: el.placeholder?.substring(0, 50) || '',
                         nameAttr: el.name || '',
                         idAttr: el.id || '',
-                        pointerEvents: window.getComputedStyle(el).pointerEvents,
+                        pointerEvents: style.pointerEvents,
                         className: (typeof el.className === 'string' ? el.className : '').substring(0, 100),
                         labelAttr: (el.getAttribute('aria-label') || '').substring(0, 50) || (function(){
                             try {
@@ -100,7 +190,7 @@ const results = [];
                             height: rect.height
                         }
                     });
-                });
+                }
 
                 // Sort by area descending so smallest elements render last (highest Z-Index)
                 results.sort((a, b) => {
@@ -210,9 +300,43 @@ class _WebInspectorServiceImpl:
     """
 
     @classmethod
-    async def start_session(cls, session_id: str, initial_url: str = None, steps: list = None) -> dict:
-        """Starts a persistent playwright browser session."""
-        global _playwright_instance
+    async def _get_shared_browser(cls) -> Browser:
+        global _playwright_instance, _shared_browser
+        if not _playwright_instance:
+            _playwright_instance = await async_playwright().start()
+
+        if not _shared_browser or not _shared_browser.is_connected():
+            logger.info("🌐 [WebInspector] Launching shared Chromium instance...")
+            _shared_browser = await _playwright_instance.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox", 
+                    "--disable-setuid-sandbox", 
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-zygote",
+                    "--disable-ipv6",
+                    "--disable-features=IsolateOrigins,site-per-process,SubresourceIntegrity",
+                    "--disable-site-isolation-trials",
+                    "--window-position=0,0",
+                    "--ignore-certificate-errors",
+                    "--disable-subresource-integrity"
+                ]
+            )
+        return _shared_browser
+
+    @classmethod
+    async def start_session(cls, session_id: str, initial_url: str = None, steps: list = None, user_id: Optional[int] = None) -> dict:
+        """Starts a persistent playwright browser session using an isolated context from the shared browser."""
+        # SSRF Protection: Validate initial URL and any pre-existing navigation steps
+        if initial_url:
+            _validate_url(initial_url)
+        for s in (steps or []):
+            if s.get("type") in ("navigate", "browser"):
+                step_url = s.get("properties", {}).get("url") or s.get("properties", {}).get("value")
+                if step_url:
+                    _validate_url(step_url)
+
         async with _session_lock:
             if session_id in _active_sessions:
                 logger.info(f"🌐 [WebInspector] Session {session_id} exists. Checking health...")
@@ -223,29 +347,10 @@ class _WebInspectorServiceImpl:
                     logger.warning(f"🌐 [WebInspector] Session {session_id} unhealthy, recreating. Error: {e}")
                     await cls.stop_session(session_id)
 
-            logger.info(f"🌐 [WebInspector] Starting fresh session {session_id}...")
+            logger.info(f"🌐 [WebInspector] Starting fresh isolated session {session_id}...")
             
             try:
-                if not _playwright_instance:
-                    _playwright_instance = await async_playwright().start()
-                
-                # Launch browser with stability, direct network, and zero-isolation flags
-                browser = await _playwright_instance.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox", 
-                        "--disable-setuid-sandbox", 
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--no-zygote",
-                        "--disable-ipv6",
-                        "--disable-features=IsolateOrigins,site-per-process,SubresourceIntegrity",
-                        "--disable-site-isolation-trials",
-                        "--window-position=0,0",
-                        "--ignore-certificate-errors",
-                        "--disable-subresource-integrity"
-                    ]
-                )
+                browser = await cls._get_shared_browser()
                 
                 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 
@@ -302,12 +407,12 @@ class _WebInspectorServiceImpl:
                     await asyncio.sleep(2.5) # Reduced buffer for async
 
                 _active_sessions[session_id] = {
-                    "browser": browser,
                     "context": context,
                     "page": page,
                     "requests": [],
                     "created_at": time.time(),
-                    "last_accessed": time.time()
+                    "last_accessed": time.time(),
+                    "user_id": user_id
                 }
 
                 # Attach request listener
@@ -369,14 +474,11 @@ class _WebInspectorServiceImpl:
                 if 'context' in locals() and context:
                     try: await context.close()
                     except: pass
-                if 'browser' in locals() and browser:
-                    try: await browser.close()
-                    except: pass
                 raise e
 
     @classmethod
     async def stop_session(cls, session_id: str):
-        """Cleans up the playwright session."""
+        """Cleans up the playwright session context."""
         async with _session_lock:
             _session_progress.pop(session_id, None)
             session = _active_sessions.pop(session_id, None)
@@ -402,21 +504,13 @@ class _WebInspectorServiceImpl:
                     except Exception as pe:
                         logger.warning(f"🌐 [WebInspector] Error closing page: {pe}")
 
-                # 3. Close Context
+                # 3. Close Context (Releases all cookies, cache, and memory)
                 ctx = session.get("context")
                 if ctx:
                     try:
                         await ctx.close()
                     except Exception as ce:
                         logger.warning(f"🌐 [WebInspector] Error closing context: {ce}")
-
-                # 4. Close Browser (Guaranteed to be attempted!)
-                browser = session.get("browser")
-                if browser:
-                    try:
-                        await browser.close()
-                    except Exception as be:
-                        logger.warning(f"🌐 [WebInspector] Error closing browser: {be}")
 
     @classmethod
     def get_progress(cls, session_id: str) -> dict:
@@ -552,6 +646,7 @@ class _WebInspectorServiceImpl:
             if action_type in ("navigate", "browser"):
                 url = props.get("url") or props.get("value")
                 if url:
+                    _validate_url(url)
                     if not url.startswith('http'):
                         url = f"https://{url}"
                     # "commit" is the most lenient wait — just waits for navigation to start
@@ -606,6 +701,7 @@ class _WebInspectorServiceImpl:
                     await page.wait_for_load_state("domcontentloaded", timeout=3000)
                 except Exception:
                     pass  # no navigation occurred — proceed
+                await asyncio.sleep(0.2)
                 
                 # 🧠 AUTO-SYNC: Generate stable selectors for the element we just clicked
                 # This ensures the frontend gets them IMMEDIATELY in the same request.
@@ -650,18 +746,110 @@ class _WebInspectorServiceImpl:
                     except Exception:
                         # Final attempt: just try to type at the current focus
                         await page.keyboard.type(str(val))
-            elif action_type == "keyboard":
-                key = props.get("key")
+            elif action_type in ("keypress", "keyboard"):
+                key = props.get("key") or props.get("value") or "Enter"
                 text = props.get("text")
-                
-                if text:
-                    # Type character by character to simulate human behaviour
-                    await page.keyboard.type(text, delay=10)
-                if key:
-                    await page.keyboard.press(key)
-                
-                # Settle SPA state after typing
+                if selector:
+                    try:
+                        locator = page.locator(selector).first
+                        await locator.press(key, timeout=8000)
+                    except Exception as kp_err:
+                        logger.warning(f"🌐 [WebInspector] Keypress on {selector} failed ({kp_err}), trying page.keyboard.press")
+                        await page.keyboard.press(key)
+                else:
+                    if text:
+                        await page.keyboard.type(text, delay=10)
+                    if key:
+                        await page.keyboard.press(key)
                 await asyncio.sleep(0.1)
+
+            elif action_type == "hover":
+                if selector:
+                    locator = page.locator(selector).first
+                    try:
+                        await locator.scroll_into_view_if_needed(timeout=4000)
+                        await locator.hover(timeout=8000)
+                    except Exception as hover_err:
+                        logger.warning(f"🌐 [WebInspector] Hover failed for {selector}: {hover_err}")
+                else:
+                    x, y = props.get("x"), props.get("y")
+                    if x is not None and y is not None:
+                        await page.mouse.move(float(x), float(y))
+                await asyncio.sleep(0.1)
+
+            elif action_type in ("wait", "pause"):
+                ms = int(props.get("value") or 1000)
+                await asyncio.sleep(min(ms / 1000.0, 10.0))
+
+            elif action_type == "wait_selector":
+                sel = selector or props.get("selector")
+                if sel:
+                    timeout_val = int(props.get("timeout") or 10000)
+                    await page.locator(sel).first.wait_for(state="visible", timeout=timeout_val)
+                else:
+                    raise ValueError("Seletor não informado para o passo de espera.")
+
+            elif action_type == "refresh":
+                await page.reload(wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(settle_time)
+
+            elif action_type == "screenshot":
+                # Snapshot capture handles screenshot implicitly
+                await asyncio.sleep(0.1)
+
+            elif action_type == "assert":
+                operator = str(props.get("operator") or "visible").lower()
+                expected_val = str(props.get("value") or "").strip()
+                timeout_val = int(props.get("timeout") or 8000)
+                if timeout_val < 1000:
+                    timeout_val = 1000
+
+                if not selector and not expected_val:
+                    raise ValueError("Validação (assert) requer um seletor ou um texto esperado.")
+
+                if operator in ("visible", "is_visible"):
+                    if selector:
+                        await page.locator(selector).first.wait_for(state="visible", timeout=timeout_val)
+                    else:
+                        start_t = time.time()
+                        found = False
+                        poll_max = min(timeout_val / 1000.0, 6.0)
+                        while (time.time() - start_t) < poll_max:
+                            body_text = await page.evaluate("() => document.body ? (document.body.innerText || document.body.textContent || '') : ''")
+                            if expected_val.lower() in body_text.lower():
+                                found = True
+                                break
+                            await asyncio.sleep(0.2)
+                        if not found:
+                            raise ValueError(f"Texto '{expected_val}' não foi encontrado na página.")
+
+                elif operator in ("hidden", "not_visible"):
+                    if selector:
+                        await page.locator(selector).first.wait_for(state="hidden", timeout=timeout_val)
+                    else:
+                        raise ValueError("Seletor obrigatório para validação 'hidden'.")
+
+                elif operator == "equals":
+                    if selector:
+                        locator = page.locator(selector).first
+                        await locator.wait_for(state="attached", timeout=timeout_val)
+                        actual_text = await locator.inner_text()
+                        if actual_text.strip() != expected_val:
+                            raise ValueError(f"Esperado '{expected_val}', mas encontrado '{actual_text.strip()}'.")
+                    else:
+                        raise ValueError("Seletor obrigatório para validação 'equals'.")
+
+                elif operator in ("contains", "includes"):
+                    if selector:
+                        locator = page.locator(selector).first
+                        await locator.wait_for(state="attached", timeout=timeout_val)
+                        actual_text = await locator.inner_text()
+                        if expected_val.lower() not in actual_text.lower():
+                            raise ValueError(f"Texto '{expected_val}' não contido no elemento (encontrado: '{actual_text.strip()}').")
+                    else:
+                        body_text = await page.evaluate("() => document.body ? (document.body.innerText || document.body.textContent || '') : ''")
+                        if expected_val.lower() not in body_text.lower():
+                            raise ValueError(f"Texto '{expected_val}' não encontrado na página.")
 
             # Return fresh state
             if not return_snapshot:
@@ -973,10 +1161,10 @@ class _WebInspectorServiceImpl:
             return {"success": False, "error": str(e)}
 
     @classmethod
-    async def ai_analyze_full_tree_and_correct(cls, session_id: str, failed_step: dict) -> dict:
+    async def ai_analyze_full_tree_and_correct(cls, session_id: str, failed_step: dict, user_id: Optional[int] = None) -> dict:
         """
-        Analyzes the full web DOM tree for a failed step using smart attribute/text scoring
-        and generates optimal replacement selectors.
+        Analyzes the full web DOM tree for a failed step using smart attribute/text scoring,
+        SVG icon semantics, and LLM fallback for optimal selector replacement.
         """
         session = _active_sessions.get(session_id)
         if not session:
@@ -988,6 +1176,7 @@ class _WebInspectorServiceImpl:
             if not tree:
                 return {"success": False, "error": "DOM tree is empty."}
 
+            import re
             step_type = (failed_step.get("type") or "click").lower()
             props = failed_step.get("properties", {})
             step_name = (failed_step.get("name") or "").strip()
@@ -995,6 +1184,54 @@ class _WebInspectorServiceImpl:
             expected_val = str(props.get("value") or "").strip()
 
             search_tokens = [t.lower() for t in [step_name, expected_val, old_selector] if t]
+            
+            # Extract quoted strings like 'My Cart' or "My Cart" as high-priority primary tokens
+            quoted_matches = re.findall(r"['\"]([^'\"]+)['\"]", step_name)
+            primary_tokens = [q.lower().strip() for q in quoted_matches if len(q.strip()) > 1]
+
+            # Also strip command prefixes like "clicar em", "click", "assert", etc. to extract raw intent
+            cleaned_step_name = re.sub(r'^(clicar\s+em|clique\s+em|click\s+on|click|type|digitar|assert|validar|verificar)\s+', '', step_name, flags=re.IGNORECASE).strip(' "\'')
+            if cleaned_step_name and len(cleaned_step_name) > 1 and cleaned_step_name.lower() not in search_tokens:
+                primary_tokens.append(cleaned_step_name.lower())
+
+            # Individual meaningful words (length >= 3)
+            word_tokens = [w.lower() for w in re.findall(r'\b\w{3,}\b', f"{step_name} {expected_val}") if w.lower() not in ('click', 'clique', 'clicar', 'type', 'assert', 'validar', 'verificar', 'step', 'passo')]
+
+            # Common semantic icon & action synonyms (Portuguese and English)
+            icon_synonyms = {
+                "carrinho": ["cart", "shopping-cart", "basket", "bag", "checkout"],
+                "cart": ["carrinho", "shopping-cart", "basket", "bag"],
+                "lixeira": ["trash", "delete", "remove", "bin", "excluir", "remover", "apagar"],
+                "excluir": ["trash", "delete", "remove", "bin", "lixeira", "apagar"],
+                "deletar": ["trash", "delete", "remove", "bin", "lixeira"],
+                "delete": ["trash", "remove", "lixeira", "excluir"],
+                "busca": ["search", "find", "lupa", "pesquisar", "pesquisa"],
+                "buscar": ["search", "find", "lupa", "pesquisar", "pesquisa"],
+                "pesquisar": ["search", "find", "lupa", "busca"],
+                "search": ["busca", "pesquisar", "lupa", "find"],
+                "fechar": ["close", "x", "cancel", "times"],
+                "close": ["fechar", "cancel", "times"],
+                "configuracao": ["settings", "gear", "config", "cog", "preferences"],
+                "configurações": ["settings", "gear", "config", "cog", "preferences"],
+                "config": ["settings", "gear", "cog", "preferences"],
+                "settings": ["config", "configuracao", "gear", "cog"],
+                "editar": ["edit", "pencil", "pen"],
+                "edit": ["editar", "pencil", "pen"],
+                "adicionar": ["add", "plus", "new", "incluir"],
+                "add": ["adicionar", "plus", "new", "incluir"],
+                "salvar": ["save", "check", "disk", "floppy"],
+                "save": ["salvar", "check", "disk"],
+                "usuario": ["user", "profile", "account", "avatar"],
+                "usuário": ["user", "profile", "account", "avatar"],
+                "user": ["usuario", "profile", "account", "avatar"],
+                "menu": ["menu", "hamburger", "bars", "nav"],
+                "voltar": ["back", "arrow-left", "chevron-left", "prev"],
+                "avancar": ["next", "arrow-right", "chevron-right", "forward"],
+                "avançar": ["next", "arrow-right", "chevron-right", "forward"],
+                "filtro": ["filter", "funnel", "filtrar"],
+                "filtrar": ["filter", "funnel"],
+                "filter": ["filtro", "funnel"],
+            }
 
             candidates = []
             for node in tree:
@@ -1005,19 +1242,58 @@ class _WebInspectorServiceImpl:
                 n_placeholder = (node.get("placeholder") or "").strip()
                 n_name = (node.get("nameAttr") or "").strip()
                 n_id = (node.get("idAttr") or "").strip()
+                n_label = (node.get("labelAttr") or "").strip()
+                n_icon = (node.get("iconAttr") or "").lower().strip()
 
                 # Tag match
                 if step_type in ("type", "fill") and n_tag in ("INPUT", "TEXTAREA", "SELECT"):
                     score += 4
                 elif step_type in ("click", "tap") and n_tag in ("BUTTON", "A", "INPUT"):
                     score += 4
+                elif step_type == "assert":
+                    score += 3
+                    if expected_val and (expected_val.lower() in n_text.lower() or n_text.lower() in expected_val.lower()):
+                        score += 20
 
-                # Token match
+                # Primary / Quoted Token Match (Very high confidence)
+                for ptok in primary_tokens:
+                    if ptok and (ptok in n_text.lower() or ptok in n_placeholder.lower() or ptok in n_name.lower() or ptok in n_id.lower() or ptok in n_label.lower()):
+                        score += 15
+                    elif n_text and ptok and (ptok in n_text.lower() or n_text.lower() in ptok):
+                        score += 10
+
+                # Full search tokens match
                 for tok in search_tokens:
-                    if tok and (tok in n_text.lower() or tok in n_placeholder.lower() or tok in n_name.lower() or tok in n_id.lower()):
+                    if tok and (tok in n_text.lower() or tok in n_placeholder.lower() or tok in n_name.lower() or tok in n_id.lower() or tok in n_label.lower()):
                         score += 8
                     elif n_text and tok and (tok in n_text.lower() or n_text.lower() in tok):
                         score += 5
+
+                # Individual word tokens match
+                for wtok in word_tokens:
+                    if wtok in n_text.lower() or wtok in n_placeholder.lower() or wtok in n_name.lower() or wtok in n_id.lower() or wtok in n_label.lower():
+                        score += 3
+
+                # Icon Semantics Match
+                if n_icon:
+                    for ptok in primary_tokens:
+                        if ptok and (ptok in n_icon or n_icon in ptok):
+                            score += 16
+                        syns = icon_synonyms.get(ptok, [])
+                        if any(s in n_icon for s in syns):
+                            score += 14
+                    for tok in search_tokens:
+                        if tok and (tok in n_icon or n_icon in tok):
+                            score += 10
+                        syns = icon_synonyms.get(tok, [])
+                        if any(s in n_icon for s in syns):
+                            score += 12
+                    for wtok in word_tokens:
+                        if wtok in n_icon:
+                            score += 6
+                        syns = icon_synonyms.get(wtok, [])
+                        if any(s in n_icon for s in syns):
+                            score += 8
 
                 if old_selector and n_selector and old_selector == n_selector:
                     score += 6
@@ -1026,12 +1302,110 @@ class _WebInspectorServiceImpl:
                     candidates.append({"node": node, "score": score})
 
             candidates.sort(key=lambda c: c["score"], reverse=True)
-            best = candidates[0]["node"] if candidates else None
+            top_score = candidates[0]["score"] if candidates else 0
+            is_ambiguous = len(candidates) > 1 and (candidates[0]["score"] - candidates[1]["score"] <= 2)
 
-            if not best:
+            best_node = None
+            used_llm = False
+
+            resolved_user_id = user_id or session.get("user_id")
+            # If confidence is low (< 15) or candidates are ambiguous, attempt semantic LLM fallback
+            if (not candidates or top_score < 15 or is_ambiguous) and resolved_user_id:
+                try:
+                    from app.database import SessionLocal
+                    from app.services.analysis_service import AnalysisService
+                    from app.services.skill_service import _robust_json_parse
+                    from app.models.agent_models import AgentSettingsDB
+
+                    db = SessionLocal()
+                    try:
+                        settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == resolved_user_id).first()
+                        if settings and settings.ai_enabled and (settings.ai_api_key or settings.ai_provider in ("ollama", "flow_ia")):
+                            logger.info(f"🤖 [WebInspector] Invoking LLM fallback for auto-correction (score={top_score}, ambiguous={is_ambiguous})...")
+
+                            sample_nodes = []
+                            seen_ids = set()
+
+                            for c in candidates[:10]:
+                                n = c["node"]
+                                seen_ids.add(n.get("id"))
+                                sample_nodes.append({
+                                    "id": n.get("id"),
+                                    "tagName": n.get("tagName"),
+                                    "text": n.get("text"),
+                                    "icon": n.get("iconAttr"),
+                                    "label": n.get("labelAttr"),
+                                    "placeholder": n.get("placeholder"),
+                                    "name": n.get("nameAttr"),
+                                    "idAttr": n.get("idAttr"),
+                                    "className": n.get("className")
+                                })
+
+                            for n in tree:
+                                if len(sample_nodes) >= 15:
+                                    break
+                                if n.get("id") not in seen_ids:
+                                    seen_ids.add(n.get("id"))
+                                    sample_nodes.append({
+                                        "id": n.get("id"),
+                                        "tagName": n.get("tagName"),
+                                        "text": n.get("text"),
+                                        "icon": n.get("iconAttr"),
+                                        "label": n.get("labelAttr"),
+                                        "placeholder": n.get("placeholder"),
+                                        "name": n.get("nameAttr"),
+                                        "idAttr": n.get("idAttr"),
+                                        "className": n.get("className")
+                                    })
+
+                            prompt = (
+                                "Você é um agente especialista em automação e auto-correção de testes Playwright.\n"
+                                "Um passo de teste falhou ao tentar localizar um elemento no DOM.\n"
+                                "Analise o passo que falhou e a lista de elementos interativos candidatos disponíveis na página para determinar qual elemento corresponde à intenção do usuário.\n\n"
+                                f"PASSO QUE FALHOU:\n"
+                                f"- Nome do Passo: {step_name}\n"
+                                f"- Ação/Tipo: {step_type}\n"
+                                f"- Seletor anterior que quebrou: {old_selector}\n"
+                                f"- Valor esperado/digitado: {expected_val}\n\n"
+                                f"ELEMENTOS INTERATIVOS NO DOM ATUAL:\n"
+                                f"{json.dumps(sample_nodes, ensure_ascii=False, indent=2)}\n\n"
+                                "INSTRUÇÕES:\n"
+                                "1. Analise o objetivo da ação (ex: clicar em botão, ícone, preencher campo).\n"
+                                "2. Identifique qual candidato (pelo campo 'id', ex: 'lws-0') representa o elemento pretendido.\n"
+                                "3. Retorne APENAS um JSON válido no formato:\n"
+                                "{\n"
+                                '  "chosen_id": "lws-X",\n'
+                                '  "confidence": 0.95,\n'
+                                '  "reasoning": "Breve justificativa da escolha"\n'
+                                "}\n"
+                                "Se nenhum elemento for compatível, retorne {\"chosen_id\": null, \"confidence\": 0.0, \"reasoning\": \"Nenhum elemento compatível\"}."
+                            )
+
+                            llm_raw = await asyncio.to_thread(
+                                AnalysisService._call_llm,
+                                db, resolved_user_id, prompt, temperature=0.1, timeout=60
+                            )
+                            if llm_raw:
+                                parsed = _robust_json_parse(llm_raw)
+                                if isinstance(parsed, dict) and parsed.get("chosen_id"):
+                                    chosen_id = parsed["chosen_id"]
+                                    matched = next((n for n in tree if n.get("id") == chosen_id), None)
+                                    if matched:
+                                        best_node = matched
+                                        used_llm = True
+                                        logger.info(f"🤖 [WebInspector] LLM matched element {chosen_id}: {parsed.get('reasoning')}")
+                    finally:
+                        db.close()
+                except Exception as llm_err:
+                    logger.warning(f"🤖 [WebInspector] LLM fallback error: {llm_err}. Using heuristic.")
+
+            if not best_node:
+                best_node = candidates[0]["node"] if candidates else None
+
+            if not best_node:
                 return {"success": False, "error": "No matching DOM element found for step correction."}
 
-            lws_id = best.get("id")
+            lws_id = best_node.get("id")
             sel_res = await cls.generate_selectors_for_element(session_id, lws_id=lws_id)
 
             best_selector = None
@@ -1041,12 +1415,13 @@ class _WebInspectorServiceImpl:
                 best_selector = unique[0]["value"] if unique else selectors[0]["value"]
 
             if not best_selector:
-                best_selector = best.get("selector") or f"//{best.get('tagName', 'div')}"
+                best_selector = best_node.get("selector") or f"//{best_node.get('tagName', 'div')}"
 
             return {
                 "success": True,
                 "suggested_selector": best_selector,
-                "matched_node": best
+                "matched_node": best_node,
+                "used_llm": used_llm
             }
         except Exception as e:
             logger.error(f"AI AutoCorrect web analysis failed: {e}", exc_info=True)
@@ -1104,3 +1479,7 @@ class WebInspectorService:
     @classmethod
     async def ai_analyze_full_tree_and_correct(cls, *args, **kwargs):
         return await cls._dispatch(_WebInspectorServiceImpl.ai_analyze_full_tree_and_correct(*args, **kwargs))
+
+    @classmethod
+    def get_progress(cls, session_id: str) -> dict:
+        return _WebInspectorServiceImpl.get_progress(session_id)

@@ -130,7 +130,7 @@ def test_auth_onboarding_first_user_admin_subsequent_viewer(client, db_session: 
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_dashboard_service_multi_tenant_isolation(db_session: Session):
-    """Verify that DashboardService strictly isolates metrics, stats, and failures per company_id."""
+    """Verify that DashboardService strictly isolates summary, stats, and errors per company_id."""
     comp_a = CompanyDB(name="Company Alpha")
     comp_b = CompanyDB(name="Company Beta")
     db_session.add_all([comp_a, comp_b])
@@ -162,24 +162,24 @@ def test_dashboard_service_multi_tenant_isolation(db_session: Session):
     # Test Summary Stats for Alpha
     stats_a = DashboardService.get_summary_stats(db_session, company_id=comp_a.id)
     assert stats_a["total_executions"] == 2
-    assert stats_a["total_failures"] == 1
+    assert stats_a["total_errors"] == 1
     assert stats_a["success_rate"] == 50.0
     assert stats_a["avg_response_time"] == 300.0
 
     # Test Summary Stats for Beta
     stats_b = DashboardService.get_summary_stats(db_session, company_id=comp_b.id)
     assert stats_b["total_executions"] == 3
-    assert stats_b["total_failures"] == 0
+    assert stats_b["total_errors"] == 0
     assert stats_b["success_rate"] == 100.0
     assert stats_b["avg_response_time"] == 100.0
 
     # Test Failures Isolation
-    failures_a = DashboardService.get_recent_failures(db_session, company_id=comp_a.id)
-    assert len(failures_a) == 1
-    assert failures_a[0]["api_name"] == "Alpha Fail"
+    errors_a = DashboardService.get_recent_errors(db_session, company_id=comp_a.id)
+    assert len(errors_a) == 1
+    assert errors_a[0]["api_name"] == "Alpha Fail"
 
-    failures_b = DashboardService.get_recent_failures(db_session, company_id=comp_b.id)
-    assert len(failures_b) == 0
+    errors_b = DashboardService.get_recent_errors(db_session, company_id=comp_b.id)
+    assert len(errors_b) == 0
 
 
 def test_dashboard_routes_bola_prevention(client, db_session: Session):
@@ -207,13 +207,13 @@ def test_dashboard_routes_bola_prevention(client, db_session: Session):
     ))
     db_session.commit()
 
-    # Tenant 1 queries metrics
-    r1 = client.get("/dashboard/metrics", headers={"Authorization": f"Bearer {t1_token}"})
+    # Tenant 1 queries summary
+    r1 = client.get("/app-data/summary", headers={"Authorization": f"Bearer {t1_token}"})
     assert r1.status_code == 200
     assert r1.json()["total_executions"] == 1
 
-    # Tenant 2 queries metrics -> must be 0
-    r2 = client.get("/dashboard/metrics", headers={"Authorization": f"Bearer {t2_token}"})
+    # Tenant 2 queries summary -> must be 0
+    r2 = client.get("/app-data/summary", headers={"Authorization": f"Bearer {t2_token}"})
     assert r2.status_code == 200
     assert r2.json()["total_executions"] == 0
 
@@ -266,7 +266,7 @@ def test_mock_service_no_cross_tenant_leakage(client, db_session: Session):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_audit_service_log_action_protects_caller_transaction(db_session: Session):
-    """Verify that AuditService.log_action uses begin_nested so audit failures don't roll back caller work."""
+    """Verify that AuditService.log_action uses begin_nested so audit errors don't roll back caller work."""
     comp = CompanyDB(name="Audit Corp")
     db_session.add(comp)
     db_session.commit()

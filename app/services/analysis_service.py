@@ -52,8 +52,9 @@ def _detect_model(base_url: str) -> str:
             return model_name
 
     urls_to_try = [base_url]
-    if "host.docker.internal" in base_url:
-        urls_to_try.append(base_url.replace("host.docker.internal", "localhost"))
+    # Only fallback to localhost if base_url is not host.docker.internal (e.g. running outside docker)
+    if "host.docker.internal" not in base_url and "localhost" not in base_url:
+        urls_to_try.append(base_url.replace("127.0.0.1", "localhost"))
 
     model_name = "qwen2.5:14b-instruct-q4_K_M"  # Default fallback if detection fails
     for u in urls_to_try:
@@ -111,7 +112,7 @@ def _build_flow_ia_request_params(db: Session, user_id: int, settings) -> tuple:
 class AnalysisService:
 
     @staticmethod
-    def _call_llm(db: Session, user_id: int, prompt: str, temperature: float = 0.2, flow_id: int = None, chat_history: list = None) -> str:
+    def _call_llm(db: Session, user_id: int, prompt: str, temperature: float = 0.2, flow_id: int = None, chat_history: list = None, timeout: int = 30) -> str:
         """Helper to call the configured LLM for a user, with memory context."""
         from app.models.agent_models import AgentMemoryDB
         
@@ -193,16 +194,45 @@ class AnalysisService:
                 
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent?key={settings.ai_api_key}"
                 data = {"contents": gemini_contents, "generationConfig": {"maxOutputTokens": 4096}}
-                resp = requests.post(url, json=data, timeout=300)
-                if resp.status_code == 200:
-                    result_text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                    if flow_id:
-                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
-                        db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
-                        db.commit()
-                    return result_text
-                else:
-                    raise Exception(f"Gemini Error: {resp.status_code} - {resp.text}")
+                gem_err_msg = ""
+                try:
+                    resp = requests.post(url, json=data, timeout=300)
+                    if resp.status_code == 200:
+                        result_text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                        if flow_id:
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                            db.commit()
+                        return result_text
+                    else:
+                        gem_err_msg = f"Gemini Error: {resp.status_code} - {resp.text}"
+                        logger.warning(f"{gem_err_msg}. Tentando fallback com Ollama local.")
+                except Exception as gem_exc:
+                    gem_err_msg = f"Gemini exception: {gem_exc}"
+                    logger.warning(f"{gem_err_msg}. Tentando fallback com Ollama local.")
+
+                # Fallback resiliente para o Ollama local se Gemini falhar
+                try:
+                    ollama_url = "http://host.docker.internal:11434/v1/chat/completions"
+                    ollama_data = {
+                        "model": "qwen2.5:14b-instruct-q4_K_M",
+                        "messages": messages,
+                        "temperature": temperature,
+                        "stream": False
+                    }
+                    fb_resp = requests.post(ollama_url, json=ollama_data, timeout=300)
+                    if fb_resp.status_code == 200:
+                        logger.info("Recuperado com sucesso usando Ollama local após falha do Gemini!")
+                        result_text = fb_resp.json()["choices"][0]["message"]["content"]
+                        if flow_id:
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="user", content=prompt))
+                            db.add(AgentMemoryDB(user_id=user_id, flow_id=flow_id, role="assistant", content=result_text))
+                            db.commit()
+                        return result_text
+                except Exception as fb_err:
+                    logger.warning(f"Fallback no Ollama local também falhou: {fb_err}")
+
+                raise Exception(gem_err_msg or "Gemini call failed and local Ollama unreachable")
 
             elif settings.ai_provider == "deepseek":
                 headers = {"Authorization": f"Bearer {settings.ai_api_key}", "Content-Type": "application/json"}
@@ -218,20 +248,31 @@ class AnalysisService:
 
             elif settings.ai_provider == "flow_ia":
                 url, headers, base_url = _build_flow_ia_request_params(db, user_id, settings)
-                model_name = _detect_model(base_url)
+                if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3"):
+                    model_name = settings.ai_model
+                else:
+                    model_name = _detect_model(base_url)
                 data = {
                     "messages": messages, 
                     "stream": False, 
                     "model": model_name, 
                     "temperature": temperature,
-                    "max_tokens": 2048, 
-                    "options": {"num_predict": 2048, "temperature": temperature}
+                    "max_tokens": 8192, 
+                    "options": {"num_predict": 8192, "temperature": temperature}
                 }
                 
                 resp = None
+                # If caller explicitly asked for a short timeout (e.g. <= 10s in fast assertion fallback), respect it.
+                # Otherwise, grant a robust timeout (300s) for LLM inference (Ollama local model generation).
+                if timeout and timeout <= 10:
+                    lm_timeout = timeout
+                    direct_timeout = timeout
+                else:
+                    lm_timeout = max(timeout or 30, 300)
+                    direct_timeout = max(timeout or 30, 300)
                 try:
                     # Attempt License Manager proxy first
-                    resp = requests.post(url, headers=headers, json=data, timeout=300)
+                    resp = requests.post(url, headers=headers, json=data, timeout=lm_timeout)
                     if resp.status_code == 200:
                         result_text = resp.json()["choices"][0]["message"]["content"]
                         if flow_id:
@@ -247,7 +288,7 @@ class AnalysisService:
                 # Resilient fallback: Direct host Ollama
                 direct_url = f"{base_url}chat/completions" if "chat/completions" not in base_url else base_url
                 direct_headers = {"Content-Type": "application/json"}
-                direct_resp = requests.post(direct_url, headers=direct_headers, json=data, timeout=300)
+                direct_resp = requests.post(direct_url, headers=direct_headers, json=data, timeout=direct_timeout)
                 if direct_resp.status_code == 200:
                     result_text = direct_resp.json()["choices"][0]["message"]["content"]
                     if flow_id:
@@ -291,8 +332,8 @@ class AnalysisService:
                         "messages": messages, 
                         "stream": False, 
                         "temperature": temperature,
-                        "max_tokens": 2048, 
-                        "options": {"num_predict": 2048, "temperature": temperature}
+                        "max_tokens": 8192, 
+                        "options": {"num_predict": 8192, "temperature": temperature}
                     }
                     if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3"):
                         data["model"] = settings.ai_model
@@ -322,7 +363,7 @@ class AnalysisService:
                 headers = {"Content-Type": "application/json"}
                 if settings.ai_api_key:
                     headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-                data = {"messages": messages, "stream": False, "max_tokens": 2560, "options": {"num_predict": 2560}}
+                data = {"messages": messages, "stream": False, "max_tokens": 8192, "options": {"num_predict": 8192}}
                 if settings.ai_model and settings.ai_model not in ("gpt-4o", "flow-ia", "llama3"):
                     data["model"] = settings.ai_model
                 else:
@@ -887,19 +928,105 @@ class AnalysisService:
     @staticmethod
     def generate_assertions(db: Session, user_id: int, api_data: dict):
         """
-        Generates assertion suggestions based on API response data using AI.
+        Generates assertion suggestions based on API response data using AI or smart heuristics.
         """
-        
+        from app.services.assertion_engine import _resolve_json_path
+
         # CONTRACT MODE: Recursive JSON Walker (Priority over AI/Simulation)
-        # CONTRACT MODE: JSON Schema Generation (Using Genson)
+        # CONTRACT MODE: JSON Schema Generation (Using Genson or Swagger Schema)
         if api_data.get('mode') == 'contract':
              try:
+                 def _sanitize_schema_refs(node, root=None, depth=0, seen=None):
+                     if depth > 40:
+                         return {"type": "object"}
+                     if seen is None:
+                         seen = set()
+                     if root is None:
+                         root = node if isinstance(node, dict) else {}
+                     if not isinstance(node, dict):
+                         if isinstance(node, list):
+                             return [_sanitize_schema_refs(item, root, depth + 1, seen) for item in node]
+                         return node
+                     ref = node.get("$ref")
+                     if isinstance(ref, str):
+                         if ref in seen:
+                             clean = {k: v for k, v in node.items() if k != "$ref"}
+                             return {"type": "object", **clean}
+                         new_seen = set(seen)
+                         new_seen.add(ref)
+                         if ref.startswith("#/"):
+                             parts = [p.replace("~1", "/").replace("~0", "~") for p in ref.lstrip("#/").split("/")]
+                             curr = root
+                             resolved = None
+                             try:
+                                 for part in parts:
+                                     if isinstance(curr, dict) and part in curr:
+                                         curr = curr[part]
+                                     else:
+                                         curr = None
+                                         break
+                                 if isinstance(curr, dict):
+                                     resolved = curr
+                             except Exception:
+                                 resolved = None
+                             if resolved:
+                                 res_clean = _sanitize_schema_refs(resolved, root, depth + 1, new_seen)
+                                 if isinstance(res_clean, dict):
+                                     merged = {k: v for k, v in res_clean.items() if k != "$ref"}
+                                     for k, v in node.items():
+                                         if k != "$ref":
+                                             merged[k] = _sanitize_schema_refs(v, root, depth + 1, new_seen)
+                                     return merged
+                                 return res_clean
+                         clean = {k: v for k, v in node.items() if k != "$ref"}
+                         return {"type": "object", **clean}
+
+                     result = {}
+                     for k, v in node.items():
+                         if k in ("properties", "patternProperties", "definitions") and isinstance(v, dict):
+                             result[k] = {pk: _sanitize_schema_refs(pv, root, depth + 1, seen) for pk, pv in v.items()}
+                         elif k in ("allOf", "oneOf", "anyOf") and isinstance(v, list):
+                             result[k] = [_sanitize_schema_refs(item, root, depth + 1, seen) for item in v]
+                         elif k == "items":
+                             if isinstance(v, list):
+                                 result[k] = [_sanitize_schema_refs(item, root, depth + 1, seen) for item in v]
+                             elif isinstance(v, dict):
+                                 result[k] = _sanitize_schema_refs(v, root, depth + 1, seen)
+                             else:
+                                 result[k] = v
+                         elif k == "additionalProperties" and isinstance(v, dict):
+                             result[k] = _sanitize_schema_refs(v, root, depth + 1, seen)
+                         elif isinstance(v, dict):
+                             result[k] = _sanitize_schema_refs(v, root, depth + 1, seen)
+                         elif isinstance(v, list):
+                             result[k] = [_sanitize_schema_refs(item, root, depth + 1, seen) for item in v]
+                         else:
+                             result[k] = v
+                     return result
+
+                 # Se o schema do Swagger/OpenAPI foi fornecido, utiliza diretamente o schema oficial sanitizado
+                 raw_schema = api_data.get('schema')
+                 if raw_schema:
+                     if isinstance(raw_schema, str):
+                         try:
+                             raw_schema = json.loads(raw_schema)
+                         except Exception:
+                             pass
+                     if isinstance(raw_schema, dict) and ('properties' in raw_schema or 'type' in raw_schema or '$schema' in raw_schema):
+                         cleaned_schema = _sanitize_schema_refs(raw_schema)
+                         return [{
+                             "source": "contract",
+                             "property": "schema",
+                             "operator": "json_schema",
+                             "target": json.dumps(cleaned_schema)
+                         }]
+
                  from genson import SchemaBuilder
                  builder = SchemaBuilder()
                  builder.add_object(api_data.get('body'))
                  schema = builder.to_schema()
                  
-                 # Enhance Schema with Format Detection (Email, UUID, URI) & Constraints (Min/Max)
+                 # Enhance Schema with Format Detection (Email, UUID, Date-Time) WITHOUT locking lengths
                  def enrich_schema(schema_node, data_node):
                     if schema_node.get('type') == 'object' and isinstance(data_node, dict):
                         props = schema_node.get('properties', {})
@@ -909,42 +1036,19 @@ class AnalysisService:
                                 
                     elif schema_node.get('type') == 'array' and isinstance(data_node, list):
                         items_schema = schema_node.get('items')
-                        # Genson merges items into a single schema usually
                         if isinstance(items_schema, dict) and len(data_node) > 0:
-                            # We can only safely infer constraints if we check all items or just the first one?
-                            # For safety, let's just recurse into the first item as a sample if structure matches
-                            # But better to iterate all items and find common constraints? Too complex for now.
-                            # Let's just recurse into the first item to enrich children structure.
                             enrich_schema(items_schema, data_node[0])
                             
                     elif schema_node.get('type') == 'string' and isinstance(data_node, str):
-                        # Min/Max Length
-                        length = len(data_node)
-                        schema_node['minLength'] = max(0, length - 1) # Tolerance? Or exact? User asked for min/max. 
-                        # Let's set it to exact length for strict contract, or length-1 / length+1?
-                        # Usually contracts want at least 1 if not empty.
-                        if length > 0:
-                            schema_node['minLength'] = 1 
-                        else:
-                            schema_node['minLength'] = 0
-                            
-                        # Max Length is good to have boundless or reasonable limit.
-                        # Setting exact max length might be too brittle.
-                        # Let's set maxLength to length + 20% or similar?
-                        # User said "não esta colocando min e max length", implies they WANT it.
-                        # Let's set minLength = length and maxLength = length for strictness?
-                        # Or maybe minLength = 1 (if not empty) and maxLength = 255 (if reasonable)?
-                        # Let's try to be smart:
-                        schema_node['minLength'] = length 
-                        schema_node['maxLength'] = length 
-                        
-                        # Format Detection
-                        if "@" in data_node and "." in data_node: # Simple email check
-                            schema_node['format'] = 'email'
-                        # UUID check? 
+                        # IMPORTANTE: Não travar minLength e maxLength no tamanho exato do valor de exemplo
+                        # pois os valores de produção variam em tamanho.
                         import re
-                        if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', data_node):
+                        if "@" in data_node and "." in data_node:
+                            schema_node['format'] = 'email'
+                        elif re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', data_node, re.IGNORECASE):
                             schema_node['format'] = 'uuid'
+                        elif re.match(r'^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?', data_node):
+                            schema_node['format'] = 'date-time'
 
                  enrich_schema(schema, api_data.get('body'))
 
@@ -952,7 +1056,7 @@ class AnalysisService:
                      "source": "contract",
                      "property": "schema",
                      "operator": "json_schema",
-                     "target": json.dumps(schema) # Send as stringified JSON for safe transport
+                     "target": json.dumps(schema)
                  }]
              except ImportError:
                  return [{ "source": "error", "property": "backend", "operator": "equals", "target": "genson_missing" }]
@@ -960,77 +1064,204 @@ class AnalysisService:
                  print(f"Schema Gen Error: {e}")
                  return [{ "source": "error", "property": "backend", "operator": "equals", "target": str(e) }]
 
+        # Ensure body is parsed if provided as JSON string
+        body = api_data.get('body')
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+                api_data['body'] = body
+            except Exception:
+                pass
+
+        def _normalize_assertions(raw_rules, body_data):
+            """Normalizes operators and ensures no broken empty 'equals' assertions."""
+            normalized = []
+            seen = set()
+            for r in raw_rules:
+                if not isinstance(r, dict):
+                    continue
+                source = r.get("source") or r.get("type") or "body"
+                prop = r.get("property") or ""
+                op = str(r.get("operator") or "equals").strip().lower()
+                target = r.get("target")
+                if target is None and r.get("value") is not None:
+                    target = r.get("value")
+
+                # Map operator aliases
+                if op in ("==", "eq", "is"):
+                    op = "equals"
+                elif op in ("!=", "neq", "notequals"):
+                    op = "not_equals"
+                elif op in (">", "gt", "greaterthan"):
+                    op = "greater_than"
+                elif op in ("<", "lt", "lessthan"):
+                    op = "less_than"
+                elif op in ("in",):
+                    op = "contains"
+                elif op in ("not_in", "notcontains"):
+                    op = "not_contains"
+                elif op in ("exists", "not_null"):
+                    op = "is_not_null"
+                elif op in ("notexists", "not_exists", "null"):
+                    op = "is_null"
+
+                # Fix empty target when operator is equals
+                if op == "equals" and (target is None or target == "" or str(target).lower() in ("null", "none")):
+                    actual_val = _resolve_json_path(body_data, prop) if prop and body_data else None
+                    if actual_val is not None and actual_val != "":
+                        target = actual_val
+                    else:
+                        op = "is_not_null"
+                        target = ""
+
+                # For unary operators, target is not required
+                if op in ("is_not_null", "is_null"):
+                    target = ""
+
+                rule_key = f"{source}_{prop}_{op}"
+                if rule_key in seen:
+                    continue
+                seen.add(rule_key)
+
+                normalized.append({
+                    "source": source,
+                    "type": source,
+                    "property": prop,
+                    "operator": op,
+                    "target": target,
+                    "value": target
+                })
+            return normalized
+
+        def _build_heuristic_assertions(data):
+            """Intelligent heuristic assertion generator based on actual response data."""
+            sim = []
+            st = data.get('status')
+            if st:
+                sim.append({ "source": "statusCode", "property": "", "operator": "equals", "target": st })
+
+            headers = data.get('headers', {}) or {}
+            ct = next((v for k, v in headers.items() if k.lower() == 'content-type'), '')
+            if 'json' in ct.lower():
+                sim.append({ "source": "header", "property": "Content-Type", "operator": "contains", "target": "application/json" })
+
+            sim.append({ "source": "responseTime", "property": "", "operator": "less_than", "target": 2000 })
+
+            body_obj = data.get('body')
+            if isinstance(body_obj, dict):
+                for k, v in list(body_obj.items())[:12]:
+                    k_lower = k.lower()
+                    if k_lower in ('id', 'uuid', 'token', 'key') or k_lower.endswith('_id'):
+                        if isinstance(v, (int, float)) and v > 0:
+                            sim.append({ "source": "body", "property": k, "operator": "greater_than", "target": 0 })
+                        else:
+                            sim.append({ "source": "body", "property": k, "operator": "is_not_null", "target": "" })
+                    elif isinstance(v, bool):
+                        sim.append({ "source": "body", "property": k, "operator": "equals", "target": v })
+                    elif k_lower in ('status', 'state', 'success', 'code', 'type', 'category', 'role', 'action'):
+                        sim.append({ "source": "body", "property": k, "operator": "equals", "target": v })
+                    elif k_lower in ('message', 'msg', 'description', 'detail', 'title', 'error'):
+                        if isinstance(v, str) and len(v) > 25:
+                            sim.append({ "source": "body", "property": k, "operator": "contains", "target": v[:25] })
+                        else:
+                            sim.append({ "source": "body", "property": k, "operator": "equals", "target": v })
+                    elif 'email' in k_lower and isinstance(v, str) and '@' in v:
+                        sim.append({ "source": "body", "property": k, "operator": "equals", "target": v })
+                    elif isinstance(v, (str, int, float)) and v not in ('', None):
+                        sim.append({ "source": "body", "property": k, "operator": "equals", "target": v })
+                    elif isinstance(v, list) and len(v) > 0:
+                        sim.append({ "source": "body", "property": f"{k}.0", "operator": "is_not_null", "target": "" })
+            elif isinstance(body_obj, list) and len(body_obj) > 0:
+                first_item = body_obj[0]
+                if isinstance(first_item, dict):
+                    for k, v in list(first_item.items())[:6]:
+                        k_lower = k.lower()
+                        if k_lower in ('id', 'uuid') or k_lower.endswith('_id'):
+                            sim.append({ "source": "body", "property": f"0.{k}", "operator": "is_not_null", "target": "" })
+                        elif isinstance(v, (str, int, float, bool)) and v not in ('', None):
+                            sim.append({ "source": "body", "property": f"0.{k}", "operator": "equals", "target": v })
+                else:
+                    sim.append({ "source": "body", "property": "0", "operator": "is_not_null", "target": "" })
+
+            return sim
+
         settings = db.query(AgentSettingsDB).filter(AgentSettingsDB.user_id == user_id).first()
         
         # Simulation Mode (Fallback if no key or specific provider)
         if not settings or not settings.ai_api_key or settings.ai_provider == 'simulator':
-             # Simulate generic checks
-             sim = []
-             
-             # Status
-             st = api_data.get('status')
-             if st:
-                 sim.append({ "source": "statusCode", "property": "", "operator": "equals", "target": st })
-                 
-             # Content-Type
-             headers = api_data.get('headers', {})
-             # Simple case-insensitive lookup
-             ct = next((v for k,v in headers.items() if k.lower() == 'content-type'), '')
-             if 'json' in ct.lower():
-                 sim.append({ "source": "header", "property": "Content-Type", "operator": "contains", "target": "application/json" })
+            raw_sim = _build_heuristic_assertions(api_data)
+            return _normalize_assertions(raw_sim, api_data.get('body'))
 
-             # Performance
-             sim.append({ "source": "responseTime", "property": "", "operator": "lessThan", "target": 2000 })
-             
-             # Body checks (simplified)
-             body = api_data.get('body')
-             if isinstance(body, dict):
-                 if 'id' in body:
-                     sim.append({ "source": "body", "property": "id", "operator": "exists", "target": None })
-                 if 'success' in body:
-                     sim.append({ "source": "body", "property": "success", "operator": "equals", "target": body['success'] })
-             elif isinstance(body, list) and len(body) > 0:
-                 sim.append({ "source": "body", "property": "0", "operator": "exists", "target": None })
-            
-             return sim
+        # Construct Prompt for LLM with explicit usability constraints
+        status_val = api_data.get('status') or 200
+        headers_dump = "{}"
+        try:
+            headers_dump = json.dumps(api_data.get('headers') or {}, indent=2, default=str)
+        except Exception:
+            pass
 
+        body_dump = "{}"
+        try:
+            body_dump = json.dumps(api_data.get('body') or {}, indent=2, default=str)[:3000]
+        except Exception:
+            pass
 
-
-        # Construct Prompt
         prompt = f"""
-        Analyze this API Response and suggest a list of robust assertions to validate it.
-        Make sure to validate important fields inside the JSON body if it exists.
+        Analyze this API Response and suggest a list of robust, highly usable assertions to validate it.
+        Make sure to validate the HTTP status, SLA latency, headers, and critical fields inside the JSON body.
         
-        CRITICAL RULE: Do NOT generate assertions for environment-specific or dynamic headers such as 'Date', 'Server', 'X-Powered-By', 'ETag', 'Content-Length', or CORS headers like 'Access-Control-Allow-Origin' or 'Access-Control-Allow-Credentials'. Focus ONLY on functional headers (like Content-Type) and the body.
+        CRITICAL USABILITY RULES:
+        1. Operators MUST be one of: "equals", "not_equals", "contains", "not_contains", "greater_than", "less_than", "is_not_null", "is_null".
+        2. NEVER generate empty target values or 'target: null' when using 'equals'!
+        3. For dynamic ID fields, tokens, UUIDs or timestamps, use operator "is_not_null" (or "greater_than" with target 0 if numeric).
+        4. For status, type, category, and specific string/number/boolean fields (e.g. name, email, pet_id, status), use operator "equals" with the EXACT REAL VALUE present in the body!
+        5. For descriptive message/error fields, use operator "contains" with a meaningful snippet or "equals".
+        6. Include status code (equals {status_val}), responseTime (less_than 2000), and Content-Type if JSON.
+        7. Keep the list concise and high-value (6 to 10 assertions maximum).
         
-        Status: {api_data.get('status')}
-        Headers: {json.dumps(api_data.get('headers', {}), indent=2)}
-        Body (Truncated): {json.dumps(api_data.get('body', {}), indent=2)[:3000]}
+        Status: {status_val}
+        Headers: {headers_dump}
+        Body (Truncated): {body_dump}
         
-        Return a JSON list of objects with the following schema:
-        {{ "source": "statusCode|header|body|responseTime", "property": "field_path", "operator": "equals|contains|exists|>", "target": "expected_value" }}
-        
-        Example:
+        Return a JSON list of objects with the schema:
         [
-          {{ "source": "statusCode", "property": "", "operator": "equals", "target": 200 }},
-          {{ "source": "header", "property": "content-type", "operator": "contains", "target": "application/json" }},
-          {{ "source": "body", "property": "data.id", "operator": "exists", "target": null }},
-          {{ "source": "body", "property": "success", "operator": "equals", "target": true }}
+          {{ "source": "statusCode", "property": "", "operator": "equals", "target": {status_val} }},
+          {{ "source": "responseTime", "property": "", "operator": "less_than", "target": 2000 }},
+          {{ "source": "header", "property": "Content-Type", "operator": "contains", "target": "application/json" }},
+          {{ "source": "body", "property": "id", "operator": "is_not_null", "target": "" }},
+          {{ "source": "body", "property": "status", "operator": "equals", "target": "success" }}
         ]
         
         Return ONLY valid JSON.
         """
 
         try:
-            content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.2)
-            if not content:
-                return []
-            from app.services.skill_service import _robust_json_parse
-            parsed = _robust_json_parse(content)
-            return parsed if isinstance(parsed, list) else []
+            content = AnalysisService._call_llm(db, user_id, prompt, temperature=0.2, timeout=6)
+            if content:
+                from app.services.skill_service import _robust_json_parse
+                parsed = _robust_json_parse(content)
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    normalized = _normalize_assertions(parsed, api_data.get('body'))
+                    if len(normalized) > 0:
+                        return normalized
         except Exception as e:
             logger.error(f"AI Assertion Gen Error: {e}")
-            return []
+
+        # Fallback to heuristic rules if LLM failed or returned empty
+        raw_sim = _build_heuristic_assertions(api_data)
+        normalized_sim = _normalize_assertions(raw_sim, api_data.get('body'))
+        if normalized_sim:
+            return normalized_sim
+
+        # Guaranteed minimal fallback so it never returns empty or errors out
+        return [{
+            "source": "statusCode",
+            "type": "statusCode",
+            "property": "",
+            "operator": "equals",
+            "target": status_val,
+            "value": status_val
+        }]
 
     @staticmethod
     def analyze_flow_redundancy(db: Session, flow_id: int, user_id: int = None):

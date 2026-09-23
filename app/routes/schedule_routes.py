@@ -114,13 +114,18 @@ def list_schedules(type: Optional[str] = None, target_id: Optional[int] = None, 
     from sqlalchemy.orm import joinedload
     from app.models.environment_model import Environment
     
-    query = db.query(ScheduleModel).options(joinedload(ScheduleModel.environment)).filter(ScheduleModel.company_id == current_user.company_id) # Filter by Company
+    query = db.query(ScheduleModel).options(joinedload(ScheduleModel.environment)).filter(ScheduleModel.company_id == current_user.company_id).filter(ScheduleModel.is_manual == False) # Filter by Company and hide manual executions
     if type:
         query = query.filter(ScheduleModel.type == type)
     if target_id:
         query = query.filter(ScheduleModel.target_id == target_id)
         
-    results = query.all()
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.error('list_schedules reached!')
+    from sqlalchemy import desc
+    results = query.order_by(desc(ScheduleModel.id)).limit(500).all()
+    logger.error('query.all() finished!')
     
     # Manually map environment_name for Pydantic
     for schedule in results:

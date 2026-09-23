@@ -1,6 +1,6 @@
 from datetime import datetime
 import logging
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import traceback
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -44,7 +44,7 @@ def get_execution_history(
     limit: int = Query(20, ge=1, le=5000),
     api_id: Optional[int] = None,
     project_id: Optional[int] = None,
-    flow_id: Optional[int] = None,
+    flow_id: Optional[Union[int, str]] = None,
     environment_id: Optional[int] = None,
     schedule_id: Optional[int] = None,  # Added filter
     start_date: Optional[datetime] = None,
@@ -92,7 +92,7 @@ def get_history_batches(
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100),
     project_id: Optional[int] = None,
-    flow_id: Optional[int] = None,
+    flow_id: Optional[Union[int, str]] = None,
     schedule_type: Optional[str] = None,
     execution_type: Optional[str] = Query(None, pattern="^(api|web|mobile)$"),
     db: Session = Depends(get_db),
@@ -118,7 +118,7 @@ def get_history_batches(
 @router.get("/averages")
 def get_history_averages(
     schedule_id: Optional[int] = None,
-    flow_id: Optional[int] = None,
+    flow_id: Optional[Union[int, str]] = None,
     api_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),

@@ -75,6 +75,7 @@ def trigger_execution(
         capture_video=req.capture_video,
         capture_screenshot=req.capture_screenshot,
         visible_execution=req.visible_execution,
+        is_manual=True,
         duration_seconds=req.timeout_ms, # Repurposing duration_seconds for step timeout in E2E
         virtual_users=req.virtual_users, # Repurposing for retryActions
         ramp_up_seconds=req.ramp_up_seconds, # Repurposing for retryTest

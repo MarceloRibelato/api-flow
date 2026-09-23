@@ -178,6 +178,7 @@ class MockExecutionEngine:
         headers_lower = {k.lower(): str(v) for k, v in headers.items()}
         json_body = request_data.get("json_body", {})
         body_text = request_data.get("body_text", "")
+        path_params = request_data.get("path_params", {}) or {}
 
         # Se json_body estiver vazio mas houver body_text tipo urlencoded, parse
         if not json_body and body_text and isinstance(body_text, str) and "=" in body_text and not body_text.strip().startswith(("{", "[")):
@@ -255,12 +256,28 @@ class MockExecutionEngine:
                 return url_val
             elif target == "method":
                 return method_val
-            elif target in ["query", "param", "params"]:
+            elif target == "query":
                 if not field:
                     return json.dumps(query_params, ensure_ascii=False)
                 if field in query_params:
                     return str(query_params[field])
                 field_lower = field.lower()
+                for qk, qv in query_params.items():
+                    if qk.lower() == field_lower:
+                        return str(qv)
+                return ""
+            elif target in ["param", "params"]:
+                if not field:
+                    return json.dumps(path_params, ensure_ascii=False)
+                if field in path_params:
+                    return str(path_params[field])
+                # fallback to query params
+                if field in query_params:
+                    return str(query_params[field])
+                field_lower = field.lower()
+                for qk, qv in path_params.items():
+                    if qk.lower() == field_lower:
+                        return str(qv)
                 for qk, qv in query_params.items():
                     if qk.lower() == field_lower:
                         return str(qv)
@@ -304,17 +321,47 @@ class MockExecutionEngine:
         str_expected = str(expected_val).lower().strip()
         op = operator.lower().strip()
 
+        # Suporte resiliente a aspas envoltórias adicionadas no input pelo usuário (ex: "doggie2" ou 'doggie2')
+        unquoted_actual = str_actual.strip("\"'")
+        unquoted_expected = str_expected.strip("\"'")
+
         if op in ["equals", "igual", "=="]:
-            return str_actual == str_expected or str_actual.lstrip("/") == str_expected.lstrip("/")
+            return (
+                str_actual == str_expected
+                or unquoted_actual == unquoted_expected
+                or str_actual == unquoted_expected
+                or unquoted_actual == str_expected
+                or str_actual.lstrip("/") == str_expected.lstrip("/")
+                or unquoted_actual.lstrip("/") == unquoted_expected.lstrip("/")
+            )
         elif op in ["not_equals", "!=", "diferente"]:
-            return str_actual != str_expected and str_actual.lstrip("/") != str_expected.lstrip("/")
+            return (
+                str_actual != str_expected
+                and unquoted_actual != unquoted_expected
+                and str_actual.lstrip("/") != str_expected.lstrip("/")
+                and unquoted_actual.lstrip("/") != unquoted_expected.lstrip("/")
+            )
         elif op in ["starts_with", "inicia_com", "startswith"]:
-            return str_actual.startswith(str_expected) or str_actual.lstrip("/").startswith(str_expected.lstrip("/"))
+            return (
+                str_actual.startswith(str_expected)
+                or str_actual.startswith(unquoted_expected)
+                or unquoted_actual.startswith(unquoted_expected)
+                or str_actual.lstrip("/").startswith(str_expected.lstrip("/"))
+                or str_actual.lstrip("/").startswith(unquoted_expected.lstrip("/"))
+            )
         elif op in ["ends_with", "termina_com", "endswith"]:
-            return str_actual.endswith(str_expected)
+            return (
+                str_actual.endswith(str_expected)
+                or str_actual.endswith(unquoted_expected)
+                or unquoted_actual.endswith(unquoted_expected)
+            )
         elif op in ["contains", "contem", "includes"]:
-            return str_expected in str_actual
-        return str_actual == str_expected
+            return (
+                str_expected in str_actual
+                or unquoted_expected in str_actual
+                or unquoted_expected in unquoted_actual
+            )
+        return str_actual == str_expected or unquoted_actual == unquoted_expected
 
     @staticmethod
     def get_nested_val(data: Any, path: str) -> Any:
@@ -395,7 +442,7 @@ class MockExecutionEngine:
         return conditions
 
     @staticmethod
-    def match_path_segments(request_path: str, rule_path: str) -> tuple[bool, int]:
+    def match_path_segments(request_path: str, rule_path: str) -> tuple[bool, int, dict]:
         """
         Avalia se a rota da requisição bate com o pattern da regra de forma 100% dinâmica e agnóstica a qualquer API:
         1. Match Exato: '/api/v3/pet' == '/api/v3/pet' (maior score)
@@ -406,7 +453,7 @@ class MockExecutionEngine:
         Retorna (matched: bool, specificity_score: int).
         """
         if rule_path == "*":
-            return True, 1
+            return True, 1, {}
 
         clean_req = request_path.strip("/")
         clean_rule = rule_path.strip("/")
@@ -415,34 +462,43 @@ class MockExecutionEngine:
         rule_segs = [s for s in clean_rule.split("/") if s]
 
         if not req_segs and not rule_segs:
-            return True, 100
+            return True, 100, {}
         if not req_segs or not rule_segs:
-            return False, 0
+            return False, 0, {}
 
         def _seg_matches(req_seg: str, rule_seg: str) -> bool:
             if rule_seg in ("*", ".*"):
                 return True
             pattern = re.sub(r'\{[a-zA-Z0-9_]+\}', '[^/]+', rule_seg)
             return bool(re.fullmatch(f"^{pattern}$", req_seg))
+            
+        def _extract_vars(r_segs, s_segs):
+            extracted = {}
+            for req_seg, rule_seg in zip(r_segs, s_segs):
+                if '{' in rule_seg and '}' in rule_seg:
+                    var_name = re.search(r'\{([a-zA-Z0-9_]+)\}', rule_seg)
+                    if var_name:
+                        extracted[var_name.group(1)] = req_seg
+            return extracted
 
         # 1. Match de mesmo comprimento (tamanho idêntico de segmentos)
         if len(req_segs) == len(rule_segs):
             if all(_seg_matches(r, s) for r, s in zip(req_segs, rule_segs)):
-                return True, 100 + len(rule_segs)
+                return True, 100 + len(rule_segs), _extract_vars(req_segs, rule_segs)
 
         # 2. Requisição contém prefixo de basePath que a regra não tem (ex: req='/api/v3/pet', rule='/pet')
         if len(req_segs) > len(rule_segs):
             tail = req_segs[-len(rule_segs):]
             if all(_seg_matches(r, s) for r, s in zip(tail, rule_segs)):
-                return True, len(rule_segs)
+                return True, len(rule_segs), _extract_vars(tail, rule_segs)
 
         # 3. Regra contém prefixo de basePath que a requisição omitiu (ex: req='/pet', rule='/api/v3/pet')
         if len(rule_segs) > len(req_segs):
             tail = rule_segs[-len(req_segs):]
             if all(_seg_matches(r, s) for r, s in zip(req_segs, tail)):
-                return True, len(req_segs)
+                return True, len(req_segs), _extract_vars(req_segs, tail)
 
-        return False, 0
+        return False, 0, {}
 
     @classmethod
     def match_rule(
@@ -454,7 +510,7 @@ class MockExecutionEngine:
         query_params: Dict[str, str],
         body_text: str,
         raw_url: Optional[str] = None
-    ) -> Optional[MockRuleDB]:
+    ): # -> Tuple[Optional[MockRuleDB], dict]
         """
         Encontra a regra ideal que atende aos critérios de matching da requisição.
         ESTRATÉGIA:
@@ -494,10 +550,10 @@ class MockExecutionEngine:
             )
 
             # Avaliação genérica e agnóstica de rota (suporta match exato, parâmetros e variação de basePath)
-            matched_path, score = cls.match_path_segments(clean_path, rule_path)
+            matched_path, score, path_params = cls.match_path_segments(clean_path, rule_path)
 
             if matched_path or (has_url_condition and rule_path in ["/", "/*", "*"]):
-                matching_path_rules.append((rule, score))
+                matching_path_rules.append((rule, score, path_params))
 
         # Ordenar por prioridade crescente (1 primeiro) e maior especificidade de rota
         matching_path_rules.sort(key=lambda item: (
@@ -505,10 +561,10 @@ class MockExecutionEngine:
             -item[1]  # Maior score de especificidade primeiro (match exato antes de match parcial)
         ))
 
-        ordered_rules = [item[0] for item in matching_path_rules]
+        ordered_rules_with_params = [(item[0], item[2]) for item in matching_path_rules]
 
         # PASS 1: Testar Regras COM Condições Específicas (Ordem de Prioridade 1 -> 6+)
-        for rule in ordered_rules:
+        for rule, path_params in ordered_rules_with_params:
             rule_conditions = cls.get_rule_conditions(rule)
 
             if rule_conditions and len(rule_conditions) > 0:
@@ -564,27 +620,27 @@ class MockExecutionEngine:
                         break
 
                 if not cond_failed:
-                    return rule
+                    return rule, path_params
 
             elif rule.match_body_pattern:
                 if body_text and re.search(rule.match_body_pattern, body_text):
-                    return rule
+                    return rule, path_params
 
         # PASS 2: Se nenhuma condição bateu, busca a Regra SEM Condições (Default 200 OK da rota)
-        for rule in ordered_rules:
+        for rule, path_params in ordered_rules_with_params:
             rule_conditions = cls.get_rule_conditions(rule)
             has_conditions = (rule_conditions and len(rule_conditions) > 0) or bool(rule.match_body_pattern)
 
             # Se não tem condições específicas, é a resposta padrão da rota!
             if not has_conditions:
-                return rule
+                return rule, path_params
 
         # PASS 3: Se houver qualquer regra de sucesso (status < 400) para a rota, usa ela
-        for rule in ordered_rules:
+        for rule, path_params in ordered_rules_with_params:
             if rule.response_status < 400:
-                return rule
+                return rule, path_params
 
-        return None
+        return None, {}
 
     @classmethod
     async def process_mock_request(
@@ -667,7 +723,9 @@ class MockExecutionEngine:
         }
 
         # 1. Encontrar Regra de Match
-        matched_rule = cls.match_rule(mock.rules, method, path, headers, query_params, body_text, raw_url=raw_url)
+        matched_rule, path_params = cls.match_rule(mock.rules, method, path, headers, query_params, body_text, raw_url=raw_url)
+        if path_params:
+            request_data["path_params"] = path_params
         is_proxied = False
 
         if matched_rule:

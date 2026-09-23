@@ -7,7 +7,7 @@ from app.services.dashboard_service import DashboardService
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
-router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
+router = APIRouter(prefix="/app-data", tags=["Dashboard"])
 
 def _parse_dates(start: str, end: str):
     s, e = None, None
@@ -49,7 +49,7 @@ def _resolve_timeframe(days: Any, start: str, end: str):
             num_days = 7
     return num_days, s, e
 
-@router.get("/metrics")
+@router.get("/summary")
 def get_metrics(
     days: Any = 7, 
     project_id: int = None,
@@ -72,7 +72,7 @@ def get_metrics(
         company_id=current_user.company_id if current_user else None
     )
 
-@router.get("/recent-executions")
+@router.get("/recent-runs")
 def get_recent_executions(
     limit: int = 5, 
     days: Any = None,
@@ -98,7 +98,7 @@ def get_recent_executions(
         company_id=current_user.company_id if current_user else None
     )
 
-@router.get("/failures")
+@router.get("/errors")
 def get_failures(
     limit: int = 5, 
     days: Any = None,
@@ -124,7 +124,7 @@ def get_failures(
         company_id=current_user.company_id if current_user else None
     )
 
-@router.get("/slowest")
+@router.get("/delayed")
 def get_slowest(
     limit: int = 5,
     days: Any = None,
@@ -150,7 +150,7 @@ def get_slowest(
         company_id=current_user.company_id if current_user else None
     )
 
-@router.get("/daily")
+@router.get("/day-stats")
 def get_daily_stats(
     days: Any = 7,
     project_id: int = None,
@@ -173,7 +173,7 @@ def get_daily_stats(
         company_id=current_user.company_id if current_user else None
     )
 
-@router.get("/top-failures")
+@router.get("/top-errors")
 def get_top_failures(
     limit: int = 5,
     days: Any = None,
@@ -199,7 +199,7 @@ def get_top_failures(
         company_id=current_user.company_id if current_user else None
     )
 
-@router.get("/export")
+@router.get("/download")
 def export_dashboard(
     days: Any = 7,
     project_id: int = None,

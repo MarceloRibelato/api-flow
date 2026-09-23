@@ -308,7 +308,7 @@ class PlaywrightExecutorService:
                 pass
         return {"storage_state": state, "url": url}
 
-    async def _wait_for_loading_to_finish(self, timeout_ms=1000):
+    async def _wait_for_loading_to_finish(self, timeout_ms=2500):
         """Intelligently wait for network idle and common loaders to disappear."""
         if not self._page:
             return
@@ -317,7 +317,7 @@ class PlaywrightExecutorService:
         try:
             # Wait for common loaders to vanish
             await self._page.wait_for_function('''() => {
-                const loaders = document.querySelectorAll('.spinner, .loader, mat-spinner, [role="progressbar"], .loading-overlay, #loader, #spinner, app-loader, [aria-busy="true"], .skeleton, [class*="skeleton"]');
+                const loaders = document.querySelectorAll('.spinner, .loader, [class*="spinner"], [class*="loader"], .loading, [class*="loading"], .throbber, mat-spinner, [role="progressbar"], .loading-overlay, #loader, #spinner, app-loader, [aria-busy="true"], .skeleton, [class*="skeleton"]');
                 for (let i = 0; i < loaders.length; i++) {
                     const el = loaders[i];
                     const style = window.getComputedStyle(el);
@@ -733,8 +733,14 @@ class PlaywrightExecutorService:
                             logger.warning(f"Click failed, error: {click_err}")
                             raise click_err
                             
-                        # Brief wait for UI to handle event and micro-animations settle
-                        await self._page.wait_for_timeout(100)
+                        # Wait for any navigation or DOM settling the click may have triggered
+                        try:
+                            await self._page.wait_for_load_state("domcontentloaded", timeout=3000)
+                        except Exception:
+                            pass
+                        await self._wait_for_loading_to_finish(timeout_ms=2500)
+                        await self._page.wait_for_timeout(250)
+
                         if "[HEURISTIC" in step_result["text"] or "[AI" in step_result["text"]:
                             step_result["text"] += f" | Clicked element: {selector}"
                         else:
@@ -746,7 +752,12 @@ class PlaywrightExecutorService:
                         await self._page.mouse.click(float(x_coord), float(y_coord))
                         t2 = time.time()
                         logger.info(f"⏱️ Coordinate click at ({x_coord},{y_coord}): {round((t2-t1)*1000)}ms")
-                        await self._page.wait_for_timeout(100)
+                        try:
+                            await self._page.wait_for_load_state("domcontentloaded", timeout=3000)
+                        except Exception:
+                            pass
+                        await self._wait_for_loading_to_finish(timeout_ms=2500)
+                        await self._page.wait_for_timeout(250)
                         step_result["text"] = f"Clicked at coordinates ({x_coord}, {y_coord})"
                     else:
                         raise ValueError("Selector is missing for click step")
@@ -1225,8 +1236,46 @@ class PlaywrightExecutorService:
                             logger.info(f"🤖 [Auto-Heal] Triggering AI model fallback with {min(len(candidates or []), 50)} candidates for user_id={active_user_id}")
                             ai_selector = AnalysisService.heal_selector(active_db, active_user_id, broken_selector, action_val, step_type, clean_html)
                             
+                            is_valid_candidate = False
                             if ai_selector and ai_selector != broken_selector and "```" not in ai_selector:
-                                logger.info(f"✨ [Auto-Heal] AI Success! Replacing '{broken_selector}' with '{ai_selector}'")
+                                # Actively validate that ai_selector actually resolves to elements on the live page
+                                try:
+                                    if self._page:
+                                        loc = self._page.locator(ai_selector)
+                                        count_fn = getattr(loc, "count", None)
+                                        if count_fn:
+                                            count_res = count_fn()
+                                            if asyncio.iscoroutine(count_res) or hasattr(count_res, "__await__"):
+                                                match_count = await count_res
+                                            else:
+                                                match_count = count_res if isinstance(count_res, int) else 1
+                                        else:
+                                            match_count = 1
+
+                                        if match_count > 0:
+                                            is_valid_candidate = True
+                                            if match_count > 1:
+                                                # Refine ambiguous selector with visible filter
+                                                vis_candidate = f"{ai_selector} >> visible=true"
+                                                try:
+                                                    vis_loc = self._page.locator(vis_candidate)
+                                                    vis_fn = getattr(vis_loc, "count", None)
+                                                    if vis_fn:
+                                                        vr = vis_fn()
+                                                        vc = await vr if (asyncio.iscoroutine(vr) or hasattr(vr, "__await__")) else vr
+                                                        if isinstance(vc, int) and vc >= 1:
+                                                            ai_selector = vis_candidate
+                                                except Exception:
+                                                    pass
+                                        else:
+                                            logger.warning(f"⚠️ [Auto-Heal] AI suggested selector '{ai_selector}', but it matches 0 elements on the page.")
+                                    else:
+                                        is_valid_candidate = True
+                                except Exception as val_err:
+                                    logger.warning(f"⚠️ [Auto-Heal] AI selector '{ai_selector}' syntax validation error: {val_err}")
+
+                            if is_valid_candidate:
+                                logger.info(f"✨ [Auto-Heal] AI Success! Replacing '{broken_selector}' with verified '{ai_selector}'")
                                 orig_sel_data = step.get('_original_properties')
                                 orig_sel = orig_sel_data.get('selector', broken_selector) if isinstance(orig_sel_data, dict) else broken_selector
                                 properties['selector'] = ai_selector

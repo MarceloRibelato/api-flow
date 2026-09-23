@@ -42,7 +42,7 @@ def _extract_json(text: str) -> Any:
             return json.loads(cleaned[first_bracket:last_bracket + 1])
         raise
 
-def _prune_mcp_snapshot(snapshot: str, max_chars: int = 6000) -> str:
+def _prune_mcp_snapshot(snapshot: str, max_chars: int = 30000) -> str:
     """
     Limits large accessibility trees or HTML snapshots to avoid LLM token bloat and timeouts,
     prioritizing interactive elements, landmarks, inputs, buttons, and headings.
@@ -54,7 +54,8 @@ def _prune_mcp_snapshot(snapshot: str, max_chars: int = 6000) -> str:
     interactive_keywords = (
         "button", "link", "textbox", "input", "select", "checkbox", "radio",
         "menu", "heading", "form", "dialog", "navigation", "main", "tab",
-        "search", "combobox", "option", "alert"
+        "search", "combobox", "option", "alert", "data-testid", "data-qa",
+        "role=", "aria-label", "placeholder", "submit", "btn", "table", "item"
     )
     
     selected_lines = []
@@ -86,6 +87,241 @@ def _prune_mcp_snapshot(snapshot: str, max_chars: int = 6000) -> str:
     logger.info(f"Pruned MCP snapshot from {len(snapshot)} to {current_len} chars ({len(result)} lines)")
     return "\n".join(result)
 
+def _extract_snapshot_elements(snapshot_text: str) -> Dict[str, List[str]]:
+    """Extracts candidate buttons, textboxes, and links from the MCP accessibility tree or text snapshot."""
+    buttons = []
+    textboxes = []
+    links = []
+    if not snapshot_text:
+        return {"buttons": [], "textboxes": [], "links": []}
+    for line in snapshot_text.splitlines():
+        line = line.strip()
+        b_match = re.search(r"button\s+['\"]([^'\"]+)['\"]", line, re.IGNORECASE)
+        if b_match and b_match.group(1) not in buttons:
+            buttons.append(b_match.group(1))
+        t_match = re.search(r"textbox\s+['\"]([^'\"]+)['\"]", line, re.IGNORECASE)
+        if t_match and t_match.group(1) not in textboxes:
+            textboxes.append(t_match.group(1))
+        l_match = re.search(r"link\s+['\"]([^'\"]+)['\"]", line, re.IGNORECASE)
+        if l_match and l_match.group(1) not in links:
+            links.append(l_match.group(1))
+    return {"buttons": buttons, "textboxes": textboxes, "links": links}
+
+def _expand_single_node_into_modular_journey(
+    single_node: Dict[str, Any],
+    raw_card_data: Dict[str, Any],
+    snapshot_text: str,
+    target_url: str,
+    start_mode: str
+) -> List[Dict[str, Any]]:
+    """Expands or clusters a single monolithic node into 3 to 4 modular test cards."""
+    ndata = single_node.get("data", {})
+    if not isinstance(ndata, dict):
+        ndata = {}
+    c_id = str(single_node.get("id") or "node_1")
+    c_data = raw_card_data.get(c_id) or raw_card_data.get("1") or raw_card_data.get("node_1") or {}
+    if not isinstance(c_data, dict):
+        c_data = {}
+
+    steps = (
+        ndata.get("e2eSteps")
+        or c_data.get("e2eSteps")
+        or ndata.get("steps")
+        or c_data.get("steps")
+        or single_node.get("e2eSteps")
+        or single_node.get("steps")
+        or []
+    )
+    if not isinstance(steps, list):
+        steps = []
+
+    # Case A: The single node has 3 or more steps. Split into 2 or 3 modular cards!
+    if len(steps) >= 3:
+        chunk_size = max(1, (len(steps) + 1) // 3)
+        chunks = [steps[i:i + chunk_size] for i in range(0, len(steps), chunk_size)]
+        
+        stage_names = [
+            "1. Navegação e Seleção",
+            "2. Preenchimento de Dados",
+            "3. Ação Principal e Submissão",
+            "4. Validação e Asserções"
+        ]
+        
+        modular_nodes = []
+        for c_idx, chunk in enumerate(chunks):
+            n_id = f"node_{c_idx + 1}"
+            orig_name = ndata.get("name") if c_idx == 0 else None
+            n_name = orig_name or (stage_names[c_idx] if c_idx < len(stage_names) else f"{c_idx + 1}. Continuação da Jornada")
+            modular_nodes.append({
+                "id": n_id,
+                "type": "custom",
+                "position": {"x": 100 + c_idx * 300, "y": 180},
+                "data": {
+                    "id": n_id,
+                    "name": n_name,
+                    "nodeType": "web",
+                    "description": f"Etapa {c_idx + 1} da jornada de automação",
+                    "e2eSteps": chunk
+                }
+            })
+        
+        has_assert = any(
+            any(str(s.get("type") or s.get("action")).lower() in ["assert", "check", "verify"] for s in n["data"]["e2eSteps"] if isinstance(s, dict))
+            for n in modular_nodes
+        )
+        if not has_assert and modular_nodes:
+            modular_nodes[-1]["data"]["e2eSteps"].append({
+                "id": f"{modular_nodes[-1]['id']}_step_assert",
+                "name": "Validar conclusão do fluxo",
+                "type": "assert",
+                "action": "assert",
+                "selector": "body",
+                "value": "success",
+                "properties": {
+                    "action": "assert",
+                    "selector": "body",
+                    "value": "success",
+                    "timeout": 5000,
+                    "locator_strategy": "css"
+                }
+            })
+        return modular_nodes
+
+    # Case B: The single node has 1 or 2 steps. Synthesize complementary cards to build a 3-card journey.
+    elements = _extract_snapshot_elements(snapshot_text)
+    node_1_steps = steps if steps else [{
+        "id": "node_1_step_1",
+        "name": ndata.get("name") or "Interagir com a página",
+        "type": "click",
+        "action": "click",
+        "selector": f"button:has-text('{elements['buttons'][0]}')" if elements["buttons"] else "button",
+        "value": "",
+        "properties": {
+            "action": "click",
+            "selector": f"button:has-text('{elements['buttons'][0]}')" if elements["buttons"] else "button",
+            "timeout": 5000
+        }
+    }]
+    
+    orig_title = ndata.get("name") or "Navegação e Seleção"
+    if not orig_title.startswith("1."):
+        node_1_name = f"1. {orig_title}"
+    else:
+        node_1_name = orig_title
+
+    node_1 = {
+        "id": "node_1",
+        "type": "custom",
+        "position": {"x": 100, "y": 180},
+        "data": {
+            "id": "node_1",
+            "name": node_1_name,
+            "nodeType": "web",
+            "description": ndata.get("description") or "Navegação inicial e seleção do elemento de teste",
+            "e2eSteps": node_1_steps
+        }
+    }
+    
+    # Node 2: Form input / Configuration / Interaction
+    sample_textbox = elements["textboxes"][0] if elements["textboxes"] else None
+    if sample_textbox:
+        step_2_selector = f"input[placeholder*='{sample_textbox}' i], input[name*='{sample_textbox}' i], [data-testid*='{sample_textbox.lower()}']"
+        step_2_name = f"Preencher campo '{sample_textbox}'"
+        step_2_val = "Produto Teste" if any(w in sample_textbox.lower() for w in ["search", "buscar", "busca"]) else "teste"
+        step_2_type = "type"
+    else:
+        sample_link = elements["links"][0] if elements["links"] else None
+        if sample_link:
+            step_2_selector = f"a:has-text('{sample_link}')"
+            step_2_name = f"Acessar link '{sample_link}'"
+            step_2_val = ""
+            step_2_type = "click"
+        else:
+            step_2_selector = "input:not([type='hidden']), textarea"
+            step_2_name = "Preencher dados da etapa"
+            step_2_val = "teste"
+            step_2_type = "type"
+
+    node_2 = {
+        "id": "node_2",
+        "type": "custom",
+        "position": {"x": 400, "y": 180},
+        "data": {
+            "id": "node_2",
+            "name": "2. Preenchimento de Dados e Opções",
+            "nodeType": "web",
+            "description": "Inserção de dados operacionais e configuração da ação",
+            "e2eSteps": [
+                {
+                    "id": "node_2_step_1",
+                    "name": step_2_name,
+                    "type": step_2_type,
+                    "action": step_2_type,
+                    "selector": step_2_selector,
+                    "value": step_2_val,
+                    "properties": {
+                        "action": step_2_type,
+                        "selector": step_2_selector,
+                        "value": step_2_val,
+                        "timeout": 5000,
+                        "locator_strategy": "role" if "has-text" in step_2_selector else "css"
+                    }
+                }
+            ]
+        }
+    }
+
+    # Node 3: Submit action and assertion of success
+    sample_button = elements["buttons"][1] if len(elements["buttons"]) > 1 else (elements["buttons"][0] if elements["buttons"] else None)
+    btn_selector = f"button:has-text('{sample_button}')" if sample_button else "button[type='submit'], [role='button']:has-text('Salvar'), button"
+    btn_name = f"Clicar em '{sample_button}'" if sample_button else "Submeter ação principal"
+    
+    node_3 = {
+        "id": "node_3",
+        "type": "custom",
+        "position": {"x": 700, "y": 180},
+        "data": {
+            "id": "node_3",
+            "name": "3. Submissão e Validação de Sucesso",
+            "nodeType": "web",
+            "description": "Conclusão da ação crítica e asserções de validação E2E",
+            "e2eSteps": [
+                {
+                    "id": "node_3_step_1",
+                    "name": btn_name,
+                    "type": "click",
+                    "action": "click",
+                    "selector": btn_selector,
+                    "value": "",
+                    "properties": {
+                        "action": "click",
+                        "selector": btn_selector,
+                        "value": "",
+                        "timeout": 5000,
+                        "locator_strategy": "role" if "has-text" in btn_selector else "css"
+                    }
+                },
+                {
+                    "id": "node_3_step_2",
+                    "name": "Verificar status de sucesso da operação",
+                    "type": "assert",
+                    "action": "assert",
+                    "selector": "[role='status'], .toast, [data-testid*='success'], body",
+                    "value": "success",
+                    "properties": {
+                        "action": "assert",
+                        "selector": "[role='status'], .toast, [data-testid*='success'], body",
+                        "value": "success",
+                        "timeout": 5000,
+                        "locator_strategy": "css"
+                    }
+                }
+            ]
+        }
+    }
+
+    return [node_1, node_2, node_3]
+
 class AgentService:
     """Service to coordinate autonomous AI agents (Planner, Healer)."""
 
@@ -97,7 +333,10 @@ class AgentService:
         start_mode: str = "scratch",
         existing_flow_context: Optional[Dict[str, Any]] = None,
         instruction: Optional[str] = None,
-        start_node_id: Optional[str] = None
+        start_node_id: Optional[str] = None,
+        storage_state: Optional[Dict[str, Any]] = None,
+        cookies: Optional[List[Dict[str, Any]]] = None,
+        headers: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """Runs the Planner Agent: Explores URL via MCP or continues from existing automated steps and generates a test flow."""
         logger.info(f"Agent Planner starting (mode={start_mode}) for URL: '{url}' (start_node_id={start_node_id})")
@@ -127,15 +366,30 @@ class AgentService:
                 target_url = "https://"
 
             # 2. Explore or Replay via MCP Playwright
-            snapshot_info = {"status": "fallback", "snapshot": ""}
+            snapshot_info = {"status": "fallback", "snapshot": "", "screenshot": None}
             mcp_snapshot = ""
+            node_enhancements = []
 
-            if start_mode == "from_existing" and existing_steps:
+            existing_nodes = existing_flow_context.get("nodes") if (existing_flow_context and isinstance(existing_flow_context, dict)) else []
+
+            if start_mode == "from_existing" and existing_nodes:
+                logger.info(f"Replaying full flow ({len(existing_nodes)} nodes) and auditing each node at {target_url}")
+                snapshot_info = await MCPPlaywrightService.replay_flow_and_audit_nodes(
+                    target_url,
+                    existing_nodes,
+                    storage_state=storage_state,
+                    cookies=cookies,
+                    headers=headers
+                )
+                mcp_snapshot = snapshot_info.get("snapshot", "")
+                node_enhancements = snapshot_info.get("node_enhancements", [])
+
+            elif start_mode == "from_existing" and existing_steps:
                 logger.info(f"Replaying {len(existing_steps)} existing automated steps to reach pre-condition state at {target_url}")
                 try:
-                    async with MCPPlaywrightService.browser_session(timeout=10.0, connect_timeout=1.5) as browser:
+                    async with MCPPlaywrightService.browser_session(timeout=35.0, connect_timeout=3.0) as browser:
                         # Navigate to base URL first
-                        await browser.call_tool("navigate", {"url": target_url}, timeout=3.0)
+                        await browser.call_tool("navigate", {"url": target_url}, timeout=8.0)
                         
                         # Replay non-navigation interactive steps up to the starting node in the SAME session
                         for step in existing_steps:
@@ -146,35 +400,43 @@ class AgentService:
 
                             if stype in ["type", "fill"] and selector and value:
                                 try:
-                                    await browser.call_tool("type", {"selector": selector, "text": str(value)}, timeout=1.0)
+                                    await browser.call_tool("type", {"selector": selector, "text": str(value)}, timeout=4.0)
                                 except Exception as te:
                                     logger.debug(f"Step replay type error on selector {selector}: {te}")
                             elif stype in ["click", "tap"] and selector:
                                 try:
-                                    await browser.call_tool("click", {"selector": selector}, timeout=1.0)
+                                    await browser.call_tool("click", {"selector": selector}, timeout=4.0)
                                 except Exception as ce:
                                     logger.debug(f"Step replay click error on selector {selector}: {ce}")
                         
                         # Take snapshot of the resulting advanced page state
-                        snap_res = await browser.call_tool("snapshot", {}, timeout=2.0)
+                        snap_res = await browser.call_tool("snapshot", {}, timeout=4.0)
                         if snap_res:
                             mcp_snapshot = "\n".join(snap_res) if isinstance(snap_res, list) else str(snap_res)
-                            snapshot_info = {"status": "connected", "snapshot": mcp_snapshot}
+                            snapshot_info = {"status": "connected", "snapshot": mcp_snapshot, "screenshot": None}
                 except Exception as replay_err:
                     logger.warning(f"MCP step replay failed: {replay_err}. Falling back to direct Playwright explorer with step replay.")
-                    snapshot_info = await MCPPlaywrightService.direct_playwright_snapshot(target_url, replay_steps=existing_steps)
+                    snapshot_info = await MCPPlaywrightService.direct_playwright_snapshot(
+                        target_url, replay_steps=existing_steps, storage_state=storage_state, cookies=cookies, headers=headers
+                    )
                     mcp_snapshot = snapshot_info.get("snapshot", "")
 
                 if not mcp_snapshot or "### Error" in mcp_snapshot or "not installed" in mcp_snapshot or "Browser" in mcp_snapshot:
-                    snapshot_info = await MCPPlaywrightService.direct_playwright_snapshot(target_url, replay_steps=existing_steps)
+                    snapshot_info = await MCPPlaywrightService.direct_playwright_snapshot(
+                        target_url, replay_steps=existing_steps, storage_state=storage_state, cookies=cookies, headers=headers
+                    )
                     mcp_snapshot = snapshot_info.get("snapshot", "")
             else:
                 # Direct MCP exploration from initial URL
-                snapshot_info = await MCPPlaywrightService.navigate_and_snapshot(target_url)
+                snapshot_info = await MCPPlaywrightService.navigate_and_snapshot(
+                    target_url, storage_state=storage_state, cookies=cookies, headers=headers
+                )
                 mcp_snapshot = snapshot_info.get("snapshot", "")
                 if not mcp_snapshot or "### Error" in mcp_snapshot or "not installed" in mcp_snapshot or "Browser" in mcp_snapshot:
                     logger.info("MCP snapshot had error or was empty, falling back to direct Playwright exploration.")
-                    snapshot_info = await MCPPlaywrightService.direct_playwright_snapshot(target_url)
+                    snapshot_info = await MCPPlaywrightService.direct_playwright_snapshot(
+                        target_url, storage_state=storage_state, cookies=cookies, headers=headers
+                    )
                     mcp_snapshot = snapshot_info.get("snapshot", "")
 
             # Prune snapshot to eliminate token bloat and avoid LLM timeouts
@@ -196,25 +458,26 @@ class AgentService:
             existing_steps_summary = "\n".join(step_summaries) if step_summaries else "Nenhum passo anterior (iniciando fluxo do zero)."
 
             # 4. Execute Specialist Skill (qa_agent_planner)
+            if start_mode == "from_existing":
+                context_instruction = (
+                    "A partir do estado atual da página após os passos precursores já automatizados, gere OBRIGATORIAMENTE os próximos 3 a 5 cards lógicos complementares e sequenciais (ex: 1. Interação/Seleção, 2. Preenchimento de dados, 3. Submissão, 4. Asserções de sucesso) para avançar e concluir esta jornada de teste E2E. "
+                    + (f"Objetivo informado: {instruction}" if instruction else "")
+                )
+            else:
+                context_instruction = (
+                    "Gere OBRIGATORIAMENTE uma jornada de teste E2E completa e de alto valor de QA composta por 3 a 5 cards modulares conectados sequencialmente por edges (ex: 1. Acesso e Seleção Inicial, 2. Preenchimento de Dados/Opções, 3. Ação Principal/Submissão, 4. Validação e Asserções de Sucesso), explorando os elementos interativos reais identificados no snapshot da página. "
+                    + (f"Objetivo informado: {instruction}" if instruction else "")
+                )
+
             context = {
                 "target_url": target_url,
                 "mcp_snapshot": pruned_mcp_snapshot,
                 "existing_steps_summary": existing_steps_summary,
-                "instruction": instruction or "Continue a jornada do usuário explorando e mapeando os próximos elementos interativos da tela.",
+                "instruction": context_instruction,
                 "flow_type": "web"
             }
             
-            if not os.getenv("PYTEST_CURRENT_TEST"):
-                import sys
-                import importlib
-                for m in ['app.services.analysis_service', 'app.services.skill_service']:
-                    if m in sys.modules:
-                        try:
-                            importlib.reload(sys.modules[m])
-                        except Exception:
-                            pass
-            import app.services.skill_service as skill_module
-            planner_result_raw = await asyncio.to_thread(skill_module.SkillService.execute_skill, db, user_id, "qa_agent_planner", context)
+            planner_result_raw = await asyncio.to_thread(SkillService.execute_skill, db, user_id, "qa_agent_planner", context)
             
             try:
                 plan = _extract_json(planner_result_raw)
@@ -252,15 +515,18 @@ class AgentService:
                         "e2eSteps": []
                     }
                 }]
-
             normalized_nodes = []
             card_data = {}
+            screenshot_b64 = snapshot_info.get("screenshot")
             
             for idx, n in enumerate(raw_nodes):
                 node_id = str(n.get("id") or f"node_{idx + 1}")
                 ndata = n.get("data", {})
                 if not isinstance(ndata, dict):
                     ndata = {}
+                
+                if screenshot_b64:
+                    ndata["screenshot"] = screenshot_b64
                 
                 raw_card_entry = (
                     raw_card_data.get(node_id)
@@ -325,12 +591,20 @@ class AgentService:
                             words = [w for w in re.sub(r"[^a-zA-Z0-9\s]", "", step_name).split() if len(w) > 3 and w.lower() not in ["clicar", "botao", "passo", "fazer", "elemento"]]
                             if words:
                                 kw = words[-1]
-                                selector = f"button:has-text('{kw}'), a:has-text('{kw}')"
+                                selector = f"button:has-text('{kw}'), [role='button']:has-text('{kw}'), a:has-text('{kw}')"
                             else:
-                                selector = "button, a"
+                                selector = "button[type='submit'], [role='button'], button"
                         elif norm_type == "type":
                             if not selector:
-                                selector = "input:not([type='hidden']), textarea"
+                                s_lower = step_name.lower()
+                                if "email" in s_lower:
+                                    selector = "input[type='email'], input[name*='email'], [data-testid*='email']"
+                                elif "senh" in s_lower or "pass" in s_lower:
+                                    selector = "input[type='password'], input[name*='password']"
+                                elif "busc" in s_lower or "search" in s_lower:
+                                    selector = "input[type='search'], input[name*='search'], input[placeholder*='Buscar' i]"
+                                else:
+                                    selector = "input:not([type='hidden']), textarea"
                             if not value:
                                 combined_desc = (step_name + " " + selector).lower()
                                 if "email" in combined_desc:
@@ -347,6 +621,8 @@ class AgentService:
                             if not value:
                                 value = step_name or "success"
 
+                        locator_strategy = "testId" if "data-testid" in selector else ("role" if ("role=" in selector or ":has-text" in selector or "[role=" in selector) else "css")
+
                         normalized_step = {
                             "id": s_id,
                             "name": step_name,
@@ -359,7 +635,8 @@ class AgentService:
                                 "value": value,
                                 "action": norm_type,
                                 "timeout": props.get("timeout", 5000),
-                                **{k: v for k, v in props.items() if k not in ["selector", "value", "action", "timeout"]}
+                                "locator_strategy": locator_strategy,
+                                **{k: v for k, v in props.items() if k not in ["selector", "value", "action", "timeout", "locator_strategy"]}
                             }
                         }
                         normalized_steps.append(normalized_step)
@@ -406,12 +683,13 @@ class AgentService:
                         words = [w for w in re.sub(r"[^a-zA-Z0-9\s]", "", node_name).split() if len(w) > 3 and w.lower() not in ["clicar", "botao", "passo", "fazer"]]
                         if words:
                             kw = words[-1]
-                            fallback_sel = f"button:has-text('{kw}'), a:has-text('{kw}')"
+                            fallback_sel = f"[role='button']:has-text('{kw}'), button:has-text('{kw}'), a:has-text('{kw}')"
                         else:
-                            fallback_sel = "button, a"
+                            fallback_sel = "button[type='submit'], [role='button'], button"
                         fallback_val = ""
                         step_desc = f"Clicar: {node_name}"
 
+                    loc_strat = "testId" if "data-testid" in fallback_sel else ("role" if ("role" in fallback_sel or ":has-text" in fallback_sel) else "css")
                     normalized_steps.append({
                         "id": f"{node_id}_step_1",
                         "name": step_desc,
@@ -423,7 +701,8 @@ class AgentService:
                             "selector": fallback_sel,
                             "value": fallback_val,
                             "action": fallback_type,
-                            "timeout": 5000
+                            "timeout": 5000,
+                            "locator_strategy": loc_strat
                         }
                     })
 
@@ -450,12 +729,14 @@ class AgentService:
                     "e2eSteps": normalized_steps,
                     "bddScenarios": raw_card_entry.get("bddScenarios", []),
                     "apiCalls": raw_card_entry.get("apiCalls", []),
-                    "dbQueries": raw_card_entry.get("dbQueries", [])
+                    "dbQueries": raw_card_entry.get("dbQueries", []),
+                    "screenshot": screenshot_b64
                 }
                 
             # Normalize edges
             raw_edges = plan.get("edges", [])
             normalized_edges = []
+            existing_pairs = set()
             if raw_edges:
                 for idx, e in enumerate(raw_edges):
                     edge_id = str(e.get("id") or f"edge_{idx + 1}")
@@ -467,16 +748,19 @@ class AgentService:
                             "source": source,
                             "target": target
                         })
-            else:
-                # Auto-generate sequential edges if LLM did not provide them
-                for i in range(len(normalized_nodes) - 1):
-                    src = normalized_nodes[i]["id"]
-                    tgt = normalized_nodes[i + 1]["id"]
+                        existing_pairs.add((source, target))
+
+            # Ensure all sequential nodes are connected if not already linked
+            for i in range(len(normalized_nodes) - 1):
+                src = normalized_nodes[i]["id"]
+                tgt = normalized_nodes[i + 1]["id"]
+                if (src, tgt) not in existing_pairs:
                     normalized_edges.append({
                         "id": f"edge_{src}_{tgt}",
                         "source": src,
                         "target": tgt
                     })
+                    existing_pairs.add((src, tgt))
                     
             return {
                 "name": plan.get("name", f"Fluxo Playwright - {target_url}"),
@@ -486,7 +770,9 @@ class AgentService:
                 "cardData": card_data,
                 "start_mode": start_mode,
                 "start_node_id": start_node_id,
-                "mcp_status": snapshot_info.get("status", "unknown")
+                "mcp_status": snapshot_info.get("status", "unknown"),
+                "screenshot": screenshot_b64,
+                "node_enhancements": node_enhancements
             }
                 
         except Exception as e:
@@ -575,17 +861,7 @@ class AgentService:
             "mcp_snapshot": _prune_mcp_snapshot(mcp_snapshot, max_chars=12000)
         }
         
-        if not os.getenv("PYTEST_CURRENT_TEST"):
-            import sys
-            import importlib
-            for m in ['app.services.analysis_service', 'app.services.skill_service']:
-                if m in sys.modules:
-                    try:
-                        importlib.reload(sys.modules[m])
-                    except Exception:
-                        pass
-        import app.services.skill_service as skill_module
-        healer_result_raw = await asyncio.to_thread(skill_module.SkillService.execute_skill, db, user_id, "qa_agent_healer", context)
+        healer_result_raw = await asyncio.to_thread(SkillService.execute_skill, db, user_id, "qa_agent_healer", context)
         
         try:
             result = _extract_json(healer_result_raw)

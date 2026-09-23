@@ -3,13 +3,16 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.analysis_service import AnalysisService
 from typing import Optional, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class AssertionRequest(BaseModel):
-    status: int
-    headers: Dict[str, Any]
-    body: Any
-    mode: Optional[str] = "ai" # 'ai' or 'contract'
+    status: Optional[int] = 200
+    headers: Optional[Any] = None
+    body: Optional[Any] = None
+    schema_: Optional[Any] = Field(default=None, alias="schema")
+    mode: Optional[str] = "smart" # 'smart', 'ai' or 'contract'
+
+    model_config = {"populate_by_name": True}
 
 router = APIRouter(prefix="/analysis", tags=["AI Insights"])
 
@@ -110,7 +113,25 @@ def generate_assertions(
     """
     Generates assertion suggestions based on the provided API response.
     """
-    return AnalysisService.generate_assertions(db, current_user.id, req.dict())
+    raw_dict = req.model_dump(by_alias=True) if hasattr(req, "model_dump") else req.dict(by_alias=True)
+    headers = raw_dict.get("headers")
+    if isinstance(headers, list):
+        normalized_headers = {}
+        for h in headers:
+            if isinstance(h, dict):
+                k = h.get("key") or h.get("name")
+                if k:
+                    normalized_headers[str(k)] = h.get("value", "")
+        raw_dict["headers"] = normalized_headers
+    elif not isinstance(headers, dict):
+        raw_dict["headers"] = {}
+
+    try:
+        raw_dict["status"] = int(raw_dict.get("status") or 200)
+    except (ValueError, TypeError):
+        raw_dict["status"] = 200
+
+    return AnalysisService.generate_assertions(db, current_user.id, raw_dict)
 
 class GenerateFlowRequest(BaseModel):
     prompt: str

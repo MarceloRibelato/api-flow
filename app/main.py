@@ -73,6 +73,8 @@ async def lifespan(app: FastAPI):
                 try:
                     with engine.begin() as conn:
                         conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS db_queries JSON DEFAULT '[]'::json;"))
+                        conn.execute(text("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS is_manual BOOLEAN DEFAULT FALSE;"))
+                        conn.execute(text("UPDATE schedules SET is_manual = TRUE WHERE cron_expression IS NULL AND (name LIKE '%Suite%' OR name LIKE '%E2E%' OR name LIKE '%API%' OR name LIKE '%[PIPELINE]%');"))
                 except Exception as e:
                     logger.info(f"Erro db_queries: {e}")
                 
@@ -381,10 +383,17 @@ app = FastAPI(
 
 # Configuração Middlewares
 allowed_origins = settings.ALLOWED_ORIGINS.split(",") if settings.ALLOWED_ORIGINS else ["*"]
-allowed_origins.append("http://localhost:8080")
+for extra in [
+    "http://localhost", "http://localhost:80", "http://localhost:5173", "http://localhost:3000", "http://localhost:8080",
+    "http://127.0.0.1", "http://127.0.0.1:80", "http://127.0.0.1:5173", "http://127.0.0.1:3000", "http://127.0.0.1:8080"
+]:
+    if extra not in allowed_origins:
+        allowed_origins.append(extra)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|172\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -441,8 +450,8 @@ app.include_router(environment_router)
 app.include_router(environment_router, prefix="/api")
 app.include_router(variable_router)
 app.include_router(variable_router, prefix="/api")
-app.include_router(schedule_router, prefix="/schedules")
-app.include_router(schedule_router, prefix="/api/schedules")
+app.include_router(schedule_router, prefix="/agendamentos")
+app.include_router(schedule_router, prefix="/api/agendamentos")
 app.include_router(capture_router)
 app.include_router(capture_router, prefix="/api")
 app.include_router(analysis_router)

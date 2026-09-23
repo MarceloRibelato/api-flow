@@ -115,6 +115,33 @@ def test_generate_assertions_contract(client, db_session):
     assert "name" in schema["properties"]
     assert schema["properties"]["email"]["format"] == "email"
 
+def test_generate_assertions_contract_with_dangling_refs(client, db_session):
+    token = get_auth_token_and_admin(client, db_session, "contract_user_refs")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    payload = {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": {"id": 1, "category": {"id": 10, "name": "Dogs"}},
+        "mode": "contract",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer"},
+                "category": {"$ref": "#/components/schemas/Category"}
+            }
+        }
+    }
+
+    response = client.post("/analysis/assertions", headers=headers, json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["operator"] == "json_schema"
+    schema = json.loads(data[0]["target"])
+    assert "$ref" not in schema["properties"]["category"]
+    assert schema["properties"]["category"]["type"] == "object"
+
 @patch('app.services.analysis_service.requests.post')
 def test_analyze_with_ai_openai(mock_post, client, db_session):
     token = get_auth_token_and_admin(client, db_session, "ai_user_openai")
@@ -182,3 +209,46 @@ def test_analyze_with_ai_anthropic(mock_post, client, db_session):
     ai_suggestions = [r for r in data if r["type"] == "optimization"]
     assert len(ai_suggestions) == 1
     assert ai_suggestions[0]["message"] == "Cache It"
+
+def test_generate_smart_rules_rich_payload(client, db_session):
+    token = get_auth_token_and_admin(client, db_session, "rich_rules_user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    payload = {
+        "status": 201,
+        "headers": {"Content-Type": "application/json; charset=utf-8"},
+        "body": {
+            "id": 101,
+            "pet_id": 42,
+            "name": "Rex",
+            "email": "owner@example.com",
+            "status": "success",
+            "message": "Operação concluída com sucesso para pet"
+        },
+        "mode": "smart"
+    }
+
+    response = client.post("/analysis/assertions", headers=headers, json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Status code assertion
+    assert any(a["source"] == "statusCode" and a["operator"] == "equals" and a["target"] == 201 for a in data)
+    
+    # Response time SLA assertion
+    assert any(a["source"] == "responseTime" and a["operator"] == "less_than" for a in data)
+
+    # Name assertion has exact value Rex
+    assert any(a["property"] == "name" and a["operator"] == "equals" and a["target"] == "Rex" for a in data)
+
+    # Status assertion has exact value success
+    assert any(a["property"] == "status" and a["operator"] == "equals" and a["target"] == "success" for a in data)
+
+    # ID assertion is either greater_than 0 or is_not_null (never empty string equals)
+    assert any(a["property"] == "id" and a["operator"] in ("greater_than", "is_not_null") for a in data)
+
+    # No assertion with operator equals should have empty or null target
+    for a in data:
+        if a["operator"] == "equals":
+            assert a["target"] not in (None, "", "null", "None")
+

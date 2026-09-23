@@ -512,7 +512,286 @@ def test_planner_infers_selectors_and_values_for_incomplete_steps(client, db_ses
         assert "teste@exemplo.com" in steps[1]["value"]
         # Assert should have body selector
         assert steps[2]["selector"] == "body"
+        # Step properties should have locator_strategy assigned
+        assert steps[0]["properties"]["locator_strategy"] in ["role", "css"]
+        assert steps[1]["properties"]["locator_strategy"] in ["testId", "css"]
 
+def test_prune_mcp_snapshot_preserves_testids_and_roles():
+    """Verifies that _prune_mcp_snapshot retains lines with data-testid, role=, and expands capacity."""
+    from app.services.agent_service import _prune_mcp_snapshot
+    
+    sample_snapshot = "\n".join([
+        "Header banner text without interaction",
+        "- button 'Submit' [data-testid='btn-submit']",
+        "- textbox 'Username' [role='textbox']",
+        "- link 'Home' [aria-label='Return to home']",
+        "Generic paragraph lorem ipsum",
+        "- input 'Email' [placeholder='name@example.com']",
+        "Footer copyright notice"
+    ])
+    
+    pruned = _prune_mcp_snapshot(sample_snapshot, max_chars=30000)
+    assert "data-testid='btn-submit'" in pruned
+    assert "role='textbox'" in pruned
+    assert "aria-label='Return to home'" in pruned
+    assert "placeholder='name@example.com'" in pruned
 
+@pytest.mark.anyio
+async def test_validate_and_refine_selector():
+    """Verifies MCPPlaywrightService.validate_and_refine_selector logic."""
+    from app.services.mcp_playwright_service import MCPPlaywrightService
+    from unittest.mock import MagicMock, AsyncMock
 
+    mock_page = MagicMock()
 
+    # 1. Unique selector test
+    unique_loc = MagicMock()
+    unique_loc.count = AsyncMock(return_value=1)
+    
+    # 2. Multiple selector test
+    mult_loc = MagicMock()
+    mult_loc.count = AsyncMock(return_value=3)
+    
+    # 3. None test
+    none_loc = MagicMock()
+    none_loc.count = AsyncMock(return_value=0)
+
+    def loc_side_effect(sel):
+        if sel == "#unique-btn":
+            return unique_loc
+        elif sel == "button.duplicate":
+            return mult_loc
+        return none_loc
+
+    mock_page.locator = MagicMock(side_effect=loc_side_effect)
+
+    res_unique = await MCPPlaywrightService.validate_and_refine_selector(mock_page, "#unique-btn")
+    assert res_unique["valid"] is True
+    assert res_unique["uniqueness"] == "unique"
+    assert res_unique["count"] == 1
+
+    res_mult = await MCPPlaywrightService.validate_and_refine_selector(mock_page, "button.duplicate")
+    assert res_mult["valid"] is True
+    assert res_mult["uniqueness"] in ["multiple", "unique"]
+    assert res_mult["count"] >= 1
+
+    res_none = await MCPPlaywrightService.validate_and_refine_selector(mock_page, "#not-found")
+    assert res_none["valid"] is False
+    assert res_none["uniqueness"] == "none"
+
+def test_planner_returns_screenshot_and_accepts_auth_context(client, db_session):
+    """Verifies that planner returns screenshot evidence and accepts storage_state/cookies."""
+    token = get_auth_token_and_admin(client, db_session, "auth_planner_user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    mock_llm_json = {
+        "name": "Auth Flow",
+        "flow_type": "web",
+        "nodes": [
+            {
+                "id": "node_auth_1",
+                "type": "custom",
+                "data": {
+                    "name": "Dashboard Autenticado",
+                    "nodeType": "web",
+                    "e2eSteps": [
+                        {"type": "assert", "name": "Validar Perfil", "selector": "[data-testid='user-profile']", "value": "Admin"}
+                    ]
+                }
+            }
+        ],
+        "edges": []
+    }
+
+    mock_screenshot = "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
+
+    with patch("app.services.mcp_playwright_service.MCPPlaywrightService.navigate_and_snapshot", new_callable=AsyncMock) as mock_nav, \
+         patch("app.services.skill_service.SkillService.execute_skill") as mock_skill:
+
+        mock_nav.return_value = {
+            "status": "connected",
+            "snapshot": "- button 'Logout' [data-testid='btn-logout']",
+            "screenshot": mock_screenshot
+        }
+        mock_skill.return_value = json.dumps(mock_llm_json)
+
+        payload = {
+            "url": "https://example.com/dashboard",
+            "start_mode": "scratch",
+            "storage_state": {"cookies": [{"name": "session", "value": "xyz"}]},
+            "cookies": [{"name": "auth_token", "value": "token_123", "domain": "example.com", "path": "/"}],
+            "headers": {"X-Custom-Auth": "True"}
+        }
+
+        response = client.post("/agent/planner", headers=headers, json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["screenshot"] == mock_screenshot
+        assert data["nodes"][0]["data"]["screenshot"] == mock_screenshot
+        assert data["cardData"]["node_auth_1"]["screenshot"] == mock_screenshot
+
+def test_planner_generates_multi_card_modular_flow(client, db_session):
+    """Verifies that planner accepts and normalizes 3-5 modular cards with connected sequential edges."""
+    token = get_auth_token_and_admin(client, db_session, "multi_card_user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    mock_llm_json = {
+        "name": "Jornada E2E de Compra",
+        "flow_type": "web",
+        "nodes": [
+            {
+                "id": "node_1",
+                "type": "custom",
+                "data": {
+                    "name": "1. Selecionar Produto",
+                    "nodeType": "web",
+                    "e2eSteps": [
+                        {"type": "click", "name": "Clicar no Produto", "selector": "a:has-text('Camisa')"}
+                    ]
+                }
+            },
+            {
+                "id": "node_2",
+                "type": "custom",
+                "data": {
+                    "name": "2. Preencher Dados e Quantidade",
+                    "nodeType": "web",
+                    "e2eSteps": [
+                        {"type": "type", "name": "Digitar Quantidade", "selector": "input[name='quantity']", "value": "2"}
+                    ]
+                }
+            },
+            {
+                "id": "node_3",
+                "type": "custom",
+                "data": {
+                    "name": "3. Submissão e Validação",
+                    "nodeType": "web",
+                    "e2eSteps": [
+                        {"type": "click", "name": "Adicionar ao Carrinho", "selector": "button:has-text('Adicionar')"},
+                        {"type": "assert", "name": "Validar Feedback", "selector": ".toast-success", "value": "sucesso"}
+                    ]
+                }
+            }
+        ],
+        "edges": [
+            {"id": "edge_1_2", "source": "node_1", "target": "node_2"}
+            # edge_2_3 omitted deliberately to test auto-completion of sequential edges!
+        ]
+    }
+
+    with patch("app.services.mcp_playwright_service.MCPPlaywrightService.navigate_and_snapshot", new_callable=AsyncMock) as mock_nav, \
+         patch("app.services.skill_service.SkillService.execute_skill") as mock_skill:
+
+        mock_nav.return_value = {
+            "status": "connected",
+            "snapshot": "- link 'Camisa' [ref=1]\n- textbox 'Quantity' [ref=2]\n- button 'Adicionar' [ref=3]"
+        }
+        mock_skill.return_value = json.dumps(mock_llm_json)
+
+        payload = {
+            "url": "https://loja.exemplo.com",
+            "start_mode": "scratch",
+            "instruction": "Fluxo de compra completo com múltiplos cards"
+        }
+
+        response = client.post("/agent/planner", headers=headers, json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert len(data["nodes"]) == 3
+        assert len(data["edges"]) == 2  # edge_1_2 and auto-generated edge_node_2_node_3
+        assert "cardData" in data
+        assert "node_1" in data["cardData"]
+        assert "node_2" in data["cardData"]
+        assert "node_3" in data["cardData"]
+
+        # Card 1 assertions
+        assert data["nodes"][0]["data"]["name"] == "1. Selecionar Produto"
+        assert data["nodes"][0]["position"]["x"] == 100
+
+        # Card 2 assertions
+        assert data["nodes"][1]["data"]["name"] == "2. Preencher Dados e Quantidade"
+        assert data["nodes"][1]["position"]["x"] == 380
+
+        # Card 3 assertions
+        assert data["nodes"][2]["data"]["name"] == "3. Submissão e Validação"
+        assert data["nodes"][2]["position"]["x"] == 660
+        assert len(data["nodes"][2]["data"]["e2eSteps"]) == 2
+        assert data["nodes"][2]["data"]["e2eSteps"][1]["type"] == "assert"
+
+def test_planner_executes_full_flow_and_audits_nodes(client, db_session):
+    """Verifies that in from_existing mode with nodes, planner executes full flow and returns node_enhancements."""
+    token = get_auth_token_and_admin(client, db_session, "audit_planner_user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    mock_llm_json = {
+        "name": "Jornada Auditada",
+        "flow_type": "web",
+        "nodes": [
+            {
+                "id": "node_new_1",
+                "type": "custom",
+                "data": {
+                    "name": "Próxima Etapa",
+                    "nodeType": "web",
+                    "e2eSteps": [{"type": "click", "name": "Finalizar Pedido", "selector": "button#checkout"}]
+                }
+            }
+        ],
+        "edges": []
+    }
+
+    with patch("app.services.mcp_playwright_service.MCPPlaywrightService.replay_flow_and_audit_nodes", new_callable=AsyncMock) as mock_audit, \
+         patch("app.services.skill_service.SkillService.execute_skill") as mock_skill:
+
+        mock_audit.return_value = {
+            "url": "https://example.com/checkout",
+            "status": "connected",
+            "snapshot": "- button 'Finalizar Pedido' [id='checkout']",
+            "screenshot": "data:image/jpeg;base64,audit_screenshot",
+            "node_enhancements": [
+                {
+                    "node_id": "node_1",
+                    "node_name": "Selecionar Item",
+                    "current_steps_count": 1,
+                    "has_assertions": False,
+                    "suggested_tests": [
+                        {
+                            "id": "node_1_assert_feedback",
+                            "name": "Validar feedback visual",
+                            "type": "assert",
+                            "action": "assert",
+                            "selector": "[role='status']",
+                            "value": "sucesso"
+                        }
+                    ],
+                    "reasons": ["Detectado feedback na tela após ação sem asserção correspondente no card."]
+                }
+            ]
+        }
+        mock_skill.return_value = json.dumps(mock_llm_json)
+
+        payload = {
+            "url": "https://example.com/shop",
+            "start_mode": "from_existing",
+            "existing_flow_context": {
+                "target_url": "https://example.com/shop",
+                "nodes": [
+                    {
+                        "id": "node_1",
+                        "name": "Selecionar Item",
+                        "steps": [{"type": "click", "name": "Clicar Item", "selector": "button#item"}]
+                    }
+                ]
+            }
+        }
+
+        response = client.post("/agent/planner", headers=headers, json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert "node_enhancements" in data
+        assert len(data["node_enhancements"]) == 1
+        assert data["node_enhancements"][0]["node_id"] == "node_1"
+        assert len(data["node_enhancements"][0]["suggested_tests"]) == 1
+        assert data["node_enhancements"][0]["suggested_tests"][0]["type"] == "assert"

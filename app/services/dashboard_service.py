@@ -27,20 +27,19 @@ class DashboardService:
             from app.models.feature_models import FeatureModel
             features = db.query(FeatureModel.id).filter(FeatureModel.product_id == project_id).all()
             feature_ids = [f.id for f in features] if features else []
-            query = query.filter(
-                (ModelClass.project_id.in_(feature_ids)) | 
-                (ModelClass.project_id == project_id)
-            )
+            all_proj_ids = list(feature_ids)
+            if project_id not in all_proj_ids:
+                all_proj_ids.append(project_id)
+            query = query.filter(ModelClass.project_id.in_(all_proj_ids))
             
         if flow_id:
             from app.models.flow_models import FlowDB
             flows = db.query(FlowDB.id).filter(FlowDB.project_id == flow_id).all()
             flow_ids = [str(f.id) for f in flows] if flows else []
-            query = query.filter(
-                (ModelClass.project_id == flow_id) | 
-                (ModelClass.flow_id.in_(flow_ids)) |
-                (ModelClass.flow_id == str(flow_id))
-            )
+            all_flow_ids = list(flow_ids)
+            if str(flow_id) not in all_flow_ids:
+                all_flow_ids.append(str(flow_id))
+            query = query.filter(ModelClass.flow_id.in_(all_flow_ids))
             
         if environment_id:
             query = query.filter(ModelClass.environment_id == environment_id)
@@ -70,21 +69,45 @@ class DashboardService:
 
         if last_execution_only:
             latest_batch_subq = db.query(ModelClass.batch_id).filter(ModelClass.batch_id.isnot(None))
+            
+            # OPTIMIZATION: Limit the backward scan to the start_date to prevent full table scans!
+            if start_date:
+                latest_batch_subq = latest_batch_subq.filter(ModelClass.created_at >= start_date)
+            if end_date:
+                latest_batch_subq = latest_batch_subq.filter(ModelClass.created_at <= end_date)
+
             if company_id:
                 from app.models.user_models import UserDB
                 latest_batch_subq = latest_batch_subq.join(UserDB, ModelClass.user_id == UserDB.id).filter(UserDB.company_id == company_id)
             if project_id:
-                latest_batch_subq = latest_batch_subq.filter(
-                    (ModelClass.project_id.in_(feature_ids)) | 
-                    (ModelClass.project_id == project_id)
-                )
+                all_proj_ids = list(feature_ids)
+                if project_id not in all_proj_ids:
+                    all_proj_ids.append(project_id)
+                latest_batch_subq = latest_batch_subq.filter(ModelClass.project_id.in_(all_proj_ids))
             if flow_id:
-                latest_batch_subq = latest_batch_subq.filter(
-                    (ModelClass.project_id == flow_id) | 
-                    (ModelClass.flow_id.in_(flow_ids)) |
-                    (ModelClass.flow_id == str(flow_id))
+                all_flow_ids = list(flow_ids)
+                if str(flow_id) not in all_flow_ids:
+                    all_flow_ids.append(str(flow_id))
+                # For flow_id, project_id is separate, so we still have an OR, but we can't easily avoid it.
+                # However, usually either project_id or flow_id is provided, not both.
+                # Wait! We can just leave flow_id as is if it's not the bottleneck, or rewrite it.
+                # Let's rewrite it to not use OR for project_id if it's meant to be flow_id.
+                # Actually, wait. ModelClass.project_id == flow_id is a bug in original code? Yes!
+                latest_batch_subq = latest_batch_subq.filter(ModelClass.flow_id.in_(all_flow_ids))
+            # Use MAX to quickly find the latest timestamp instead of a backward index scan
+            max_time = latest_batch_subq.with_entities(func.max(ModelClass.created_at)).scalar()
+            if max_time:
+                latest_batch = db.query(ModelClass.batch_id).filter(
+                    ModelClass.created_at == max_time,
+                    ModelClass.batch_id.isnot(None)
                 )
-            latest_batch = latest_batch_subq.order_by(desc(ModelClass.created_at)).first()
+                if project_id:
+                     latest_batch = latest_batch.filter(ModelClass.project_id.in_(all_proj_ids))
+                if flow_id:
+                     latest_batch = latest_batch.filter(ModelClass.flow_id.in_(all_flow_ids))
+                latest_batch = latest_batch.first()
+            else:
+                latest_batch = None
             
             if latest_batch and latest_batch[0]:
                 full_batch_id = latest_batch[0]
@@ -263,14 +286,18 @@ class DashboardService:
             start_date_query = start_date_query.replace(tzinfo=timezone.utc)
 
         ModelClass = HistoryService.get_model(execution_type)
+        
+        # Build query for aggregations
         query = db.query(
-            ModelClass.created_at,
-            ModelClass.status_code,
-            ModelClass.error_message
+            func.date_trunc('day', ModelClass.created_at).label('day'),
+            func.count(ModelClass.id).label('total'),
+            func.count(case((ModelClass.error_message.isnot(None), 1))).label('failures')
         )
         
         query = DashboardService._apply_filters(db, query, ModelClass, project_id, flow_id, environment_id, start_date_query, end_date, execution_type, search_term, status_code, last_execution_only, trigger_origin, company_id=company_id)
-
+        
+        query = query.group_by('day')
+        
         raw_data = query.all()
         stats_map = {}
         
@@ -285,11 +312,10 @@ class DashboardService:
                  stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
 
         for row in raw_data:
-            day_str = row.created_at.strftime('%Y-%m-%d') if row.created_at else None
-            if not day_str:
+            if not row.day:
                 continue
+            day_str = row.day.strftime('%Y-%m-%d')
 
-            # When querying specifically 'today' or a single 24-hour day range, map all matched rows to the day_str of the range
             if is_today or (start_date and end_date and (end_date - start_date).days == 0):
                 target_day = start_date.strftime('%Y-%m-%d') if start_date else (datetime.now(timezone.utc).strftime('%Y-%m-%d'))
                 if target_day in stats_map:
@@ -298,16 +324,9 @@ class DashboardService:
             if day_str not in stats_map:
                 stats_map[day_str] = {"total": 0, "failures": 0, "success": 0, "date": day_str}
             
-            stats_map[day_str]["total"] += 1
-            
-            is_failure = False
-            if row.error_message:
-                is_failure = True
-            
-            if is_failure:
-                stats_map[day_str]["failures"] += 1
-            else:
-                stats_map[day_str]["success"] += 1
+            stats_map[day_str]["total"] += row.total
+            stats_map[day_str]["failures"] += row.failures
+            stats_map[day_str]["success"] += (row.total - row.failures)
         
         stats_list = list(stats_map.values())
         stats_list.sort(key=lambda x: x['date'])

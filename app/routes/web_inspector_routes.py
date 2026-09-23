@@ -1,11 +1,14 @@
 import traceback
-from fastapi import APIRouter, HTTPException, Body, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Body, WebSocket, WebSocketDisconnect, Depends, Query, status
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import logging
 import uuid
 import json
+from jose import jwt, JWTError
 
+from app.auth import get_current_user, SECRET_KEY, ALGORITHM
+from app.models.user_models import UserDB
 from app.services.web_inspector_service import WebInspectorService
 
 logger = logging.getLogger(__name__)
@@ -17,7 +20,29 @@ class SessionStartPayload(BaseModel):
     steps: Optional[List[Dict[str, Any]]] = None
 
 @router.websocket("/session/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
+async def websocket_endpoint(websocket: WebSocket, session_id: str, token: Optional[str] = Query(None)):
+    # Validate JWT token if provided in query string
+    ws_user_id = None
+    if token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            username: str = payload.get("sub")
+            if not username:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+            from app.database import SessionLocal
+            from app.models.user_models import UserDB
+            db = SessionLocal()
+            try:
+                user = db.query(UserDB).filter(UserDB.username == username).first()
+                if user:
+                    ws_user_id = user.id
+            finally:
+                db.close()
+        except Exception:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
     await websocket.accept()
     logger.info(f"🟢 [WebSocket] Client connected to session {session_id}")
     
@@ -86,7 +111,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 
                 elif action_type == "ai-autocorrect":
                     failed_step = payload.get("failed_step", {})
-                    result = await WebInspectorService.ai_analyze_full_tree_and_correct(session_id, failed_step)
+                    result = await WebInspectorService.ai_analyze_full_tree_and_correct(session_id, failed_step, user_id=ws_user_id)
                     await websocket.send_json({"messageId": message_id, "success": True, "data": result})
                 
                 else:
@@ -116,13 +141,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             pass
 
 @router.post("/session/start")
-async def start_web_session(payload: SessionStartPayload = None, initial_url: str = None, session_id: str = None):
+async def start_web_session(payload: SessionStartPayload = None, initial_url: str = None, session_id: str = None, current_user: UserDB = Depends(get_current_user)):
     """Starts a live web session."""
     final_session_id = session_id or (payload.session_id if payload else None) or str(uuid.uuid4())
     try:
         import base64
         steps = payload.steps if payload else None
-        snapshot, image_bytes = await WebInspectorService.start_session(final_session_id, initial_url, steps=steps)
+        snapshot, image_bytes = await WebInspectorService.start_session(final_session_id, initial_url, steps=steps, user_id=current_user.id)
         if image_bytes:
             snapshot["image_b64"] = base64.b64encode(image_bytes).decode("utf-8")
         return {"session_id": final_session_id, **snapshot}
@@ -133,12 +158,12 @@ async def start_web_session(payload: SessionStartPayload = None, initial_url: st
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/session/{session_id}/progress")
-async def get_web_session_progress(session_id: str):
+async def get_web_session_progress(session_id: str, current_user: UserDB = Depends(get_current_user)):
     """Returns the real-time execution progress of step replay for a web session."""
     return WebInspectorService.get_progress(session_id)
 
 @router.delete("/session/{session_id}")
-async def stop_web_session(session_id: str):
+async def stop_web_session(session_id: str, current_user: UserDB = Depends(get_current_user)):
     """Stops the web session."""
     try:
         await WebInspectorService.stop_session(session_id)
@@ -149,39 +174,51 @@ async def stop_web_session(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/session/{session_id}/snapshot")
-async def get_snapshot(session_id: str):
+async def get_snapshot(session_id: str, current_user: UserDB = Depends(get_current_user)):
     """Gets current browser snapshot."""
     try:
-        return await WebInspectorService.get_snapshot(session_id)
+        snapshot, image_bytes = await WebInspectorService.get_snapshot(session_id)
+        if image_bytes:
+            import base64
+            snapshot["image_b64"] = base64.b64encode(image_bytes).decode("utf-8")
+        return snapshot
     except Exception as e:
         logger.error(f"Failed to get web snapshot: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/session/{session_id}/resize")
-async def resize_session(session_id: str, payload: dict):
+async def resize_session(session_id: str, payload: dict, current_user: UserDB = Depends(get_current_user)):
     """Resizes the browser viewport."""
     try:
         width = payload.get("width", 1280)
         height = payload.get("height", 720)
-        return await WebInspectorService.resize_session(session_id, width, height)
+        snapshot, image_bytes = await WebInspectorService.resize_session(session_id, width, height)
+        if image_bytes:
+            import base64
+            snapshot["image_b64"] = base64.b64encode(image_bytes).decode("utf-8")
+        return snapshot
     except Exception as e:
         logger.error(f"Resize session failed: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/session/{session_id}/interact")
-async def interact(session_id: str, action: dict, skip_tree: bool = False):
+async def interact(session_id: str, action: dict, skip_tree: bool = False, current_user: UserDB = Depends(get_current_user)):
     """Executes a web interaction."""
     try:
-        return await WebInspectorService.interact(session_id, action, skip_tree=skip_tree)
+        res, image_bytes = await WebInspectorService.interact(session_id, action, skip_tree=skip_tree)
+        if image_bytes:
+            import base64
+            res["image_b64"] = base64.b64encode(image_bytes).decode("utf-8")
+        return res
     except Exception as e:
         logger.error(f"Web interaction failed: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/session/{session_id}/test-selector")
-async def test_selector(session_id: str, payload: dict):
+async def test_selector(session_id: str, payload: dict, current_user: UserDB = Depends(get_current_user)):
     """Tests a custom selector and returns the bounding box."""
     try:
         selector = payload.get("selector")
@@ -195,7 +232,7 @@ async def test_selector(session_id: str, payload: dict):
         return {"success": False, "error": str(e)}
 
 @router.post("/session/{session_id}/generate-selectors")
-async def generate_selectors(session_id: str, payload: dict):
+async def generate_selectors(session_id: str, payload: dict, current_user: UserDB = Depends(get_current_user)):
     """Finds an element by text or lwsId and generates semantic selectors for it."""
     try:
         text = payload.get("text")
@@ -211,13 +248,13 @@ async def generate_selectors(session_id: str, payload: dict):
         return {"success": False, "error": str(e)}
 
 @router.post("/session/{session_id}/ai-autocorrect")
-async def ai_autocorrect_step(session_id: str, payload: dict):
+async def ai_autocorrect_step(session_id: str, payload: dict, current_user: UserDB = Depends(get_current_user)):
     """
     Analyzes the full DOM tree for a failed step using AI/smart heuristics and returns the optimal component selector.
     """
     try:
         failed_step = payload.get("failed_step", {})
-        result = await WebInspectorService.ai_analyze_full_tree_and_correct(session_id, failed_step)
+        result = await WebInspectorService.ai_analyze_full_tree_and_correct(session_id, failed_step, user_id=current_user.id)
         return result
     except Exception as e:
         logger.error(f"AI AutoCorrect endpoint failed: {e}", exc_info=True)

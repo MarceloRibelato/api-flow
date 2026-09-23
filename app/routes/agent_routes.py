@@ -7,7 +7,7 @@ from app.models.user_models import UserDB
 from app.models.agent_models import AgentSettingsDB
 from app.schemas.agent_schemas import AgentSettingsUpdate, AgentSettingsResponse
 from app.services.agent_service import AgentService
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel
 from app.services.mcp_playwright_service import MCPPlaywrightService
 import os
@@ -21,6 +21,9 @@ class PlannerRequest(BaseModel):
     existing_flow_context: Optional[Dict[str, Any]] = None
     instruction: Optional[str] = None
     start_node_id: Optional[str] = None
+    storage_state: Optional[Dict[str, Any]] = None
+    cookies: Optional[List[Dict[str, Any]]] = None
+    headers: Optional[Dict[str, str]] = None
 
 class HealerRequest(BaseModel):
     flow_id: int
@@ -37,15 +40,6 @@ async def get_mcp_status(
     current_user: UserDB = Depends(get_current_user)
 ):
     """Returns the current connection status to the Playwright MCP server."""
-    if not os.getenv("PYTEST_CURRENT_TEST"):
-        import sys
-        import importlib
-        if 'app.services.mcp_playwright_service' in sys.modules:
-            try:
-                importlib.reload(sys.modules['app.services.mcp_playwright_service'])
-            except Exception as e:
-                logger.warning(f"Could not reload mcp_playwright_service: {e}")
-    from app.services.mcp_playwright_service import MCPPlaywrightService
     return await MCPPlaywrightService.get_mcp_status()
 
 @router.get("/settings", response_model=AgentSettingsResponse)
@@ -68,17 +62,7 @@ async def run_planner(
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
-    """Runs the AI Planner Agent via MCP."""
-    if not os.getenv("PYTEST_CURRENT_TEST"):
-        import sys
-        import importlib
-        for mod in ['app.services.skill_service', 'app.services.analysis_service', 'app.services.mcp_playwright_service', 'app.services.agent_service']:
-            if mod in sys.modules:
-                try:
-                    importlib.reload(sys.modules[mod])
-                except Exception:
-                    pass
-    from app.services.agent_service import AgentService
+    logger.info(f"POST /agent/planner invoked by user {current_user.id} (mode={req.start_mode}, url='{req.url}')")
     try:
         plan = await AgentService.run_planner(
             db=db, 
@@ -87,12 +71,23 @@ async def run_planner(
             start_mode=req.start_mode or "scratch",
             existing_flow_context=req.existing_flow_context,
             instruction=req.instruction,
-            start_node_id=req.start_node_id
+            start_node_id=req.start_node_id,
+            storage_state=req.storage_state,
+            cookies=req.cookies,
+            headers=req.headers
         )
+        node_count = len(plan.get("nodes", [])) if isinstance(plan, dict) else 0
+        logger.info(f"POST /agent/planner completed successfully for user {current_user.id}: {node_count} nodes returned")
         return plan
     except Exception as e:
         logger.error(f"Error in Planner route: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "error": f"Planner failed: {str(e)}",
+            "nodes": [],
+            "edges": [],
+            "cardData": {},
+            "node_enhancements": []
+        }
 
 @router.post("/healer")
 async def run_healer(
@@ -101,15 +96,6 @@ async def run_healer(
     current_user: UserDB = Depends(get_current_user)
 ):
     """Runs the AI Healer Agent via MCP."""
-    if not os.getenv("PYTEST_CURRENT_TEST"):
-        import sys
-        import importlib
-        for mod in ['app.services.skill_service', 'app.services.analysis_service', 'app.services.mcp_playwright_service', 'app.services.agent_service']:
-            if mod in sys.modules:
-                try:
-                    importlib.reload(sys.modules[mod])
-                except Exception:
-                    pass
     try:
         fix = await AgentService.run_healer(
             db=db,

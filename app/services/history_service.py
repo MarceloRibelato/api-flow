@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, time, timedelta, timezone
-from typing import Optional
+from typing import Optional, Union
 
 from sqlalchemy import distinct, func, case
 from sqlalchemy.orm import Session
@@ -238,7 +238,7 @@ class HistoryService:
         limit: int = 20,
         api_id: Optional[int] = None,
         project_id: Optional[int] = None,
-        flow_id: Optional[int] = None,
+        flow_id: Optional[Union[int, str]] = None,
         environment_id: Optional[int] = None,
         schedule_id: Optional[int] = None,
         start_date: Optional[datetime] = None,
@@ -372,7 +372,7 @@ class HistoryService:
         page: int = 1,
         limit: int = 10,
         project_id: Optional[int] = None,
-        flow_id: Optional[int] = None,
+        flow_id: Optional[Union[int, str]] = None,
         schedule_type: Optional[str] = None,
         execution_type: Optional[str] = None
     ):
@@ -589,7 +589,7 @@ class HistoryService:
         return 0
 
     @staticmethod
-    def get_history_averages(db: Session, schedule_id: Optional[int] = None, flow_id: Optional[int] = None, api_id: Optional[int] = None, execution_type: Optional[str] = None):
+    def get_history_averages(db: Session, schedule_id: Optional[int] = None, flow_id: Optional[Union[int, str]] = None, api_id: Optional[int] = None, execution_type: Optional[str] = None):
         if not any([schedule_id, flow_id, api_id]):
             return []
 

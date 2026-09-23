@@ -196,6 +196,7 @@ def execute_cicd(
         status='active',
         company_id=current_user.company_id,
         user_id=current_user.id,
+        is_manual=True,
         flow_type=req.flow_type or 'api',
         virtual_users=req.virtual_users if req.flow_type == 'performance' else None,
         duration_seconds=req.duration_seconds if req.flow_type == 'performance' else None,

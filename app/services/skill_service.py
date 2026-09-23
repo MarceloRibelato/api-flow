@@ -237,7 +237,7 @@ class SkillService:
         current_prompt = prompt
         
         for attempt in range(max_retries + 1):
-            result = AnalysisService._call_llm(db, user_id, current_prompt, temperature=0.1, flow_id=flow_id, chat_history=current_history)
+            result = AnalysisService._call_llm(db, user_id, current_prompt, temperature=0.1, flow_id=flow_id, chat_history=current_history, timeout=300)
             
             if not result:
                 raise ValueError(f"LLM failed to return a result for skill '{skill_id}'.")

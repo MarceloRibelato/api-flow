@@ -132,17 +132,18 @@ def evaluate_all_assertions(assertions: list, resp_status: int, resp_headers: di
 
 def _compare_numeric(actual: int, target: int, op: str) -> bool:
     """Compares two numeric values based on operator string."""
-    if op in ['equals', 'eq', '==', 'is']:
+    op_lower = op.lower() if op else ""
+    if op_lower in ['equals', 'eq', '==', 'is']:
         return actual == target
-    elif op in ['notequals', 'neq', '!=']:
+    elif op_lower in ['notequals', 'neq', '!=', 'not_equals']:
         return actual != target
-    elif op in ['gt', 'greaterthan', '>']:
+    elif op_lower in ['gt', 'greaterthan', 'greater_than', '>']:
         return actual > target
-    elif op in ['lt', 'lessthan', '<']:
+    elif op_lower in ['lt', 'lessthan', 'less_than', '<']:
         return actual < target
-    elif op in ['gte', '>=']:
+    elif op_lower in ['gte', '>=']:
         return actual >= target
-    elif op in ['lte', '<=']:
+    elif op_lower in ['lte', '<=']:
         return actual <= target
     return False
 
@@ -159,9 +160,9 @@ def _compare_string(actual: str, target: str, op: str, raw_actual: Any = None) -
         return target in actual
     elif op_lower in ['notcontains', 'not_contains', 'not_in']:
         return target not in actual
-    elif op_lower in ['exists', 'not_null']:
+    elif op_lower in ['exists', 'not_null', 'is_not_null']:
         return raw_actual is not None
-    elif op_lower in ['notexists', 'not_exists', 'is_null']:
+    elif op_lower in ['notexists', 'not_exists', 'is_null', 'null']:
         return raw_actual is None
     elif op_lower == 'istype':
         if raw_actual is None: return str(target).lower() == 'null'
@@ -211,7 +212,7 @@ def _evaluate_body_assertion(op: str, prop: str, target: Any, resp_json: Any) ->
     """
     op_lower = str(op).lower()
     
-    if op_lower in ['exists', 'not_null']:
+    if op_lower in ['exists', 'not_null', 'is_not_null']:
         if not prop:
             is_success = resp_json is not None
             actual_val = "Body Received" if is_success else None
@@ -221,7 +222,7 @@ def _evaluate_body_assertion(op: str, prop: str, target: Any, resp_json: Any) ->
             actual_val = str(actual_val) if is_success else None
         return is_success, actual_val
         
-    if op_lower in ['notexists', 'not_exists', 'is_null']:
+    if op_lower in ['notexists', 'not_exists', 'is_null', 'null']:
         if not prop:
             is_success = resp_json is None
             actual_val = None
@@ -251,11 +252,11 @@ def _evaluate_body_assertion(op: str, prop: str, target: Any, resp_json: Any) ->
         is_success = str_tar in str_act
     elif op_lower in ['notcontains', 'not_contains', 'not_in']:
         is_success = str_tar not in str_act
-    elif op_lower in ['greaterthan', 'gt', '>']:
+    elif op_lower in ['greaterthan', 'greater_than', 'gt', '>']:
         try:
             is_success = float(actual_val) > float(target)
         except (ValueError, TypeError): pass
-    elif op_lower in ['lessthan', 'lt', '<']:
+    elif op_lower in ['lessthan', 'less_than', 'lt', '<']:
         try:
             is_success = float(actual_val) < float(target)
         except (ValueError, TypeError): pass
