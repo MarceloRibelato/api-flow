@@ -95,6 +95,7 @@ def get_history_batches(
     flow_id: Optional[Union[int, str]] = None,
     schedule_type: Optional[str] = None,
     execution_type: Optional[str] = Query(None, pattern="^(api|web|mobile)$"),
+    exclude_api: bool = Query(False),
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
@@ -108,7 +109,8 @@ def get_history_batches(
             project_id=project_id,
             flow_id=flow_id,
             schedule_type=schedule_type,
-            execution_type=execution_type
+            execution_type=execution_type,
+            exclude_api=exclude_api
         )
     except Exception as e:
         import logging

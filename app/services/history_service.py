@@ -374,7 +374,8 @@ class HistoryService:
         project_id: Optional[int] = None,
         flow_id: Optional[Union[int, str]] = None,
         schedule_type: Optional[str] = None,
-        execution_type: Optional[str] = None
+        execution_type: Optional[str] = None,
+        exclude_api: bool = False
     ):
         from app.models.user_models import UserDB
         from app.models.schedule_models import ScheduleModel
@@ -401,6 +402,17 @@ class HistoryService:
             UserDB.company_id == company_id,
             ModelClass.batch_id != None
         )
+
+        if exclude_api:
+            from sqlalchemy import not_, or_, and_
+            methods = ['GET %', 'POST %', 'PUT %', 'PATCH %', 'DELETE %', 'HEAD %', 'OPTIONS %']
+            api_conditions = []
+            if hasattr(ModelClass, 'api_name'):
+                api_conditions.append(or_(*[ModelClass.api_name.like(m) for m in methods]))
+            if hasattr(ModelClass, 'url'):
+                api_conditions.append(or_(*[ModelClass.url.like(m) for m in methods]))
+            if api_conditions:
+                query = query.filter(not_(or_(*api_conditions)))
 
         if schedule_type is not None:
             query = query.join(ScheduleModel, ModelClass.schedule_id == ScheduleModel.id).filter(
