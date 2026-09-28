@@ -11,6 +11,8 @@ class Environment(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
     project_id = Column(BigInteger, nullable=False, index=True)
+    suite_id = Column(String(100), nullable=True, index=True)
+    base_url = Column(String(255), nullable=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())

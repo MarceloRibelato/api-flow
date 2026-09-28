@@ -124,10 +124,30 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/profile")
-def get_profile(current_user: UserDB = Depends(get_current_user)):
+def get_profile(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Retorna o perfil do usuário logado.
     """
+    license_plan = "basic"
+    license_expires = None
+    try:
+        from app.models.company_models import CompanyDB
+        import os
+        from jose import jwt
+        
+        company = db.query(CompanyDB).filter(CompanyDB.id == current_user.company_id).first()
+        if company and company.license_key:
+            public_key_path = os.path.join(os.path.dirname(__file__), "..", "public_key.pem")
+            if os.path.exists(public_key_path):
+                with open(public_key_path, "rb") as pub_f:
+                    pub_key = pub_f.read()
+                payload = jwt.decode(company.license_key, pub_key, algorithms=["RS256"])
+                license_plan = payload.get("plan", "basic")
+                license_expires = payload.get("exp")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Error decoding license for profile: {e}")
+
     return {
         "id": current_user.id,
         "username": current_user.username,
@@ -139,6 +159,8 @@ def get_profile(current_user: UserDB = Depends(get_current_user)):
         "role": current_user.role,
         "cnpj": current_user.cnpj,
         "phone": current_user.phone,
+        "license_plan": license_plan,
+        "license_expires": license_expires
     }
 
 
@@ -200,3 +222,25 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
         return {"msg": "Senha redefinida com sucesso."}
     except ValueError as e:
         raise DomainValidationError(detail=str(e))
+
+
+
+from pydantic import BaseModel
+class LicenseKeyReq(BaseModel):
+    key: str
+
+@router.post("/update_license")
+def update_license(req: LicenseKeyReq, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        from app.models.company_models import CompanyDB
+        company = db.query(CompanyDB).filter(CompanyDB.id == current_user.company_id).first()
+        if not company:
+            return {"error": "Company not found"}
+            
+        company.license_key = req.key
+        db.commit()
+        return {"success": True, "message": "License updated successfully"}
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Error updating license: {e}")
+        return {"error": str(e)}

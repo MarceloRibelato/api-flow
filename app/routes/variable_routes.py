@@ -20,10 +20,11 @@ def get_variables(
     project_id: int,
     flow_id: Optional[int] = None,
     environment_id: Optional[int] = None,
+    suite_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
-    vars = VariableService.get_all(db, project_id, environment_id)
+    vars = VariableService.get_all(db, project_id, environment_id, suite_id)
     return vars
 
 
@@ -124,10 +125,11 @@ def delete_variable_by_name(
     name: str,
     project_id: int,
     environment_id: Optional[int] = None,
+    suite_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-    success = VariableService.delete_by_name(db, name, project_id, environment_id)
+    success = VariableService.delete_by_name(db, name, project_id, environment_id, suite_id)
     if not success:
         return {"message": "Variable not found (idempotent)"}
 

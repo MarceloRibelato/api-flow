@@ -5,6 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.mock_models import ServiceMockDB, MockRuleDB, MockLogDB
+from app.models.company_models import CompanyDB
+from app.models.user_models import UserDB
+from app.auth import get_current_user
+from jose import jwt
 from app.models.product_models import ProductModel
 from app.services.mock_service import MockExecutionEngine
 from app.services.mock_import_service import MockImportService
@@ -56,8 +60,25 @@ def list_project_mocks(project_id: int, db: Session = Depends(get_db)):
 
 @router.post("/v1/projects/{project_id}/mocks")
 @router.post("/projects/{project_id}/mocks")
-def create_mock_server(project_id: int, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db)):
+def create_mock_server(project_id: int, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
     """Cria um novo servidor de mock no projeto."""
+    company = db.query(CompanyDB).filter(CompanyDB.id == current_user.company_id).first()
+    max_mocks = 2 # Basic default
+    if company and company.license_key:
+        try:
+            with open("public_key.pem", "rb") as key_file:
+                pub_key = key_file.read()
+            token_payload = jwt.decode(company.license_key, pub_key, algorithms=["RS256"])
+            max_mocks = token_payload.get("max_mocks", 2)
+            if token_payload.get("plan") == "enterprise":
+                max_mocks = 999
+        except Exception:
+            pass
+
+    current_mocks_count = db.query(ServiceMockDB).join(ProductModel, ServiceMockDB.product_id == ProductModel.id).filter(ProductModel.company_id == current_user.company_id).count()
+    if current_mocks_count >= max_mocks:
+        raise HTTPException(status_code=402, detail="Mock limit reached for your current plan. Please upgrade to Enterprise.")
+
     # Garantir que project_id é um produto existente
     product = db.query(ProductModel).filter(ProductModel.id == project_id).first()
     if not product:
@@ -91,7 +112,9 @@ def create_mock_server(project_id: int, payload: Dict[str, Any] = Body(...), db:
         "slug": mock.slug,
         "is_active": mock.is_active,
         "target_url": mock.target_url,
-        "enable_proxy": mock.enable_proxy
+        "enable_proxy": mock.enable_proxy,
+        "force_real_api": mock.force_real_api,
+        "real_first_fallback_mock": mock.real_first_fallback_mock
     }
 
 
@@ -131,6 +154,8 @@ def get_mock_details(mock_id: int, db: Session = Depends(get_db)):
         "is_active": mock.is_active,
         "target_url": mock.target_url,
         "enable_proxy": mock.enable_proxy,
+        "force_real_api": mock.force_real_api,
+        "real_first_fallback_mock": mock.real_first_fallback_mock,
         "rules": rules
     }
 
@@ -155,6 +180,19 @@ def update_mock_server(mock_id: int, payload: Dict[str, Any] = Body(...), db: Se
         mock.target_url = payload["target_url"]
     if "enable_proxy" in payload:
         mock.enable_proxy = bool(payload["enable_proxy"])
+        mock.force_real_api = bool(payload.get("force_real_api", False))
+        mock.real_first_fallback_mock = bool(payload.get("real_first_fallback_mock", False))
+    if "slug" in payload:
+        # Prevent empty slug
+        new_slug = payload["slug"].strip().lower()
+        new_slug = re.sub(r'[^a-z0-9-_]', '-', new_slug)
+        if new_slug:
+            # Check for uniqueness
+            from sqlalchemy import or_
+            existing = db.query(ServiceMockDB).filter(ServiceMockDB.slug == new_slug, ServiceMockDB.id != mock_id).first()
+            if existing:
+                raise HTTPException(status_code=400, detail="Slug already in use")
+            mock.slug = new_slug
 
     db.commit()
     db.refresh(mock)
@@ -166,7 +204,9 @@ def update_mock_server(mock_id: int, payload: Dict[str, Any] = Body(...), db: Se
         "description": mock.description,
         "is_active": mock.is_active,
         "target_url": mock.target_url,
-        "enable_proxy": mock.enable_proxy
+        "enable_proxy": mock.enable_proxy,
+        "force_real_api": mock.force_real_api,
+        "real_first_fallback_mock": mock.real_first_fallback_mock
     }
 
 

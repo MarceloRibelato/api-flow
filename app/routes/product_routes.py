@@ -66,8 +66,32 @@ def create_product(
     """
     Criar um novo produto para a empresa.
     """
+
     if current_user.role == 'viewer':
          raise HTTPException(status_code=403, detail="Sem permissão para criar produtos")
+         
+    # Check max projects limit based on license
+    from app.models.company_models import CompanyDB
+    from app.models.product_models import ProductModel
+    from jose import jwt
+    
+    company = db.query(CompanyDB).filter(CompanyDB.id == current_user.company_id).first()
+    max_projects = 2 # Basic default
+    if company and company.license_key:
+        try:
+            with open("public_key.pem", "rb") as key_file:
+                pub_key = key_file.read()
+            payload = jwt.decode(company.license_key, pub_key, algorithms=["RS256"])
+            max_projects = payload.get("max_projects", 2)
+            if payload.get("plan") == "enterprise":
+                max_projects = 999
+        except Exception:
+            pass
+            
+    current_projects_count = db.query(ProductModel).filter(ProductModel.company_id == current_user.company_id).count()
+    if current_projects_count >= max_projects:
+        raise HTTPException(status_code=402, detail="Project limit reached for your current plan. Please upgrade to Enterprise.")
+
          
     created = ProductService.create(db, product, company_id=current_user.company_id)
     AuditService.log_action(

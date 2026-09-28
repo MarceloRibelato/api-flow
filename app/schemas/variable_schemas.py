@@ -15,6 +15,7 @@ class VariableCreate(BaseModel):
     project_id: int
     flow_id: Optional[int] = None
     environment_id: Optional[int] = None
+    suite_id: Optional[str] = None
     api_id: Optional[int] = Field(default=None, alias="apiId")
     json_path: Optional[str] = Field(default=None, alias="jsonPath")
 

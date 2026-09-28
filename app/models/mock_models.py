@@ -16,6 +16,8 @@ class ServiceMockDB(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     target_url = Column(String(500), nullable=True)
     enable_proxy = Column(Boolean, default=False, nullable=False)
+    force_real_api = Column(Boolean, default=False, nullable=False)
+    real_first_fallback_mock = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

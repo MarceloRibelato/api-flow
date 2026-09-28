@@ -7,8 +7,13 @@ from app.schemas.environment_schemas import EnvironmentCreate
 
 class EnvironmentService:
     @staticmethod
-    def get_by_project(db: Session, project_id: int):
-        return db.query(Environment).filter(Environment.project_id == project_id).all()
+    def get_by_project(db: Session, project_id: int, suite_id: str = None):
+        query = db.query(Environment).filter(Environment.project_id == project_id)
+        if suite_id:
+            query = query.filter(Environment.suite_id == suite_id)
+        else:
+            query = query.filter((Environment.suite_id == None) | (Environment.suite_id == ""))
+        return query.all()
 
     @staticmethod
     def get_by_id(db: Session, env_id: int):
@@ -17,7 +22,7 @@ class EnvironmentService:
     @staticmethod
     def create(db: Session, env: EnvironmentCreate):
         # 1. Create the new environment
-        db_env = Environment(name=env.name, project_id=env.project_id)
+        db_env = Environment(name=env.name, project_id=env.project_id, suite_id=env.suite_id)
         db.add(db_env)
         db.commit()
         db.refresh(db_env)
@@ -58,3 +63,14 @@ class EnvironmentService:
             db.commit()
             return True
         return False
+
+    @staticmethod
+    def update(db: Session, env_id: int, update_data: dict):
+        db_env = db.query(Environment).filter(Environment.id == env_id).first()
+        if db_env:
+            for key, value in update_data.items():
+                if hasattr(db_env, key):
+                    setattr(db_env, key, value)
+            db.commit()
+            db.refresh(db_env)
+        return db_env

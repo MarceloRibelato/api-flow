@@ -9,13 +9,18 @@ from app.schemas.variable_schemas import VariableCreate
 
 class VariableService:
     @staticmethod
-    def get_all(db: Session, project_id: int, environment_id: Optional[int] = None):
+    def get_all(db: Session, project_id: int, environment_id: Optional[int] = None, suite_id: Optional[str] = None):
         query = db.query(Variable).filter(Variable.project_id == project_id)
 
         if environment_id is not None:
             query = query.filter(Variable.environment_id == environment_id)
         else:
             query = query.filter(Variable.environment_id == None)
+
+        if suite_id:
+            query = query.filter(Variable.suite_id == suite_id)
+        else:
+            query = query.filter((Variable.suite_id == None) | (Variable.suite_id == ""))
 
         return query.all()
 
@@ -29,15 +34,17 @@ class VariableService:
         if var.name:
             var.name = var.name.strip().upper()
 
-        existing = (
-            db.query(Variable)
-            .filter(
-                Variable.name == var.name,
-                Variable.project_id == var.project_id,
-                Variable.environment_id == var.environment_id,
-            )
-            .first()
+        query = db.query(Variable).filter(
+            Variable.name == var.name,
+            Variable.project_id == var.project_id,
+            Variable.environment_id == var.environment_id,
         )
+        if var.suite_id:
+            query = query.filter(Variable.suite_id == var.suite_id)
+        else:
+            query = query.filter((Variable.suite_id == None) | (Variable.suite_id == ""))
+
+        existing = query.first()
 
         if existing:
             existing.value = var.value
@@ -61,6 +68,7 @@ class VariableService:
                 environment_id=var.environment_id,
                 api_id=var.api_id,
                 json_path=var.json_path,
+                suite_id=var.suite_id,
             )
             db.add(db_var)
             db.commit()
@@ -85,6 +93,7 @@ class VariableService:
             db_var.project_id = var_data.project_id
             db_var.flow_id = var_data.flow_id
             db_var.environment_id = var_data.environment_id
+            db_var.suite_id = var_data.suite_id
             
             # Explicitly touch updated_at to ensure sort order changes
             db_var.updated_at = func.now()
@@ -113,7 +122,7 @@ class VariableService:
 
     @staticmethod
     def delete_by_name(
-        db: Session, name: str, project_id: int, environment_id: Optional[int] = None
+        db: Session, name: str, project_id: int, environment_id: Optional[int] = None, suite_id: Optional[str] = None
     ):
         query = db.query(Variable).filter(
             Variable.name == name, Variable.project_id == project_id
@@ -123,6 +132,11 @@ class VariableService:
             query = query.filter(Variable.environment_id == environment_id)
         else:
             query = query.filter(Variable.environment_id == None)
+
+        if suite_id:
+            query = query.filter(Variable.suite_id == suite_id)
+        else:
+            query = query.filter((Variable.suite_id == None) | (Variable.suite_id == ""))
 
         db_var = query.first()
 

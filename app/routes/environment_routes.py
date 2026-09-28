@@ -20,12 +20,13 @@ from typing import List, Optional
 @router.get("/environments", response_model=List[EnvironmentResponse])
 def get_environments(
     project_id: Optional[int] = None, 
+    suite_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
     if project_id is None:
         return []
-    return EnvironmentService.get_by_project(db, project_id)
+    return EnvironmentService.get_by_project(db, project_id, suite_id)
 
 
 @router.post("/environments", response_model=EnvironmentResponse)
@@ -48,3 +49,17 @@ def delete_environment(
         raise HTTPException(status_code=404, detail="Environment not found")
 
     return {"message": "Deleted successfully"}
+
+from app.schemas.environment_schemas import EnvironmentUpdate
+
+@router.put("/environments/{env_id}", response_model=EnvironmentResponse)
+def update_environment(
+    env_id: int, 
+    env_update: EnvironmentUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    updated = EnvironmentService.update(db, env_id, env_update.model_dump(exclude_unset=True))
+    if not updated:
+        raise HTTPException(status_code=404, detail="Environment not found")
+    return updated

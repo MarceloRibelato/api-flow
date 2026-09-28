@@ -66,6 +66,21 @@ async def lifespan(app: FastAPI):
             # Step 1: Create missing tables via SQL Alchemy
             Base.metadata.create_all(bind=engine)
             logger.info("Tabelas verificadas/criadas via metadata sqlalchemy")
+            # AUTO-MIGRATE: Add mock columns
+            try:
+                with engine.begin() as conn:
+                    from sqlalchemy import text
+                    conn.execute(text("ALTER TABLE service_mocks ADD COLUMN force_real_api BOOLEAN DEFAULT FALSE NOT NULL;"))
+            except Exception as e:
+                pass
+            try:
+                with engine.begin() as conn:
+                    from sqlalchemy import text
+                    conn.execute(text("ALTER TABLE service_mocks ADD COLUMN real_first_fallback_mock BOOLEAN DEFAULT FALSE NOT NULL;"))
+            except Exception as e:
+                pass
+
+
             
             # Step 1.5: Adicionar colunas novas e reparar partições (PostgreSQL only)
             from sqlalchemy import text
@@ -74,6 +89,7 @@ async def lifespan(app: FastAPI):
                     with engine.begin() as conn:
                         conn.execute(text("ALTER TABLE flow_card_data ADD COLUMN IF NOT EXISTS db_queries JSON DEFAULT '[]'::json;"))
                         conn.execute(text("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS is_manual BOOLEAN DEFAULT FALSE;"))
+                        conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS license_key TEXT;"))
                         conn.execute(text("UPDATE schedules SET is_manual = TRUE WHERE cron_expression IS NULL AND (name LIKE '%Suite%' OR name LIKE '%E2E%' OR name LIKE '%API%' OR name LIKE '%[PIPELINE]%');"))
                 except Exception as e:
                     logger.info(f"Erro db_queries: {e}")
@@ -359,6 +375,9 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"⚠️ Falha ao validar licença no servidor: HTTP {resp.status_code}")
         except Exception as e:
             logger.warning(f"⚠️ Não foi possível conectar ao Gerenciador de Licenças: {e}")
+
+    
+    
 
     yield
     

@@ -16,6 +16,7 @@ class CompanyDB(Base):
     retention_days = Column(Integer, default=360, nullable=True) # Days before permanently deleting execution history & videos
     history_retention_days = Column(Integer, nullable=True) # Deprecated
     history_archive_retention_days = Column(Integer, nullable=True) # Deprecated
+    license_key = Column(String(1000), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships

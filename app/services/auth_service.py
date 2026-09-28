@@ -89,11 +89,35 @@ class AuthService:
                 company_name = user.company.strip() if user.company else f"Empresa {cnpj_clean}"
                 new_company = CompanyDB(
                     name=company_name,
-                    cnpj=cnpj_clean # Assign CNPJ to company
+                    cnpj=cnpj_clean
                 )
                 db.add(new_company)
-                db.flush() # Get ID
+                db.flush()
                 company_id = new_company.id
+                
+                # Fetch offline license for new company
+                try:
+                    import requests, time
+                    from app.config import settings
+                    manager_url = settings.LICENSE_MANAGER_URL or "http://flow-license-manager:8001"
+                    exp_timestamp = int(time.time()) + (365 * 24 * 60 * 60) # 1 year
+                    payload = {
+                        "company_id": company_id,
+                        "company_name": company_name,
+                        "cnpj": cnpj_clean,
+                        "plan": "basic",
+                        "max_projects": 2,
+                        "allowed_flows": ["api", "web"],
+                        "expires_at_timestamp": exp_timestamp
+                    }
+                    resp = requests.post(f"{manager_url.rstrip('/')}/api/licenses/offline", json=payload, timeout=3)
+                    if resp.status_code == 200:
+                        new_company.license_key = resp.json().get("license_key")
+                        db.flush()
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Could not generate offline license for company {company_id}: {e}")
+
         
         # Enforce Terms Acceptance
         if not user.accepted_terms:

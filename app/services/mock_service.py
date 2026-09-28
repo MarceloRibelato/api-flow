@@ -723,27 +723,30 @@ class MockExecutionEngine:
         }
 
         # 1. Encontrar Regra de Match
-        matched_rule, path_params = cls.match_rule(mock.rules, method, path, headers, query_params, body_text, raw_url=raw_url)
-        if path_params:
-            request_data["path_params"] = path_params
+        matched_rule = None
+        path_params = None
         is_proxied = False
-
-        if matched_rule:
-            status_code = matched_rule.response_status
-            resp_headers = matched_rule.response_headers or {"Content-Type": "application/json"}
-            raw_body = matched_rule.response_body or ""
-            delay_ms = matched_rule.delay_ms or 0
-            rule_id = matched_rule.id
-        elif getattr(mock, "enable_proxy", False) and getattr(mock, "target_url", None) and mock.target_url.strip():
-            # INTEGRAÇÃO COM API REAL / PROXY REVERSO:
-            # Quando a proxy está ativada e não há regra mock correspondente, repassar a chamada para a API Real
+        status_code = None
+        resp_headers = None
+        raw_body = None
+        delay_ms = 0
+        rule_id = None
+        
+        has_proxy_config = getattr(mock, "enable_proxy", False) and getattr(mock, "target_url", None) and mock.target_url.strip()
+        force_proxy = getattr(mock, "force_real_api", False) and has_proxy_config
+        real_first_fallback_mock = getattr(mock, "real_first_fallback_mock", False) and has_proxy_config
+        
+        proxy_failed = False
+        
+        # Helper to execute proxy
+        async def do_proxy():
+            nonlocal status_code, resp_headers, raw_body, is_proxied, delay_ms, rule_id, proxy_failed
             target_base = mock.target_url.strip().rstrip("/")
             path_clean = ("/" + path.lstrip("/")) if path else ""
             forward_url = f"{target_base}{path_clean}"
             if query_str:
                 forward_url = f"{forward_url}?{query_str}"
 
-            # Limpar cabeçalhos hop-by-hop para não quebrar a requisição upstream
             forward_headers = {k: v for k, v in headers.items() if k.lower() not in ("host", "content-length", "connection")}
 
             try:
@@ -763,7 +766,10 @@ class MockExecutionEngine:
                     is_proxied = True
                     delay_ms = 0
                     rule_id = None
+                    if status_code >= 500:
+                        proxy_failed = True
             except Exception as exc:
+                proxy_failed = True
                 status_code = 502
                 resp_headers = {"Content-Type": "application/json"}
                 raw_body = json.dumps({
@@ -775,7 +781,28 @@ class MockExecutionEngine:
                 is_proxied = True
                 delay_ms = 0
                 rule_id = None
-        else:
+
+        if real_first_fallback_mock:
+            await do_proxy()
+            if proxy_failed:
+                matched_rule, path_params = cls.match_rule(mock.rules, method, path, headers, query_params, body_text, raw_url=raw_url)
+                if matched_rule:
+                    is_proxied = False  # Switch back to mock since proxy failed
+        elif not force_proxy:
+            matched_rule, path_params = cls.match_rule(mock.rules, method, path, headers, query_params, body_text, raw_url=raw_url)
+
+        if path_params:
+            request_data["path_params"] = path_params
+
+        if matched_rule and (not real_first_fallback_mock or proxy_failed):
+            status_code = matched_rule.response_status
+            resp_headers = matched_rule.response_headers or {"Content-Type": "application/json"}
+            raw_body = matched_rule.response_body or ""
+            delay_ms = matched_rule.delay_ms or 0
+            rule_id = matched_rule.id
+        elif force_proxy or (has_proxy_config and not real_first_fallback_mock):
+            await do_proxy()
+        elif status_code is None:
             # ESTRATÉGIA DEFAULT: SE NENHUMA REGRA ESPECÍFICA FOR ATENDIDA -> RETORNA 200 OK SUCESSO!
             status_code = 200
             resp_headers = {"Content-Type": "application/json"}
