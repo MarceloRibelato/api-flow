@@ -233,6 +233,7 @@ async def import_mock_spec(
     request: Request,
     import_type: Optional[str] = Form(None),
     mock_name: Optional[str] = Form(None),
+    mock_id: Optional[int] = Form(None),
     content: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db)
@@ -247,6 +248,7 @@ async def import_mock_spec(
             body_json = await request.json()
             import_type = body_json.get("import_type", "swagger")
             mock_name = body_json.get("mock_name")
+            mock_id = body_json.get("mock_id") or mock_id
             content = body_json.get("content")
         except Exception:
             pass
@@ -295,24 +297,44 @@ async def import_mock_spec(
             db.flush()
         project_id = product.id
 
-    # Criar Servidor Mock
-    name = mock_name or f"Mock {import_type.upper()} ({len(parsed_rules) // 4 if len(parsed_rules) >= 4 else 1} Endpoints)"
-    final_slug = generate_unique_mock_slug(db, f"mock-{import_type}")
-
     try:
-        mock = ServiceMockDB(
-            product_id=project_id,
-            name=name,
-            slug=final_slug,
-            description=f"Importado via {import_type.upper()} com respostas automáticas para 200, 400, 401 e 500.",
-            is_active=True
-        )
-        db.add(mock)
-        db.flush()
+        mock = None
+        if mock_id:
+            mock = db.query(ServiceMockDB).filter(ServiceMockDB.id == mock_id).first()
+        
+        is_update = bool(mock)
+
+        if not is_update:
+            # Criar Servidor Mock
+            name = mock_name or f"Mock {import_type.upper()} ({len(parsed_rules) // 4 if len(parsed_rules) >= 4 else 1} Endpoints)"
+            final_slug = generate_unique_mock_slug(db, f"mock-{import_type}")
+            mock = ServiceMockDB(
+                product_id=project_id,
+                name=name,
+                slug=final_slug,
+                description=f"Importado via {import_type.upper()} com respostas automáticas para 200, 400, 401 e 500.",
+                is_active=True
+            )
+            db.add(mock)
+            db.flush()
+
+        # Obter regras existentes caso seja update
+        existing_signatures = set()
+        if is_update:
+            existing_rules = db.query(MockRuleDB).filter(MockRuleDB.mock_id == mock.id).all()
+            for er in existing_rules:
+                # Assinatura: method + path + status
+                existing_signatures.add(f"{er.method}_{er.path_pattern}_{er.response_status}")
 
         # Adicionar regras geradas
         created_rule_count = 0
+        endpoints_added = set()
+        
         for r in parsed_rules:
+            sig = f"{r['method']}_{r['path_pattern']}_{r['response_status']}"
+            if is_update and sig in existing_signatures:
+                continue
+                
             rule_db = MockRuleDB(
                 mock_id=mock.id,
                 name=r["name"],
@@ -330,6 +352,7 @@ async def import_mock_spec(
             )
             db.add(rule_db)
             created_rule_count += 1
+            endpoints_added.add(f"{r['method']}_{r['path_pattern']}")
 
         db.commit()
         db.refresh(mock)
@@ -337,14 +360,28 @@ async def import_mock_spec(
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Erro ao salvar mock e regras no banco de dados: {str(e)}")
 
-    return {
-        "message": "Importação concluída com sucesso!",
-        "user_guidance": "Foram geradas respostas mockadas automáticas (status 200, 400, 401, 404, 500 e 504) seguindo boas práticas. Recomendamos que você revise e ajuste o corpo dos retornos para atender às regras do seu negócio.",
-        "mock_id": mock.id,
-        "mock_slug": mock.slug,
-        "endpoints_count": len(parsed_rules) // 6 if len(parsed_rules) >= 6 else 1,
-        "rules_created": created_rule_count
-    }
+    if is_update:
+        if created_rule_count > 0:
+            msg = f"Mock atualizado com sucesso! Foram adicionadas {len(endpoints_added)} novas APIs ({created_rule_count} regras/variações) que não existiam."
+        else:
+            msg = "Nenhuma nova API foi adicionada. Todos os endpoints do arquivo já existiam no Mock Server."
+        return {
+            "message": msg,
+            "user_guidance": msg,
+            "mock_id": mock.id,
+            "mock_slug": mock.slug,
+            "endpoints_added": len(endpoints_added),
+            "rules_created": created_rule_count
+        }
+    else:
+        return {
+            "message": "Importação concluída com sucesso!",
+            "user_guidance": f"Foram importadas {len(endpoints_added)} APIs e geradas {created_rule_count} respostas mockadas automáticas seguindo boas práticas. Recomendamos que você revise e ajuste o corpo dos retornos para atender às regras do seu negócio.",
+            "mock_id": mock.id,
+            "mock_slug": mock.slug,
+            "endpoints_added": len(endpoints_added),
+            "rules_created": created_rule_count
+        }
 
 
 # ==============================================================================

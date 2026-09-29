@@ -204,16 +204,6 @@ class MockImportService:
         rules = []
         paths = spec_data.get("paths", {})
 
-        # Detectar basePath (Swagger 2.0) ou servers (OpenAPI 3.0)
-        base_path = ""
-        if spec_data.get("basePath") and spec_data.get("basePath") != "/":
-            base_path = spec_data.get("basePath").rstrip("/")
-        elif spec_data.get("servers") and isinstance(spec_data["servers"], list) and len(spec_data["servers"]) > 0:
-            server_url = spec_data["servers"][0].get("url", "")
-            path_part = re.sub(r'^https?://[^/]+', '', server_url).rstrip('/')
-            if path_part and path_part != "/":
-                base_path = path_part
-
         for path_key, methods in paths.items():
             if not isinstance(methods, dict):
                 continue
@@ -221,7 +211,10 @@ class MockImportService:
                 if method_key.lower() not in ["get", "post", "put", "delete", "patch"]:
                     continue
                 summary = details.get("summary") or details.get("operationId") or f"{method_key.upper()} {path_key}"
-                full_path_key = f"{base_path}{path_key}" if (base_path and not path_key.startswith(base_path)) else path_key
+                
+                # Use raw path_key to avoid prepending unwanted basePaths (/api/v3/pet -> /pet)
+                full_path_key = path_key
+                
                 generated_rules = cls.generate_best_practice_responses(summary, method_key.upper(), full_path_key)
                 rules.extend(generated_rules)
 
