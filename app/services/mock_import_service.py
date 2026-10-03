@@ -1,14 +1,15 @@
+from __future__ import annotations
 import json
 import re
 import shlex
 import uuid
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 
 class MockImportService:
 
     @staticmethod
-    def generate_best_practice_responses(name: str, method: str, path_pattern: str) -> List[Dict[str, Any]]:
+    def generate_best_practice_responses(name: str, method: str, path_pattern: str, custom_success_body: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Gera 4 variações automáticas de resposta para o endpoint seguindo boas práticas:
         - 200 OK / 201 Created (payload dinâmico Faker)
@@ -57,14 +58,15 @@ class MockImportService:
             }, indent=2)
 
         # Regra 1: 200 OK / 201 Created (Prioridade 1 = Resposta Padrão de Sucesso)
+        status_label = f"{success_status} OK" if success_status == 200 else f"{success_status} Created"
         rule_200 = {
-            "name": f"[200 OK] {name} - Sucesso",
+            "name": f"[{status_label}] {name} - Sucesso",
             "method": clean_method,
             "path_pattern": clean_path,
             "priority": 1,
             "response_status": success_status,
             "response_headers": {"Content-Type": "application/json"},
-            "response_body": success_body,
+            "response_body": custom_success_body if (custom_success_body is not None and str(custom_success_body).strip() != "") else success_body,
             "delay_ms": 100,
             "is_active": True
         }
@@ -199,23 +201,235 @@ class MockImportService:
         return rules
 
     @classmethod
+    def _format_body(cls, body: Any) -> Optional[str]:
+        if body is None:
+            return None
+        if isinstance(body, str):
+            try:
+                return json.dumps(json.loads(body), indent=2)
+            except Exception:
+                return body
+        try:
+            return json.dumps(body, indent=2)
+        except Exception:
+            return str(body)
+
+    @classmethod
+    def resolve_ref(cls, ref_str: str, root: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(ref_str, str) or not ref_str.startswith("#/"):
+            return None
+        parts = ref_str.lstrip("#/").split("/")
+        curr = root
+        for p in parts:
+            if isinstance(curr, dict) and p in curr:
+                curr = curr[p]
+            else:
+                return None
+        return curr
+
+    @classmethod
+    def generate_sample(cls, schema: Dict[str, Any], root: Dict[str, Any], depth: int = 0) -> Any:
+        if depth > 5 or not isinstance(schema, dict):
+            return {}
+        if "$ref" in schema:
+            resolved = cls.resolve_ref(schema["$ref"], root)
+            if resolved:
+                return cls.generate_sample(resolved, root, depth + 1)
+            return {}
+        if "example" in schema and schema["example"] is not None:
+            return schema["example"]
+        if "examples" in schema and isinstance(schema["examples"], list) and schema["examples"]:
+            return schema["examples"][0]
+
+        stype = schema.get("type")
+        if stype == "array" or "items" in schema:
+            item_schema = schema.get("items", {})
+            return [cls.generate_sample(item_schema, root, depth + 1)]
+
+        if "allOf" in schema and isinstance(schema["allOf"], list):
+            merged = {}
+            for sub in schema["allOf"]:
+                sub_sample = cls.generate_sample(sub, root, depth + 1)
+                if isinstance(sub_sample, dict):
+                    merged.update(sub_sample)
+            return merged
+
+        if stype == "object" or "properties" in schema or not stype:
+            obj = {}
+            props = schema.get("properties", {})
+            if not props and stype != "object" and "type" in schema:
+                # É um tipo primitivo
+                stype = schema.get("type")
+            else:
+                for k, prop in props.items():
+                    if isinstance(prop, dict) and "$ref" in prop:
+                        prop = cls.resolve_ref(prop["$ref"], root) or prop
+                    ptype = prop.get("type", "string") if isinstance(prop, dict) else "string"
+                    if isinstance(prop, dict) and "example" in prop and prop["example"] is not None:
+                        obj[k] = prop["example"]
+                    elif isinstance(prop, dict) and "enum" in prop and prop["enum"]:
+                        val = prop["enum"][0]
+                        obj[k] = "on" if val is True else ("off" if val is False else val)
+                    elif ptype in ["integer", "number"]:
+                        obj[k] = prop.get("minimum", 0) if isinstance(prop, dict) else 0
+                    elif ptype == "boolean":
+                        obj[k] = True
+                    elif ptype == "array" or (isinstance(prop, dict) and "items" in prop):
+                        item_schema = prop.get("items", {}) if isinstance(prop, dict) else {}
+                        obj[k] = [cls.generate_sample(item_schema, root, depth + 1)]
+                    elif ptype == "object" or (isinstance(prop, dict) and "properties" in prop):
+                        obj[k] = cls.generate_sample(prop, root, depth + 1)
+                    else:
+                        fmt = prop.get("format", "") if isinstance(prop, dict) else ""
+                        if fmt == "date-time":
+                            obj[k] = "{{timestamp}}"
+                        elif fmt == "uuid":
+                            obj[k] = "{{faker.uuid}}"
+                        elif fmt == "email":
+                            obj[k] = "{{faker.email}}"
+                        else:
+                            obj[k] = f"sample_{k}"
+                return obj
+
+        if stype in ["integer", "number"]:
+            return schema.get("minimum", 0)
+        if stype == "boolean":
+            return True
+        return "sample"
+
+    @classmethod
     def parse_swagger_spec(cls, spec_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Extrai endpoints de documentação Swagger 2.0 / OpenAPI 3.0"""
         rules = []
         paths = spec_data.get("paths", {})
+        if not isinstance(paths, dict):
+            return rules
 
         for path_key, methods in paths.items():
             if not isinstance(methods, dict):
                 continue
             for method_key, details in methods.items():
+                if not isinstance(details, dict):
+                    continue
                 if method_key.lower() not in ["get", "post", "put", "delete", "patch"]:
                     continue
                 summary = details.get("summary") or details.get("operationId") or f"{method_key.upper()} {path_key}"
-                
-                # Use raw path_key to avoid prepending unwanted basePaths (/api/v3/pet -> /pet)
+
+                custom_success_body = None
+                responses = details.get("responses", {})
+                if isinstance(responses, dict):
+                    success_codes = ["200", "201", 200, 201, "default"]
+                    for k in responses.keys():
+                        if str(k).startswith("2") and k not in success_codes:
+                            success_codes.append(k)
+
+                    for success_code in success_codes:
+                        resp_item = responses.get(success_code)
+                        if isinstance(resp_item, dict):
+                            # Resolução de $ref na resposta
+                            if "$ref" in resp_item:
+                                resp_item = cls.resolve_ref(resp_item["$ref"], spec_data) or resp_item
+
+                            # 1. Swagger 2.0 examples
+                            examples = resp_item.get("examples", {})
+                            if isinstance(examples, dict) and examples:
+                                body = examples.get("application/json") or next(iter(examples.values()), None)
+                                if body is not None:
+                                    custom_success_body = cls._format_body(body)
+                                    break
+
+                            # 2. OpenAPI 3.0 content
+                            content = resp_item.get("content", {})
+                            if isinstance(content, dict) and content:
+                                app_json = content.get("application/json") or next(iter(content.values()), {})
+                                if isinstance(app_json, dict):
+                                    if "example" in app_json and app_json["example"] is not None:
+                                        custom_success_body = cls._format_body(app_json["example"])
+                                        break
+                                    if "examples" in app_json and isinstance(app_json["examples"], dict) and app_json["examples"]:
+                                        first_ex = next(iter(app_json["examples"].values()), {})
+                                        ex_val = first_ex.get("value") if isinstance(first_ex, dict) and "value" in first_ex else first_ex
+                                        if ex_val is not None:
+                                            custom_success_body = cls._format_body(ex_val)
+                                            break
+                                    if "schema" in app_json and isinstance(app_json["schema"], dict):
+                                        sample_from_schema = cls.generate_sample(app_json["schema"], spec_data)
+                                        if sample_from_schema:
+                                            custom_success_body = json.dumps(sample_from_schema, indent=2)
+                                            break
+
+                            # 3. Direct example
+                            if "example" in resp_item and resp_item["example"] is not None:
+                                custom_success_body = cls._format_body(resp_item["example"])
+                                break
+
+                            # 4. Swagger 2.0 schema
+                            resp_schema = resp_item.get("schema")
+                            if isinstance(resp_schema, dict):
+                                sample_from_schema = cls.generate_sample(resp_schema, spec_data)
+                                if sample_from_schema:
+                                    custom_success_body = json.dumps(sample_from_schema, indent=2)
+                                    break
+
                 full_path_key = path_key
-                
-                generated_rules = cls.generate_best_practice_responses(summary, method_key.upper(), full_path_key)
+                generated_rules = cls.generate_best_practice_responses(
+                    summary,
+                    method_key.upper(),
+                    full_path_key,
+                    custom_success_body=custom_success_body
+                )
+                rules.extend(generated_rules)
+
+        return rules
+
+    @classmethod
+    def parse_asyncapi_spec(cls, spec_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extrai endpoints/canais de documentação AsyncAPI 2.x e 3.x (Kafka, RabbitMQ, WebSockets, MQTT)"""
+        rules = []
+        channels = spec_data.get("channels", {})
+        if not isinstance(channels, dict):
+            return rules
+
+        for ch_name, ch_data in channels.items():
+            if not isinstance(ch_data, dict):
+                continue
+
+            actual_address = ch_data.get("address") or ch_name
+            path_pattern = f"/{actual_address.lstrip('/')}"
+
+            operations = []
+            if "publish" in ch_data and isinstance(ch_data["publish"], dict):
+                operations.append(("POST", ch_data["publish"]))
+            if "subscribe" in ch_data and isinstance(ch_data["subscribe"], dict):
+                operations.append(("POST", ch_data["subscribe"]))
+
+            if not operations:
+                operations.append(("POST", ch_data))
+
+            for method, op_details in operations:
+                op_id = op_details.get("operationId") or op_details.get("summary") or ch_name
+                summary = op_details.get("summary") or op_id
+
+                msg = op_details.get("message", {})
+                if isinstance(msg, dict) and "$ref" in msg:
+                    msg = cls.resolve_ref(msg["$ref"], spec_data) or msg
+
+                payload_schema = msg.get("payload", {}) if isinstance(msg, dict) else {}
+                if isinstance(payload_schema, dict) and "$ref" in payload_schema:
+                    payload_schema = cls.resolve_ref(payload_schema["$ref"], spec_data) or payload_schema
+
+                sample_payload = None
+                if payload_schema:
+                    sample_dict = cls.generate_sample(payload_schema, spec_data)
+                    if sample_dict:
+                        sample_payload = json.dumps(sample_dict, indent=2)
+
+                generated_rules = cls.generate_best_practice_responses(
+                    summary,
+                    method,
+                    path_pattern,
+                    custom_success_body=sample_payload
+                )
                 rules.extend(generated_rules)
 
         return rules

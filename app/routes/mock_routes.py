@@ -263,29 +263,77 @@ async def import_mock_spec(
         raise HTTPException(status_code=400, detail="Conteúdo da especificação ausente.")
 
     parsed_rules = []
-    if import_type == "postman":
+    errors = []
+
+    # Detectar formato provável no texto
+    stripped = raw_text.strip()
+    is_curl = stripped.startswith("curl ") or stripped.startswith("curl\n") or stripped.startswith("curl\r")
+    is_swagger = "swagger:" in stripped[:250] or "openapi:" in stripped[:250] or '"swagger"' in stripped[:250] or '"openapi"' in stripped[:250] or "\npaths:" in stripped or '"paths":' in stripped
+    is_asyncapi = "asyncapi:" in stripped[:250] or '"asyncapi"' in stripped[:250] or "\nchannels:" in stripped or '"channels":' in stripped
+    is_postman = '"_postman_id"' in stripped or ('"item"' in stripped and '"info"' in stripped)
+
+    detected_type = import_type
+    if is_swagger or is_asyncapi:
+        detected_type = "swagger"
+    elif is_postman:
+        detected_type = "postman"
+    elif is_curl:
+        detected_type = "curl"
+
+    def try_parse_swagger_or_asyncapi(text):
         try:
-            data = json.loads(raw_text)
-            parsed_rules = MockImportService.parse_postman_collection(data)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Erro ao ler JSON da coleção Postman: {e}")
-    elif import_type == "swagger":
-        try:
+            data = json.loads(text)
+        except Exception:
             try:
-                data = json.loads(raw_text)
-            except Exception:
                 import yaml
-                data = yaml.safe_load(raw_text)
-            parsed_rules = MockImportService.parse_swagger_spec(data)
+            except ImportError:
+                import sys
+                sys.path.insert(0, '/app')
+                import yaml
+            data = yaml.safe_load(text)
+        if not isinstance(data, dict):
+            raise ValueError("O conteúdo não é um dicionário Swagger/OpenAPI/AsyncAPI válido.")
+        
+        if "channels" in data or "asyncapi" in data:
+            return MockImportService.parse_asyncapi_spec(data)
+        return MockImportService.parse_swagger_spec(data)
+
+    def try_parse_postman(text):
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("O conteúdo não é uma coleção Postman válida.")
+        return MockImportService.parse_postman_collection(data)
+
+    def try_parse_curl(text):
+        return MockImportService.parse_curl_command(text)
+
+    # Ordem de tentativa: tipo detectado/solicitado primeiro, depois fallbacks
+    attempts = [detected_type]
+    for fallback in ["swagger", "postman", "curl"]:
+        if fallback not in attempts:
+            attempts.append(fallback)
+
+    for attempt in attempts:
+        try:
+            if attempt == "swagger":
+                rules = try_parse_swagger_or_asyncapi(raw_text)
+            elif attempt == "postman":
+                rules = try_parse_postman(raw_text)
+            elif attempt == "curl":
+                rules = try_parse_curl(raw_text)
+            else:
+                rules = []
+
+            if rules:
+                parsed_rules = rules
+                import_type = attempt
+                break
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Erro ao ler documentação Swagger (JSON ou YAML): {e}")
-    elif import_type == "curl":
-        parsed_rules = MockImportService.parse_curl_command(raw_text)
-    else:
-        raise HTTPException(status_code=400, detail="Tipo de importação inválido. Use postman, swagger ou curl.")
+            errors.append(f"[{attempt}]: {str(e)}")
 
     if not parsed_rules:
-        raise HTTPException(status_code=400, detail="Nenhum endpoint válido foi identificado no arquivo enviado.")
+        detail_msg = f"Nenhum endpoint válido foi identificado. Erros: {'; '.join(errors)}" if errors else "Nenhum endpoint válido foi identificado no arquivo enviado."
+        raise HTTPException(status_code=400, detail=detail_msg)
 
     # Garantir que project_id corresponda a um produto válido no banco
     product = db.query(ProductModel).filter(ProductModel.id == project_id).first()

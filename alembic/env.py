@@ -18,9 +18,39 @@ if config.config_file_name is not None:
 import os
 database_url = os.environ.get("DATABASE_URL")
 if database_url:
-    # Handle possible driver naming differences (postgresql vs postgresql+psycopg2)
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
+
+    has_psycopg = False
+    try:
+        import psycopg  # noqa: F401
+        has_psycopg = True
+    except ImportError:
+        pass
+
+    has_psycopg2 = False
+    try:
+        import psycopg2  # noqa: F401
+        has_psycopg2 = True
+    except ImportError:
+        pass
+
+    if not has_psycopg and has_psycopg2:
+        if database_url.startswith("postgresql+psycopg://"):
+            database_url = database_url.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
+        elif database_url.startswith("postgresql://") and not database_url.startswith("postgresql+"):
+            database_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    elif has_psycopg and not has_psycopg2:
+        if database_url.startswith("postgresql+psycopg2://"):
+            database_url = database_url.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
+        elif database_url.startswith("postgresql://") and not database_url.startswith("postgresql+"):
+            database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    elif not has_psycopg and not has_psycopg2:
+        if database_url.startswith("postgresql+psycopg://"):
+            database_url = database_url.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
+        elif database_url.startswith("postgresql://") and not database_url.startswith("postgresql+"):
+            database_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+
     config.set_main_option("sqlalchemy.url", database_url)
 
 # add your model's MetaData object here

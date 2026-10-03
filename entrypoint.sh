@@ -10,7 +10,7 @@ if [ "$RUN_MIGRATIONS" = "true" ]; then
         echo "Aviso: alembic upgrade head falhou. Detalhes do erro:"
         cat /app/alembic_error.log
         echo "Tentando alembic stamp head..."
-        alembic -c alembic.ini stamp head
+        alembic -c alembic.ini stamp head || true
         echo "Alembic stamp head concluído."
     else
         echo "Migrações do Alembic concluídas com sucesso!"
