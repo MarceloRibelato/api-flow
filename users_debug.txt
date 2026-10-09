@@ -1,5 +1,12 @@
 [
   {
+    "id": 2,
+    "username": "testuser@gmail.com",
+    "email": "testuser@gmail.com",
+    "role": "viewer",
+    "status": "active"
+  },
+  {
     "id": 3,
     "username": "admin",
     "email": "admin@flow.com",
@@ -11,13 +18,6 @@
     "username": "mribelato@gmail.com",
     "email": "mribelato@gmail.com",
     "role": "admin",
-    "status": "active"
-  },
-  {
-    "id": 2,
-    "username": "testuser@gmail.com",
-    "email": "testuser@gmail.com",
-    "role": "viewer",
     "status": "active"
   }
 ]
