@@ -208,22 +208,30 @@ class MockExecutionEngine:
         else:
             result = re.sub(r'\{\{\s*req\.body\s*\}\}', "{}", result)
 
-        # 5. Suporte a Spread de Body: "...req.body" ou "{{...req.body}}"
+        # 5. Suporte a Spread de Body: "...req.body": true ou "...req.body" ou "{{...req.body}}"
         if isinstance(json_body, dict) and json_body:
             inner_json_items = []
             for k, v in json_body.items():
                 inner_json_items.append(f'  "{k}": {json.dumps(v, ensure_ascii=False)}')
             inner_body_str = ",\n".join(inner_json_items)
 
+            # 1. Com chave-valor válida de JSON: "...req.body": true / "...req.body": ""
+            result = re.sub(r'["\'](?:\.\.\.req\.body|\{\{\s*\.\.\.req\.body\s*\}\})["\']\s*:\s*[^,\n\}]+,?', inner_body_str + ",\n", result)
+            # 2. Sem chave-valor (sintaxe template bare): "...req.body",
             result = re.sub(r'["\'](?:\.\.\.req\.body|\{\{\s*\.\.\.req\.body\s*\}\})["\']\s*,?', inner_body_str + ",\n", result)
             result = re.sub(r',\s*["\'](?:\.\.\.req\.body|\{\{\s*\.\.\.req\.body\s*\}\})["\']', ",\n" + inner_body_str, result)
-            result = re.sub(r'["\'](?:\.\.\.req\.body|\{\{\s*\.\.\.req\.body\s*\}\})["\']\s*:\s*[^,\n\}]+,?', inner_body_str + ",\n", result)
             result = re.sub(r'\.\.\.req\.body\s*,?', inner_body_str + ",\n", result)
 
             result = re.sub(r',\s*,', ',', result)
+            result = re.sub(r'\{\s*,', '{\n', result)
             result = re.sub(r',\s*\}', '\n}', result)
         else:
+            # 1. Com chave-valor: "...req.body": true
+            result = re.sub(r'["\'](?:\.\.\.req\.body|\{\{\s*\.\.\.req\.body\s*\}\})["\']\s*:\s*[^,\n\}]+,?', '', result)
+            # 2. Sem chave-valor: "...req.body"
             result = re.sub(r'["\']?(?:\.\.\.req\.body|\{\{\s*\.\.\.req\.body\s*\}\})["\']?\s*,?', '', result)
+            result = re.sub(r',\s*,', ',', result)
+            result = re.sub(r'\{\s*,', '{\n', result)
             result = re.sub(r',\s*\}', '\n}', result)
 
         # 6. Suporte a req.body_merge(...)
@@ -766,7 +774,7 @@ class MockExecutionEngine:
                     is_proxied = True
                     delay_ms = 0
                     rule_id = None
-                    if status_code >= 500:
+                    if status_code >= 500 or status_code == 404:
                         proxy_failed = True
             except Exception as exc:
                 proxy_failed = True
@@ -786,8 +794,11 @@ class MockExecutionEngine:
             await do_proxy()
             if proxy_failed:
                 matched_rule, path_params = cls.match_rule(mock.rules, method, path, headers, query_params, body_text, raw_url=raw_url)
-                if matched_rule:
-                    is_proxied = False  # Switch back to mock since proxy failed
+                is_proxied = False  # Switch back to mock since proxy failed
+                if not matched_rule:
+                    status_code = None
+                    resp_headers = None
+                    raw_body = None
         elif not force_proxy:
             matched_rule, path_params = cls.match_rule(mock.rules, method, path, headers, query_params, body_text, raw_url=raw_url)
 

@@ -147,6 +147,7 @@ def get_mock_details(mock_id: int, db: Session = Depends(get_db)):
 
     return {
         "id": mock.id,
+        "team_id": mock.team_id,
         "product_id": mock.product_id,
         "name": mock.name,
         "slug": mock.slug,
@@ -170,6 +171,8 @@ def update_mock_server(mock_id: int, payload: Dict[str, Any] = Body(...), db: Se
     if not mock:
         raise HTTPException(status_code=404, detail="Mock Server não encontrado.")
 
+    if "team_id" in payload:
+        mock.team_id = payload["team_id"]
     if "name" in payload:
         mock.name = payload["name"]
     if "description" in payload:
@@ -226,11 +229,15 @@ def delete_mock_server(mock_id: int, db: Session = Depends(get_db)):
 # IMPORTAÇÃO DE REGRAS (Postman, Swagger, cURL)
 # ==============================================================================
 
+@router.post("/v1/teams/{team_id}/mocks/import")
+@router.post("/teams/{team_id}/mocks/import")
 @router.post("/v1/projects/{project_id}/mocks/import")
 @router.post("/projects/{project_id}/mocks/import")
 async def import_mock_spec(
-    project_id: int,
     request: Request,
+    project_id: Optional[int] = None,
+    team_id: Optional[int] = None,
+    team_id_form: Optional[int] = Form(None, alias="team_id"),
     import_type: Optional[str] = Form(None),
     mock_name: Optional[str] = Form(None),
     mock_id: Optional[int] = Form(None),
@@ -353,11 +360,18 @@ async def import_mock_spec(
         is_update = bool(mock)
 
         if not is_update:
+            # Determinar team_id e product_id
+            target_team_id = team_id or team_id_form
+            target_product_id = project_id
+            if target_team_id and not target_product_id:
+                target_product_id = target_team_id
+
             # Criar Servidor Mock
             name = mock_name or f"Mock {import_type.upper()} ({len(parsed_rules) // 4 if len(parsed_rules) >= 4 else 1} Endpoints)"
             final_slug = generate_unique_mock_slug(db, f"mock-{import_type}")
             mock = ServiceMockDB(
-                product_id=project_id,
+                team_id=target_team_id,
+                product_id=target_product_id,
                 name=name,
                 slug=final_slug,
                 description=f"Importado via {import_type.upper()} com respostas automáticas para 200, 400, 401 e 500.",

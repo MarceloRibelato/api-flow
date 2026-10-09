@@ -18,7 +18,7 @@ class VariableService:
             query = query.filter(Variable.environment_id == None)
 
         if suite_id:
-            query = query.filter(Variable.suite_id == suite_id)
+            query = query.filter((Variable.suite_id == suite_id) | (Variable.suite_id == None) | (Variable.suite_id == ""))
         else:
             query = query.filter((Variable.suite_id == None) | (Variable.suite_id == ""))
 

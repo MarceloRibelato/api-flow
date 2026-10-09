@@ -37,10 +37,12 @@ from app.routes.web_inspector_routes import router as web_inspector_router
 from app.routes.hitl_routes import router as hitl_router
 from app.routes.audit_routes import router as audit_router
 from app.routes.mock_routes import router as mock_router
+from app.routes.team_routes import router as team_router
 
 # Ensure models are loaded for create_all
 import app.models.hitl_models
 import app.models.audit_models
+import app.models.team_models
 import app.models.mock_models
 
 # ===== CONFIGURAÇÃO DE LOGGING =====
@@ -77,6 +79,18 @@ async def lifespan(app: FastAPI):
                 with engine.begin() as conn:
                     from sqlalchemy import text
                     conn.execute(text("ALTER TABLE service_mocks ADD COLUMN real_first_fallback_mock BOOLEAN DEFAULT FALSE NOT NULL;"))
+            except Exception as e:
+                pass
+            try:
+                with engine.begin() as conn:
+                    from sqlalchemy import text
+                    conn.execute(text("ALTER TABLE service_mocks ADD COLUMN IF NOT EXISTS team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE;"))
+            except Exception as e:
+                pass
+            try:
+                with engine.begin() as conn:
+                    from sqlalchemy import text
+                    conn.execute(text("ALTER TABLE service_mocks ALTER COLUMN product_id DROP NOT NULL;"))
             except Exception as e:
                 pass
 
@@ -497,6 +511,8 @@ app.include_router(audit_router)
 app.include_router(audit_router, prefix="/api")
 app.include_router(mock_router)
 app.include_router(mock_router, prefix="/api")
+app.include_router(team_router)
+app.include_router(team_router, prefix="/api")
 
 # Dashboard Router
 from app.routes.dashboard_routes import router as dashboard_router

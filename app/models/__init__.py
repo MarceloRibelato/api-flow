@@ -16,11 +16,13 @@ from app.models.auth_models import BlacklistedToken
 from app.models.service_token_models import ServiceTokenDB
 from app.models.performance_models import PerformanceTestResult
 from app.models.integration_models import ProjectIntegrationDB
+from app.models.team_models import TeamDB
 from app.models.audit_models import AuditLogDB
 
 __all__ = [
     "UserDB",
     "CompanyDB",
+    "TeamDB",
     "ProductModel",
     "FeatureModel",
     "FlowDB",

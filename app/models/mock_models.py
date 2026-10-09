@@ -9,7 +9,8 @@ class ServiceMockDB(Base):
     __tablename__ = "service_mocks"
 
     id = Column(Integer, primary_key=True, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=True, index=True)
     name = Column(String(255), nullable=False)
     slug = Column(String(100), unique=True, index=True, nullable=False)
     description = Column(Text, nullable=True)
@@ -22,6 +23,7 @@ class ServiceMockDB(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
+    team = relationship("TeamDB", back_populates="mocks", foreign_keys=[team_id])
     rules = relationship("MockRuleDB", back_populates="mock", cascade="all, delete-orphan", order_by="MockRuleDB.priority.desc()")
     logs = relationship("MockLogDB", back_populates="mock", cascade="all, delete-orphan", order_by="MockLogDB.executed_at.desc()")
 
