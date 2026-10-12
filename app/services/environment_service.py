@@ -38,9 +38,20 @@ class EnvironmentService:
             query = db.query(Variable).filter(Variable.environment_id == env.clone_from_id)
             if env.suite_id:
                 query = query.filter((Variable.suite_id == env.suite_id) | (Variable.suite_id == None) | (Variable.suite_id == ""))
-            source_vars = query.all()
+            source_vars = query.order_by(Variable.id.asc()).all()
 
+            # Deduplicate source variables by normalized name
+            deduped_source = {}
             for var in source_vars:
+                key = (var.name or "").strip().upper()
+                if not key:
+                    continue
+                if key not in deduped_source:
+                    deduped_source[key] = var
+                elif env.suite_id and var.suite_id == env.suite_id:
+                    deduped_source[key] = var
+
+            for var in deduped_source.values():
                 target_suite_id = env.suite_id if env.suite_id else var.suite_id
                 new_var = Variable(
                     name=var.name,

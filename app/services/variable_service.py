@@ -22,7 +22,24 @@ class VariableService:
         else:
             query = query.filter((Variable.suite_id == None) | (Variable.suite_id == ""))
 
-        return query.all()
+        all_vars = query.order_by(Variable.id.asc()).all()
+        # Deduplicate variables by normalized uppercase name:
+        # 1. Suite-specific variable overrides general (suite_id=None) variable
+        # 2. For same specificity, the newer variable (higher id) takes precedence
+        deduped = {}
+        for v in all_vars:
+            key = (v.name or "").strip().upper()
+            if not key:
+                continue
+            if key not in deduped:
+                deduped[key] = v
+            else:
+                existing = deduped[key]
+                if suite_id and v.suite_id == suite_id and (not existing.suite_id or existing.suite_id != suite_id):
+                    deduped[key] = v
+                elif (v.suite_id == suite_id) == (existing.suite_id == suite_id):
+                    deduped[key] = v
+        return list(deduped.values())
 
     @staticmethod
     def get_by_id(db: Session, var_id: int):
@@ -39,23 +56,25 @@ class VariableService:
             Variable.project_id == var.project_id,
             Variable.environment_id == var.environment_id,
         )
-        if var.suite_id:
-            query = query.filter(Variable.suite_id == var.suite_id)
-        else:
-            query = query.filter((Variable.suite_id == None) | (Variable.suite_id == ""))
+        existing_list = query.all()
 
-        existing = query.first()
-
-        if existing:
-            existing.value = var.value
-            existing.type = var.type
-            existing.faker_type = var.faker_type
-            existing.faker_options = var.faker_options
-            existing.json_path = var.json_path
-            existing.api_id = var.api_id
+        if existing_list:
+            target = next((x for x in existing_list if x.suite_id == var.suite_id), existing_list[0])
+            target.value = var.value
+            target.type = var.type
+            target.faker_type = var.faker_type
+            target.faker_options = var.faker_options
+            target.json_path = var.json_path
+            target.api_id = var.api_id
+            target.suite_id = var.suite_id
+            target.updated_at = func.now()
+            # Clean up any duplicate rows with the same name in this environment
+            for other in existing_list:
+                if other.id != target.id:
+                    db.delete(other)
             db.commit()
-            db.refresh(existing)
-            return existing
+            db.refresh(target)
+            return target
         else:
             db_var = Variable(
                 name=var.name,

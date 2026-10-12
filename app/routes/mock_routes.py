@@ -1,6 +1,6 @@
 import json
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body, Form, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Body, Form, UploadFile, File, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -536,7 +536,13 @@ def get_mock_logs(mock_id: int, limit: int = 50, db: Session = Depends(get_db)):
 
 @router.api_route("/v1/mock/{mock_slug}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 @router.api_route("/mock/{mock_slug}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-async def handle_mock_gateway(mock_slug: str, path: str, request: Request, db: Session = Depends(get_db)):
+async def handle_mock_gateway(
+    mock_slug: str,
+    path: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     """
     Gateway Interceptador Universal de Mocks.
     Atende qualquer requisição feita para /mock/{mock_slug}/{path} ou /v1/mock/{mock_slug}/{path}
@@ -570,7 +576,8 @@ async def handle_mock_gateway(mock_slug: str, path: str, request: Request, db: S
         query_params=query_params,
         body_text=body_text,
         client_ip=client_ip,
-        raw_url=str(request.url)
+        raw_url=str(request.url),
+        background_tasks=background_tasks
     )
 
     return Response(
