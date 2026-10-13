@@ -38,7 +38,11 @@ def generate_unique_mock_slug(db: Session, base_text: str) -> str:
 
 @router.get("/v1/projects/{project_id}/mocks")
 @router.get("/projects/{project_id}/mocks")
-def list_project_mocks(project_id: int, db: Session = Depends(get_db)):
+def list_project_mocks(
+    project_id: int, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """Lista todos os servidores mock de um determinado projeto."""
     mocks = db.query(ServiceMockDB).filter(ServiceMockDB.product_id == project_id).all()
     result = []
@@ -120,7 +124,11 @@ def create_mock_server(project_id: int, payload: Dict[str, Any] = Body(...), db:
 
 @router.get("/v1/mocks/{mock_id}")
 @router.get("/mocks/{mock_id}")
-def get_mock_details(mock_id: int, db: Session = Depends(get_db)):
+def get_mock_details(
+    mock_id: int, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """Obtém detalhes do servidor mock com todas as suas regras cadastradas."""
     mock = db.query(ServiceMockDB).filter(ServiceMockDB.id == mock_id).first()
     if not mock:
@@ -165,7 +173,12 @@ def get_mock_details(mock_id: int, db: Session = Depends(get_db)):
 @router.put("/mocks/{mock_id}")
 @router.patch("/v1/mocks/{mock_id}")
 @router.patch("/mocks/{mock_id}")
-def update_mock_server(mock_id: int, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db)):
+def update_mock_server(
+    mock_id: int, 
+    payload: Dict[str, Any] = Body(...), 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """Atualiza as propriedades do servidor mock (incluindo proxy e target_url)."""
     mock = db.query(ServiceMockDB).filter(ServiceMockDB.id == mock_id).first()
     if not mock:
@@ -215,7 +228,11 @@ def update_mock_server(mock_id: int, payload: Dict[str, Any] = Body(...), db: Se
 
 @router.delete("/v1/mocks/{mock_id}")
 @router.delete("/mocks/{mock_id}")
-def delete_mock_server(mock_id: int, db: Session = Depends(get_db)):
+def delete_mock_server(
+    mock_id: int, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """Remove um servidor de mock e todas as suas regras/logs."""
     mock = db.query(ServiceMockDB).filter(ServiceMockDB.id == mock_id).first()
     if not mock:
@@ -243,7 +260,8 @@ async def import_mock_spec(
     mock_id: Optional[int] = Form(None),
     content: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
     """
     Importa especificações de Postman, Swagger/OpenAPI ou cURL, criando um Mock Server
@@ -452,7 +470,12 @@ async def import_mock_spec(
 
 @router.post("/v1/mocks/{mock_id}/rules")
 @router.post("/mocks/{mock_id}/rules")
-def create_mock_rule(mock_id: int, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db)):
+def create_mock_rule(
+    mock_id: int, 
+    payload: Dict[str, Any] = Body(...), 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """Adiciona uma nova regra individual ao servidor mock."""
     mock = db.query(ServiceMockDB).filter(ServiceMockDB.id == mock_id).first()
     if not mock:
@@ -481,7 +504,12 @@ def create_mock_rule(mock_id: int, payload: Dict[str, Any] = Body(...), db: Sess
 
 @router.put("/v1/mocks/rules/{rule_id}")
 @router.put("/mocks/rules/{rule_id}")
-def update_mock_rule(rule_id: int, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db)):
+def update_mock_rule(
+    rule_id: int, 
+    payload: Dict[str, Any] = Body(...), 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """Atualiza os campos de uma regra existente."""
     rule = db.query(MockRuleDB).filter(MockRuleDB.id == rule_id).first()
     if not rule:
@@ -497,7 +525,11 @@ def update_mock_rule(rule_id: int, payload: Dict[str, Any] = Body(...), db: Sess
 
 @router.delete("/v1/mocks/rules/{rule_id}")
 @router.delete("/mocks/rules/{rule_id}")
-def delete_mock_rule(rule_id: int, db: Session = Depends(get_db)):
+def delete_mock_rule(
+    rule_id: int, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """Remove uma regra de mock."""
     rule = db.query(MockRuleDB).filter(MockRuleDB.id == rule_id).first()
     if not rule:
@@ -509,7 +541,12 @@ def delete_mock_rule(rule_id: int, db: Session = Depends(get_db)):
 
 @router.get("/v1/mocks/{mock_id}/logs")
 @router.get("/mocks/{mock_id}/logs")
-def get_mock_logs(mock_id: int, limit: int = 50, db: Session = Depends(get_db)):
+def get_mock_logs(
+    mock_id: int, 
+    limit: int = 50, 
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
     """Obtém o histórico de requisições recebidas pelo servidor de mock."""
     logs = db.query(MockLogDB).filter(MockLogDB.mock_id == mock_id).order_by(MockLogDB.executed_at.desc()).limit(limit).all()
     result = []

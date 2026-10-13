@@ -139,7 +139,8 @@ class AuthService:
             cnpj=cnpj_clean,
             phone=phone_clean,
             accepted_terms=user.accepted_terms,
-            terms_accepted_at=terms_accepted_at
+            terms_accepted_at=terms_accepted_at,
+            token_version=1
         )
         db.add(db_user)
         db.commit()
@@ -169,6 +170,7 @@ class AuthService:
 
         if user_update.new_password:
             current_user.hashed_password = get_password_hash(user_update.new_password)
+            current_user.token_version = (current_user.token_version or 1) + 1
 
         db.commit()
         db.refresh(current_user)
@@ -210,6 +212,7 @@ class AuthService:
             raise ValueError("Usuário não encontrado.")
             
         user.hashed_password = get_password_hash(reset_data.new_password)
+        user.token_version = (user.token_version or 1) + 1
         db.commit()
         return True
 

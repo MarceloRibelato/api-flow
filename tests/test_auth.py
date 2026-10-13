@@ -181,3 +181,96 @@ def test_register_duplicate_cpf(client):
     assert resp2.status_code == 409
     assert "CPF já existe" in resp2.json()["detail"]
 
+
+def test_logout_revokes_token(client):
+    # 1. Create and login user
+    client.post(
+        "/auth/create",
+        json={"username": "logoutuser", "password": "Password123!", "accepted_terms": True}
+    )
+    login_resp = client.post(
+        "/auth/login",
+        json={"username": "logoutuser", "password": "Password123!"}
+    )
+    assert login_resp.status_code == 200
+    token = login_resp.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 2. Access profile successfully
+    prof_resp = client.get("/auth/profile", headers=headers)
+    assert prof_resp.status_code == 200
+
+    # 3. Logout
+    logout_resp = client.post("/auth/logout", headers=headers)
+    assert logout_resp.status_code == 200
+
+    # 4. Access profile with old token should now fail (401)
+    prof_after = client.get("/auth/profile", headers=headers)
+    assert prof_after.status_code == 401
+    detail = prof_after.json()["detail"].lower()
+    assert "revogada" in detail or "invalidado" in detail
+
+
+def test_inactive_and_pending_user_access(client, db_session):
+    from app.models.user_models import UserDB
+    # First user is admin (active)
+    client.post("/auth/create", json={"username": "first_admin", "password": "Password123!", "accepted_terms": True})
+
+    # Second user is created as pending
+    client.post("/auth/create", json={"username": "pending_user", "password": "Password123!", "accepted_terms": True})
+
+    # Pending user cannot login
+    login_resp = client.post("/auth/login", json={"username": "pending_user", "password": "Password123!"})
+    assert login_resp.status_code == 403
+
+    # Now make user active to get token, then block them
+    u = db_session.query(UserDB).filter(UserDB.username == "pending_user").first()
+    u.status = "active"
+    db_session.commit()
+
+    login_active = client.post("/auth/login", json={"username": "pending_user", "password": "Password123!"})
+    assert login_active.status_code == 200
+    token = login_active.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Verify active user works
+    assert client.get("/auth/profile", headers=headers).status_code == 200
+
+    # Block user
+    u.status = "blocked"
+    db_session.commit()
+
+    # Accessing profile with previous token should fail with 403
+    blocked_resp = client.get("/auth/profile", headers=headers)
+    assert blocked_resp.status_code == 403
+
+
+def test_unregistered_flw_key_rejected(client):
+    response = client.get("/auth/profile", headers={"X-API-Key": "flw_fake_unregistered_token_12345"})
+    assert response.status_code == 401
+
+
+def test_service_token_auth(client, db_session):
+    # Admin user with company
+    client.post("/auth/create", json={
+        "username": "token_owner",
+        "password": "Password123!",
+        "accepted_terms": True,
+        "company": "TokenCorp"
+    })
+    token = client.post("/auth/login", json={"username": "token_owner", "password": "Password123!"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Generate API key via CICD route
+    gen_resp = client.post("/cicd/tokens", headers=headers, json={"name": "Deploy Key"})
+    assert gen_resp.status_code == 200
+    api_key = gen_resp.json()["token"]
+    assert api_key.startswith("flw_")
+
+    # Access protected route using X-API-Key
+    api_headers = {"X-API-Key": api_key}
+    prof_resp = client.get("/auth/profile", headers=api_headers)
+    assert prof_resp.status_code == 200
+    assert prof_resp.json()["username"] == "token_owner"
+
+

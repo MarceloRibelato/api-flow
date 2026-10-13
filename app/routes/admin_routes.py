@@ -25,6 +25,8 @@ def list_users(
     check_admin(current_user)
     
     query = db.query(UserDB)
+    if current_user.company_id is not None:
+        query = query.filter(UserDB.company_id == current_user.company_id)
     if status:
         query = query.filter(UserDB.status == status)
     
@@ -39,7 +41,10 @@ def approve_user(
 ):
     check_admin(current_user)
     
-    user = db.query(UserDB).filter(UserDB.id == user_id).first()
+    query = db.query(UserDB).filter(UserDB.id == user_id)
+    if current_user.company_id is not None:
+        query = query.filter(UserDB.company_id == current_user.company_id)
+    user = query.first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
         
@@ -57,7 +62,10 @@ def delete_user(
 ):
     check_admin(current_user)
     
-    user = db.query(UserDB).filter(UserDB.id == user_id).first()
+    query = db.query(UserDB).filter(UserDB.id == user_id)
+    if current_user.company_id is not None:
+        query = query.filter(UserDB.company_id == current_user.company_id)
+    user = query.first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
         

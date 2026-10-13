@@ -1,12 +1,17 @@
 import logging
 import re
 
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user, verify_password
+from app.auth import get_current_user, get_current_user_optional, security, verify_password
+from app.config import settings
 from app.database import get_db
+from app.models.auth_models import BlacklistedToken
 from app.exceptions import (
     InvalidCredentialsError, AccountPendingError, DuplicateResourceError,
     ValidationError as DomainValidationError, FlowException
@@ -48,10 +53,37 @@ def login(
 
 
 @router.post("/logout")
-def logout():
+def logout(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    current_user: Optional[UserDB] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db)
+):
     """
-    Realiza o logout do usuário (Front-end deve descartar o token).
+    Realiza o logout do usuário, revogando o token no servidor via blacklist e token_version.
     """
+    if credentials:
+        token = credentials.credentials
+        try:
+            from jose import jwt
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            jti = payload.get("jti")
+            exp = payload.get("exp")
+            if jti and current_user:
+                exp_dt = datetime.fromtimestamp(exp, tz=timezone.utc) if exp else (datetime.now(timezone.utc) + timedelta(days=1))
+                blacklisted = BlacklistedToken(
+                    jti=jti,
+                    user_id=current_user.id,
+                    expiration=exp_dt
+                )
+                db.add(blacklisted)
+                # Incrementa versão para invalidar outros tokens ativos deste usuário
+                current_user.token_version = (current_user.token_version or 1) + 1
+                db.commit()
+                logger.info(f"Token {jti} revogado e colocado na blacklist para user: {current_user.username}")
+        except Exception as e:
+            logger.warning(f"Aviso ao invalidar token no logout: {e}")
+            db.rollback()
+
     return {"msg": "Logout realizado com sucesso"}
 
 

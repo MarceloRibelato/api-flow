@@ -85,6 +85,7 @@ def get_current_user(
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             username: str = payload.get("sub")
             jti: str = payload.get("jti")
+            token_version = payload.get("version")
 
             if username is None:
                 raise HTTPException(status_code=401, detail="Token inválido")
@@ -98,6 +99,15 @@ def get_current_user(
             user = db.query(UserDB).filter(UserDB.username.ilike(username)).first()
             if user is None:
                 raise HTTPException(status_code=401, detail="Usuário não encontrado")
+
+            # Check User Status (Blocked / Pending)
+            if user.status and user.status not in ['active', 'approved']:
+                raise HTTPException(status_code=403, detail="Conta inativa ou bloqueada")
+
+            # Check Token Version (Invalidate old tokens after password reset or logout)
+            if token_version is not None and user.token_version is not None:
+                if token_version != user.token_version:
+                    raise HTTPException(status_code=401, detail="Sessão invalidada (senha alterada ou sessão revogada)")
                  
             return user
         except JWTError:
@@ -115,40 +125,10 @@ def get_current_user(
             
             user = db.query(UserDB).filter(UserDB.id == service_token.user_id).first()
             if user:
+                if user.status and user.status not in ['active', 'approved']:
+                    raise HTTPException(status_code=403, detail="Conta vinculada à API Key está inativa ou bloqueada")
                 return user
 
-        # Self-healing fallback:
-        # If valid flw_ prefix and token is not registered yet (e.g. after DB migration/reset),
-        # auto-adopt and register it to the primary active admin user.
-        if api_key.startswith("flw_"):
-            admin_user = db.query(UserDB).filter((UserDB.id == 1) | (UserDB.role == 'admin')).first()
-            if admin_user:
-                company_id = admin_user.company_id
-                if not company_id:
-                    from app.models.company_models import CompanyDB
-                    comp = db.query(CompanyDB).first()
-                    if comp:
-                        company_id = comp.id
-                        admin_user.company_id = company_id
-                
-                # If still no company, use default ID 1
-                company_id = company_id or 1
-                try:
-                    auto_token = ServiceTokenDB(
-                        name="Auto-Registered Service Token",
-                        token_hash=token_hash,
-                        user_id=admin_user.id,
-                        company_id=company_id,
-                        created_at=datetime.now(timezone.utc),
-                        last_used_at=datetime.now(timezone.utc)
-                    )
-                    db.add(auto_token)
-                    db.commit()
-                    return admin_user
-                except Exception:
-                    db.rollback()
-                    return admin_user
-        
         raise HTTPException(status_code=401, detail="API Key inválida")
 
     # No authentication provided
