@@ -3,12 +3,86 @@ from app.schemas.proxy_schemas import ProxyRequest
 import logging
 import httpx 
 import re
+import ipaddress
+import urllib.parse
 
 router = APIRouter(prefix="/proxy", tags=["Proxy"])
 logger = logging.getLogger(__name__)
 
+BLOCKED_METADATA_HOSTS = {
+    "169.254.169.254",
+    "metadata.google.internal",
+    "metadata",
+    "instance-data",
+}
+
+def validate_safe_proxy_url(url: str):
+    """
+    SSRF Mitigation:
+    - Enforces HTTP/HTTPS protocol only
+    - Blocks Link-Local IP ranges (including cloud metadata: AWS/GCP/Azure 169.254.169.254)
+    - Blocks Multicast and Unspecified (0.0.0.0) addresses
+    - Blocks well-known cloud metadata domains and integer-encoded IPs
+    """
+    if not url or not isinstance(url, str):
+        raise HTTPException(status_code=400, detail="Invalid target URL.")
+
+    parsed = urllib.parse.urlsplit(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Protocol '{scheme}' is not allowed. Only HTTP and HTTPS are permitted."
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(status_code=400, detail="Target URL must include a valid host.")
+
+    hostname_lower = hostname.lower().strip()
+
+    if hostname_lower in BLOCKED_METADATA_HOSTS or "metadata.google" in hostname_lower or "169.254.169.254" in hostname_lower:
+        raise HTTPException(
+            status_code=403,
+            detail="Access to cloud metadata endpoints is blocked (SSRF Protection)."
+        )
+
+    # Check IP literal or decimal/integer encoded IP
+    try:
+        if hostname_lower.isdigit():
+            ip = ipaddress.ip_address(int(hostname_lower))
+        else:
+            ip = ipaddress.ip_address(hostname_lower)
+
+        if ip.is_link_local:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access to link-local address '{hostname}' is blocked (SSRF Protection)."
+            )
+        if ip.is_multicast:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access to multicast address '{hostname}' is blocked (SSRF Protection)."
+            )
+        if ip.is_unspecified:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access to unspecified address '{hostname}' is blocked (SSRF Protection)."
+            )
+        if str(ip) == "169.254.169.254":
+            raise HTTPException(
+                status_code=403,
+                detail="Access to cloud metadata IP (169.254.169.254) is blocked (SSRF Protection)."
+            )
+    except ValueError:
+        # Hostname is a domain name, not an IP literal
+        pass
+
 @router.post("/")
 async def proxy_request(req: ProxyRequest, request: Request):
+    # SSRF Protection: Validate target URL before proceeding
+    validate_safe_proxy_url(req.url)
+
     try:
         # Prepare headers
         headers = req.headers or {}
