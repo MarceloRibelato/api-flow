@@ -147,7 +147,8 @@ def replace_vars(text: str, variables: dict) -> str:
                         logger.debug(f"Generated and cached dynamic faker value for '{var_name}' (Fallback Match): {dynamic_val}")
                     return str(get_attr(v, '_generated_value'))
                     
-                logger.debug(f"Replaced '{match.group(1)}' with '{get_attr(v, 'value')}' (Fallback Match)")
+                log_val = '••••••••' if get_attr(v, 'type') == 'secret' else get_attr(v, 'value')
+                logger.debug(f"Replaced '{match.group(1)}' with '{log_val}' (Fallback Match)")
                 return str(get_attr(v, 'value'))
 
         # 3. Not found — keep original placeholder

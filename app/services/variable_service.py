@@ -60,7 +60,11 @@ class VariableService:
 
         if existing_list:
             target = next((x for x in existing_list if x.suite_id == var.suite_id), existing_list[0])
-            target.value = var.value
+            # If secret variable and incoming value is empty or masked, preserve existing value
+            if var.type == "secret" and (not var.value or var.value.strip() in ("", "••••••••", "••••••••••••", "********")):
+                pass
+            else:
+                target.value = var.value
             target.type = var.type
             target.faker_type = var.faker_type
             target.faker_options = var.faker_options
@@ -103,7 +107,11 @@ class VariableService:
         db_var = db.query(Variable).filter(Variable.id == var_id).first()
         if db_var:
             db_var.name = var_data.name
-            db_var.value = var_data.value
+            # If secret variable and incoming value is empty or masked, preserve existing value
+            if var_data.type == "secret" and (not var_data.value or var_data.value.strip() in ("", "••••••••", "••••••••••••", "********")):
+                pass
+            else:
+                db_var.value = var_data.value
             db_var.type = var_data.type
             db_var.faker_type = var_data.faker_type
             db_var.faker_options = var_data.faker_options

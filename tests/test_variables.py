@@ -83,3 +83,70 @@ def test_bulk_create_variables(client):
 
     list_resp = client.get(f"/variables?project_id={proj['id']}", headers=headers)
     assert len(list_resp.json()) == 2
+
+
+def test_secret_variable_create_and_update(client):
+    headers = get_headers(client, "secretuser")
+    proj = client.post("/products/", headers=headers, json={"name": "Secret Proj"}).json()
+
+    # 1. Create a secret variable
+    resp = client.post(
+        "/variables",
+        headers=headers,
+        json={
+            "name": "API_SECRET_KEY",
+            "value": "super-confidential-token-999",
+            "type": "secret",
+            "project_id": proj["id"]
+        },
+    )
+    assert resp.status_code == 200
+    created = resp.json()
+    assert created["name"] == "API_SECRET_KEY"
+    assert created["type"] == "secret"
+    assert created["value"] == "super-confidential-token-999"
+
+    var_id = created["id"]
+
+    # 2. Update with empty string (simulating UI edit without changing secret value)
+    update_resp = client.put(
+        f"/variables/{var_id}",
+        headers=headers,
+        json={
+            "name": "API_SECRET_KEY",
+            "value": "",
+            "type": "secret",
+            "project_id": proj["id"]
+        }
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["value"] == "super-confidential-token-999"
+
+    # 3. Update with masked bullet string
+    update_masked_resp = client.put(
+        f"/variables/{var_id}",
+        headers=headers,
+        json={
+            "name": "API_SECRET_KEY",
+            "value": "••••••••",
+            "type": "secret",
+            "project_id": proj["id"]
+        }
+    )
+    assert update_masked_resp.status_code == 200
+    assert update_masked_resp.json()["value"] == "super-confidential-token-999"
+
+    # 4. Update with a brand new secret value
+    update_new_resp = client.put(
+        f"/variables/{var_id}",
+        headers=headers,
+        json={
+            "name": "API_SECRET_KEY",
+            "value": "brand-new-secret-token-777",
+            "type": "secret",
+            "project_id": proj["id"]
+        }
+    )
+    assert update_new_resp.status_code == 200
+    assert update_new_resp.json()["value"] == "brand-new-secret-token-777"
+
