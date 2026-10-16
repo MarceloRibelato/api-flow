@@ -30,8 +30,9 @@ def send_download_email(name: str, email: str):
 Obrigado pelo seu interesse no Flow-QA (Uso Pessoal)!
 
 Em anexo, você encontrará:
-1. docker-compose.prod.yml (Para rodar o Flow-QA)
-2. instructions.txt (Com o passo a passo da instalação)
+1. docker-compose.flow.yml (Para rodar o Flow-QA)
+2. .env (Configurações e credenciais do banco)
+3. instructions.txt (Manual passo a passo com credenciais de login)
 
 Se precisar de mais de 1 projeto simultâneo ou quiser integrar no seu CI/CD, não deixe de conferir nossa licença Comercial!
 
@@ -41,15 +42,20 @@ Equipe Flow-QA
 
         # Paths to attachments
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-        compose_path = os.path.join(base_dir, "docker-compose.prod.yml")
+        compose_path = os.path.join(base_dir, "docker-compose.flow.yml")
+        if not os.path.exists(compose_path):
+            compose_path = os.path.join(base_dir, "docker-compose.prod.yml")
         instr_path = os.path.join(base_dir, "instructions.txt")
+        env_path = os.path.join(base_dir, ".env.flow")
+        if not os.path.exists(env_path):
+            env_path = os.path.join(base_dir, "landing-page", ".env")
 
-        files_to_attach = [compose_path, instr_path]
+        files_to_attach = [compose_path, env_path, instr_path]
         for filepath in files_to_attach:
             if os.path.exists(filepath):
                 with open(filepath, 'rb') as f:
                     file_data = f.read()
-                    file_name = os.path.basename(filepath)
+                    file_name = ".env" if os.path.basename(filepath) in [".env.flow", ".env"] else os.path.basename(filepath)
                     msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
             else:
                 logger.warning(f"File not found for attachment: {filepath}")
