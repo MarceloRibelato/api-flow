@@ -78,9 +78,28 @@ def get_current_user(
     api_key: Optional[str] = Depends(api_key_header),
     db: Session = Depends(get_db)
 ):
-    # 1. Try JWT Authentication
+    def _validate_service_token(raw_key: str):
+        token_hash = hash_token(raw_key)
+        service_token = db.query(ServiceTokenDB).filter(ServiceTokenDB.token_hash == token_hash).first()
+        if service_token:
+            service_token.last_used_at = datetime.now(timezone.utc)
+            db.commit()
+            user = db.query(UserDB).filter(UserDB.id == service_token.user_id).first()
+            if user:
+                if user.status and user.status not in ['active', 'approved']:
+                    raise HTTPException(status_code=403, detail="Conta vinculada à API Key está inativa ou bloqueada")
+                return user
+        return None
+
+    # 1. Try JWT or Bearer Service Token Authentication
     if credentials:
         token = credentials.credentials
+        if token.startswith("flw_"):
+            user = _validate_service_token(token)
+            if user:
+                return user
+            raise HTTPException(status_code=401, detail="API Key inválida")
+
         try:
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             username: str = payload.get("sub")
@@ -111,24 +130,16 @@ def get_current_user(
                  
             return user
         except JWTError:
+            user = _validate_service_token(token)
+            if user:
+                return user
             raise HTTPException(status_code=401, detail="Token inválido ou expirado")
 
-    # 2. Try API Key Authentication
+    # 2. Try API Key Authentication (X-API-Key header)
     if api_key:
-        token_hash = hash_token(api_key)
-        service_token = db.query(ServiceTokenDB).filter(ServiceTokenDB.token_hash == token_hash).first()
-        
-        if service_token:
-            # Update last used
-            service_token.last_used_at = datetime.now(timezone.utc)
-            db.commit()
-            
-            user = db.query(UserDB).filter(UserDB.id == service_token.user_id).first()
-            if user:
-                if user.status and user.status not in ['active', 'approved']:
-                    raise HTTPException(status_code=403, detail="Conta vinculada à API Key está inativa ou bloqueada")
-                return user
-
+        user = _validate_service_token(api_key)
+        if user:
+            return user
         raise HTTPException(status_code=401, detail="API Key inválida")
 
     # No authentication provided

@@ -191,15 +191,25 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
 
         schedule.last_run = datetime.now(timezone.utc)
         
+        br_tz = timezone(timedelta(hours=-3))
         job = scheduler.get_job(str(schedule_id))
-        if job:
-             schedule.next_run = getattr(job, 'next_run_time', None)
+        if job and getattr(job, 'next_run_time', None):
+             nrt = job.next_run_time
+             if nrt.tzinfo is not None:
+                 nrt = nrt.astimezone(timezone.utc).replace(tzinfo=None)
+             schedule.next_run = nrt
+        elif schedule.cron_expression:
+             try:
+                 trigger = CronTrigger.from_crontab(schedule.cron_expression, timezone=br_tz)
+                 next_fire = trigger.get_next_fire_time(None, datetime.now(br_tz))
+                 schedule.next_run = next_fire.astimezone(timezone.utc).replace(tzinfo=None) if next_fire else None
+             except Exception as cron_err:
+                 logger.warning(f"Failed to compute next_run for cron '{schedule.cron_expression}': {cron_err}")
         else:
-             # Job is gone from scheduler (one-time job finished)
+             # Job is a one-time job
              schedule.next_run = None
-             if not schedule.cron_expression:
-                  schedule.status = 'running'
-                  logger.info(f"Marking one-time schedule {schedule_id} as running")
+             schedule.status = 'running'
+             logger.info(f"Marking one-time schedule {schedule_id} as running")
         
         db.commit()
 
@@ -551,11 +561,15 @@ class SchedulerService:
         if schedule.status != 'active':
             return
 
+        br_tz = timezone(timedelta(hours=-3))
         trigger = None
         if schedule.cron_expression:
-            trigger = CronTrigger.from_crontab(schedule.cron_expression)
+            trigger = CronTrigger.from_crontab(schedule.cron_expression, timezone=br_tz)
         elif schedule.run_at:
-            trigger = DateTrigger(run_date=schedule.run_at)
+            run_dt = schedule.run_at
+            if run_dt.tzinfo is None:
+                run_dt = run_dt.replace(tzinfo=timezone.utc)
+            trigger = DateTrigger(run_date=run_dt, timezone=timezone.utc)
 
         if trigger:
             scheduler.add_job(
@@ -567,10 +581,15 @@ class SchedulerService:
                 misfire_grace_time=60
             )
 
-            # Update next_run immediately
+            # Update next_run immediately (stored as naive UTC in DB)
             job = scheduler.get_job(job_id)
-            if job:
-                schedule.next_run = getattr(job, "next_run_time", None)
+            next_time = getattr(job, "next_run_time", None) if job else None
+            if not next_time and trigger:
+                next_time = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
+            if next_time:
+                if next_time.tzinfo is not None:
+                    next_time = next_time.astimezone(timezone.utc).replace(tzinfo=None)
+                schedule.next_run = next_time
                 db.commit()
 
     def remove_job(self, schedule_id: int):
@@ -582,7 +601,10 @@ class SchedulerService:
         """
         Syncs in-memory scheduler with database schedules (e.g. on startup)
         """
-        schedules = db.query(ScheduleModel).filter(ScheduleModel.status == 'active').all()
+        schedules = db.query(ScheduleModel).filter(
+            ScheduleModel.status == 'active',
+            ScheduleModel.is_manual == False
+        ).all()
         for s in schedules:
             self.add_job(s, db)
 

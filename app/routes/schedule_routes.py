@@ -24,6 +24,7 @@ class ScheduleCreate(BaseModel):
     run_at: Optional[datetime] = None
     notification_urls: Optional[str] = None
     notifications_enabled: bool = True
+    max_concurrency: Optional[int] = None
     
     # Performance testing parameters
     virtual_users: Optional[int] = None
@@ -43,6 +44,7 @@ class ScheduleOut(BaseModel):
     run_at: Optional[datetime]
     notification_urls: Optional[str]
     notifications_enabled: bool
+    max_concurrency: Optional[int] = None
     status: str
     last_run: Optional[datetime]
     last_run_status: Optional[str] = None
@@ -72,6 +74,7 @@ def create_schedule(schedule_in: ScheduleCreate, db: Session = Depends(get_db), 
         run_at=schedule_in.run_at,
         notification_urls=schedule_in.notification_urls,
         notifications_enabled=schedule_in.notifications_enabled,
+        max_concurrency=schedule_in.max_concurrency,
         status="active",
         user_id=current_user.id,
         company_id=current_user.company_id, # Assign Company

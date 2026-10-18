@@ -57,7 +57,8 @@ def ensure_absolute_url(url: str, base_url: str = None) -> str:
     if url and url.startswith('/'):
         if not base_url:
             from app.config import settings
-            base_url = settings.API_BASE_URL.rstrip('/')
+            base_url = settings.API_BASE_URL
+        base_url = base_url.rstrip('/')
         path = url.lstrip('/')
         return f"{base_url}/{path}"
     return url

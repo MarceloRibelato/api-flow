@@ -22,8 +22,21 @@ class FlowService:
             return []
         
         flows = db.query(FlowDB).filter(FlowDB.project_id == project_id).order_by(FlowDB.updated_at.desc()).all()
-        return [
-            {
+        result = []
+        for f in flows:
+            steps_count = 0
+            for c in (f.flow_card_data or []):
+                if str(c.node_id) in ("start", "startNode", "node_start"):
+                    continue
+                e2e_cnt = len(c.e2e_steps_rel or []) or len(c.e2e_steps or [])
+                api_cnt = len(c.api_calls or [])
+                db_cnt = len(c.db_queries or [])
+                mq_cnt = len(c.message_queues or [])
+                if f.flow_type in ("e2e", "web", "mobile"):
+                    steps_count += e2e_cnt + db_cnt + mq_cnt
+                else:
+                    steps_count += api_cnt + db_cnt + mq_cnt + e2e_cnt
+            result.append({
                 "id": f.id,
                 "project_id": f.project_id,
                 "name": f.name,
@@ -31,9 +44,10 @@ class FlowService:
                 "created_at": f.created_at,
                 "updated_at": f.updated_at,
                 "nodes_count": len(f.flow_nodes),
-                "edges_count": len(f.flow_edges)
-            } for f in flows
-        ]
+                "edges_count": len(f.flow_edges),
+                "steps_count": steps_count
+            })
+        return result
 
     @staticmethod
     def create(db: Session, project_id: int, name: str, company_id: int, flow_type: str = "api"):

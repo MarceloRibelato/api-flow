@@ -145,34 +145,94 @@ def execute_cicd(
 ):
     """Dispara a execução de um Produto ou Funcionalidade via nomes amigáveis."""
     # 1. Resolver Produto
-    product_query = db.query(ProductModel).filter(ProductModel.name.ilike(req.product_name))
+    clean_prod_name = (req.product_name or "").strip()
+    product_query = db.query(ProductModel).filter(ProductModel.name.ilike(clean_prod_name))
     if current_user.company_id:
         product_query = product_query.filter(
             (ProductModel.company_id == current_user.company_id) | (ProductModel.company_id.is_(None))
         )
     product = product_query.first()
+
+    # Fallback A: Resolver pelo nome do Time (TeamDB) caso o usuário esteja executando a partir de um Team
+    if not product and clean_prod_name:
+        from app.models.team_models import TeamDB
+        team_query = db.query(TeamDB).filter(TeamDB.name.ilike(clean_prod_name))
+        if current_user.company_id:
+            team_query = team_query.filter(TeamDB.company_id == current_user.company_id)
+        team = team_query.first()
+        if team:
+            product = db.query(ProductModel).filter(ProductModel.team_id == team.id).first()
+
+    # Fallback B: Se informou feature_name específico, localizar o produto dono da feature na empresa
+    if not product and req.feature_name and req.feature_name.lower() != 'all':
+        feat_match = db.query(FeatureModel).join(ProductModel).filter(
+            FeatureModel.name.ilike(req.feature_name.strip()),
+            (ProductModel.company_id == current_user.company_id) | (ProductModel.company_id.is_(None))
+        ).first()
+        if feat_match:
+            product = db.query(ProductModel).filter(ProductModel.id == feat_match.product_id).first()
+
+    # Fallback C: Se o nome enviado for genérico ('Product', 'Produto') e houver produto na empresa
+    if not product and clean_prod_name.lower() in ('product', 'produto', 'default'):
+        fallback_q = db.query(ProductModel)
+        if current_user.company_id:
+            fallback_q = fallback_q.filter(
+                (ProductModel.company_id == current_user.company_id) | (ProductModel.company_id.is_(None))
+            )
+        product = fallback_q.first()
+
     if not product:
         raise HTTPException(status_code=404, detail=f"Produto '{req.product_name}' não encontrado")
 
     # 2. Resolver Ambiente
+    clean_env_name = (req.environment_name or "DEV").strip()
+    candidate_project_ids = [product.id]
+    if getattr(product, 'team_id', None) and product.team_id not in candidate_project_ids:
+        candidate_project_ids.append(product.team_id)
+
     env = db.query(Environment).filter(
-        Environment.name.ilike(req.environment_name),
-        Environment.project_id == product.id
+        Environment.name.ilike(clean_env_name),
+        Environment.project_id.in_(candidate_project_ids)
     ).first()
     if not env:
-        env = db.query(Environment).filter(Environment.project_id == product.id).first()
+        env = db.query(Environment).filter(Environment.project_id.in_(candidate_project_ids)).first()
+    if not env and current_user.company_id:
+        company_prod_ids = [
+            p.id for p in db.query(ProductModel.id).filter(
+                (ProductModel.company_id == current_user.company_id) | (ProductModel.company_id.is_(None))
+            ).all()
+        ]
+        if company_prod_ids:
+            env = db.query(Environment).filter(
+                Environment.name.ilike(clean_env_name),
+                Environment.project_id.in_(company_prod_ids)
+            ).first()
+            if not env:
+                env = db.query(Environment).filter(Environment.project_id.in_(company_prod_ids)).first()
     if not env:
-        raise HTTPException(status_code=404, detail=f"Ambiente '{req.environment_name}' não encontrado para este produto")
+        env = Environment(
+            name=clean_env_name or "DEV",
+            project_id=product.id
+        )
+        db.add(env)
+        db.commit()
+        db.refresh(env)
 
     # 3. Resolver Alvo (Feature ou Suite completa)
     target_id = product.id
     target_type = 'suite'
     
     if req.feature_name and req.feature_name.lower() != 'all':
+        clean_feat_name = req.feature_name.strip()
         feature = db.query(FeatureModel).filter(
-            FeatureModel.name.ilike(req.feature_name),
+            FeatureModel.name.ilike(clean_feat_name),
             FeatureModel.product_id == product.id
         ).first()
+        if not feature:
+            feature = db.query(FeatureModel).join(ProductModel).filter(
+                FeatureModel.name.ilike(clean_feat_name),
+                (ProductModel.company_id == current_user.company_id) | (ProductModel.company_id.is_(None))
+            ).first()
         if not feature:
             feature = db.query(FeatureModel).filter(FeatureModel.product_id == product.id).first()
         if not feature:
@@ -288,20 +348,40 @@ def job_status(job_id: str, db: Session = Depends(get_db), current_user: UserDB 
                 if results:
                     break
     
+    # Se o agendamento pontual ainda está ativo ou rodando no worker, não encerrar prematuramente
+    if not job.cron_expression and job.status == 'running':
+        return {
+            "job_id": numeric_job_id,
+            "status": "running",
+            "completed_requests": len(results),
+            "message": "Execução em andamento..."
+        }
+
     if not results:
+        if job.status in ('completed', 'failure'):
+            is_fail = (job.last_run_status == 'failure' or job.status == 'failure')
+            return {
+                "job_id": numeric_job_id,
+                "status": "completed",
+                "result": "failure" if is_fail else "success",
+                "total_requests": 0,
+                "failed_count": 1 if is_fail else 0,
+                "started_at": job.last_run or job.run_at,
+                "finished_at": job.last_run or datetime.now()
+            }
         return {
             "job_id": numeric_job_id, 
             "status": "pending",
             "message": "Execução em fila ou processando..."
         }
     
-    # Pegamos apenas os resultados do último lote (batch_id) para evitar somar execuções passadas
-    latest_batch_id = results[0].batch_id
-    latest_results = [r for r in results if r.batch_id == latest_batch_id]
+    # Agrupa pelo retry_count mais recente da execução (inclui todos os paths e features da suíte)
+    latest_retry = getattr(results[0], 'retry_count', 0) or 0
+    latest_results = [r for r in results if (getattr(r, 'retry_count', 0) or 0) == latest_retry]
     
     # Avaliamos se houve falhas verificando o error_message (fonte da verdade p/ assertion/erro)
     failed_requests = [r for r in latest_results if bool(r.error_message)]
-    any_failure = len(failed_requests) > 0
+    any_failure = len(failed_requests) > 0 or job.last_run_status == 'failure'
     
     return {
         "job_id": numeric_job_id,

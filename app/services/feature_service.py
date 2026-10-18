@@ -6,13 +6,45 @@ from app.schemas.feature_schemas import FeatureCreate, ReorderSchema
 
 class FeatureService:
     @staticmethod
-    def create(db: Session, feature: FeatureCreate, company_id: int):
-        # Verify product ownership
-        product = db.query(ProductModel).filter(ProductModel.id == feature.product_id, ProductModel.company_id == company_id).first()
-        if not product:
-            return None # Or raise mismatch
+    def _resolve_product(db: Session, product_id: int, company_id: int, auto_create: bool = False):
+        if product_id:
+            product = db.query(ProductModel).filter(ProductModel.id == product_id, ProductModel.company_id == company_id).first()
+            if product:
+                return product
+            # Fallback 1: product_id may be a team_id when accessed via /teams/:teamId/api-validation
+            product = db.query(ProductModel).filter(ProductModel.team_id == product_id, ProductModel.company_id == company_id).first()
+            if product:
+                return product
+        # Fallback 2: first product of the company
+        product = db.query(ProductModel).filter(ProductModel.company_id == company_id).first()
+        if product:
+            return product
+        if auto_create and company_id:
+            from app.models.team_models import TeamDB
+            team = db.query(TeamDB).filter(TeamDB.id == product_id, TeamDB.company_id == company_id).first() if product_id else None
+            prod_name = team.name if team else f"Produto #{product_id or 1}"
+            product = ProductModel(
+                name=prod_name,
+                description="Produto padrão criado automaticamente",
+                company_id=company_id,
+                team_id=team.id if team else None
+            )
+            db.add(product)
+            db.commit()
+            db.refresh(product)
+            return product
+        return None
 
-        db_feature = FeatureModel(**feature.model_dump())
+    @staticmethod
+    def create(db: Session, feature: FeatureCreate, company_id: int):
+        # Verify or resolve product ownership
+        product = FeatureService._resolve_product(db, feature.product_id, company_id, auto_create=True)
+        if not product:
+            return None
+
+        feature_data = feature.model_dump()
+        feature_data["product_id"] = product.id
+        db_feature = FeatureModel(**feature_data)
         db.add(db_feature)
         db.commit()
         db.refresh(db_feature)
@@ -21,11 +53,10 @@ class FeatureService:
     @staticmethod
     def get_all(db: Session, company_id: int, product_id: int = None):
         if product_id:
-            # Verify product ownership
-            product = db.query(ProductModel).filter(ProductModel.id == product_id, ProductModel.company_id == company_id).first()
+            product = FeatureService._resolve_product(db, product_id, company_id, auto_create=False)
             if not product:
                 return []
-            return db.query(FeatureModel).filter(FeatureModel.product_id == product_id).order_by(FeatureModel.position.asc(), FeatureModel.created_at.asc()).all()
+            return db.query(FeatureModel).filter(FeatureModel.product_id == product.id).order_by(FeatureModel.position.asc(), FeatureModel.created_at.asc()).all()
         else:
             # List all features for the company (across products)
             return db.query(FeatureModel).join(ProductModel).filter(ProductModel.company_id == company_id).order_by(FeatureModel.position.asc(), FeatureModel.created_at.asc()).all()

@@ -43,8 +43,10 @@ class HistoryService:
             if sched:
                 if sched.name and (sched.name.startswith("CI/CD") or sched.name.startswith("[PIPELINE]")):
                     trigger_origin = "pipeline"
-                else:
+                elif not getattr(sched, "is_manual", False):
                     trigger_origin = "schedule"
+                else:
+                    trigger_origin = "manual"
 
         exec_type = history.execution_type
         if not exec_type and history.schedule_id:
@@ -71,23 +73,23 @@ class HistoryService:
         ModelClass = HistoryService.get_model(exec_type)
 
         db_history = ModelClass(
-            execution_id=execution_id,
-            batch_id=history.batch_id,
-            api_id=history.api_id,
+            execution_id=execution_id[:100],
+            batch_id=str(history.batch_id)[:100] if history.batch_id is not None else None,
+            api_id=str(history.api_id)[:100] if history.api_id is not None else None,
             api_name=history.api_name,
             project_id=history.project_id,
             schedule_id=history.schedule_id,
             feature_name=history.feature_name,
-            flow_id=history.flow_id,
-            node_id=history.node_id,
+            flow_id=str(history.flow_id)[:100] if history.flow_id is not None else None,
+            node_id=str(history.node_id)[:100] if history.node_id is not None else None,
             node_name=history.node_name,
-            method=history.method,
+            method=str(history.method)[:20] if history.method is not None else "GET",
             url=history.url,
             request_headers=history.request_headers,
             request_body=history.request_body,
             request_params=history.request_params,
             status_code=history.status_code,
-            status_text=history.status_text,
+            status_text=str(history.status_text)[:100] if history.status_text is not None else None,
             response_headers=history.response_headers,
             response_body=history.response_body,
             response_time=history.response_time,
@@ -170,30 +172,32 @@ class HistoryService:
                     if sched:
                         if sched.name and (sched.name.startswith("CI/CD") or sched.name.startswith("[PIPELINE]")):
                             schedule_origin_cache[history.schedule_id] = "pipeline"
-                        else:
+                        elif not getattr(sched, "is_manual", False):
                             schedule_origin_cache[history.schedule_id] = "schedule"
+                        else:
+                            schedule_origin_cache[history.schedule_id] = "manual"
                     else:
                         schedule_origin_cache[history.schedule_id] = "manual"
                 trigger_origin = schedule_origin_cache[history.schedule_id]
 
             db_history = ModelClass(
-                execution_id=execution_id,
-                batch_id=history.batch_id,
-                api_id=history.api_id,
+                execution_id=execution_id[:100],
+                batch_id=str(history.batch_id)[:100] if history.batch_id is not None else None,
+                api_id=str(history.api_id)[:100] if history.api_id is not None else None,
                 api_name=history.api_name,
                 project_id=history.project_id,
                 schedule_id=history.schedule_id,
                 feature_name=history.feature_name,
-                flow_id=history.flow_id,
-                node_id=history.node_id,
+                flow_id=str(history.flow_id)[:100] if history.flow_id is not None else None,
+                node_id=str(history.node_id)[:100] if history.node_id is not None else None,
                 node_name=history.node_name,
-                method=history.method,
+                method=str(history.method)[:20] if history.method is not None else "GET",
                 url=history.url,
                 request_headers=history.request_headers,
                 request_body=history.request_body,
                 request_params=history.request_params,
                 status_code=history.status_code,
-                status_text=history.status_text,
+                status_text=str(history.status_text)[:100] if history.status_text is not None else None,
                 response_headers=history.response_headers,
                 response_body=history.response_body,
                 response_time=history.response_time,
@@ -266,6 +270,15 @@ class HistoryService:
                 if f and getattr(f, 'flow_type', None):
                     execution_type = f.flow_type
 
+        if execution_type:
+            et_clean = execution_type.lower().strip()
+            if et_clean == 'e2e':
+                execution_type = 'web'
+            elif et_clean == 'app':
+                execution_type = 'mobile'
+            else:
+                execution_type = et_clean
+
         ModelClass = HistoryService.get_model(execution_type)
         query = db.query(ModelClass)
 
@@ -287,7 +300,7 @@ class HistoryService:
             query = query.filter(ModelClass.environment_id == environment_id)
         if node_id:
             query = query.filter(ModelClass.node_id == str(node_id))
-        if execution_type:
+        if execution_type and schedule_id is None:
             query = query.filter(ModelClass.execution_type == execution_type)
         if method:
             query = query.filter(ModelClass.method == method.upper())

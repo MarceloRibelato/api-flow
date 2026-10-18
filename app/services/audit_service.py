@@ -35,14 +35,14 @@ class AuditService:
             log_entry = AuditLogDB(
                 company_id=company_id,
                 user_id=user_id,
-                user_name=user_name,
-                user_email=user_email,
-                action=action,
-                resource_type=resource_type,
-                resource_id=str(resource_id) if resource_id is not None else None,
-                resource_name=resource_name,
+                user_name=str(user_name)[:255] if user_name is not None else None,
+                user_email=str(user_email)[:255] if user_email is not None else None,
+                action=str(action)[:100] if action is not None else "UNKNOWN",
+                resource_type=str(resource_type)[:100] if resource_type is not None else "unknown",
+                resource_id=str(resource_id)[:100] if resource_id is not None else None,
+                resource_name=str(resource_name)[:255] if resource_name is not None else None,
                 details=details or {},
-                ip_address=ip_address
+                ip_address=str(ip_address)[:50] if ip_address is not None else None
             )
             with db.begin_nested():
                 db.add(log_entry)

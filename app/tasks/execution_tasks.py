@@ -18,6 +18,9 @@ def celery_execute_job(self, schedule_id: int, failed_item_ids: list = None):
     import importlib
     import sys
     for mod_name in [
+        'app.services.url_utils',
+        'app.services.history_service',
+        'app.services.feature_service',
         'app.services.mobile_diagnostics_service',
         'app.services.mobile_device_pool_service',
         'app.services.mobile_vision_service',

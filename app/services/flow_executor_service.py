@@ -19,6 +19,15 @@ from app.models.feature_models import FeatureModel
 from app.models.flow_models import FlowDB
 from app.schemas.history_schemas import ExecutionHistoryCreate
 from app.schemas.variable_schemas import VariableCreate
+import importlib as _importlib
+import sys as _sys
+for _submod in ('app.services.url_utils', 'app.services.history_service', 'app.services.feature_service', 'app.services.flow_service', 'app.services.audit_service'):
+    if _submod in _sys.modules:
+        try:
+            _importlib.reload(_sys.modules[_submod])
+        except Exception:
+            pass
+
 from app.services.flow_service import FlowService
 from app.services.history_service import HistoryService
 from app.services.variable_service import VariableService
@@ -58,12 +67,13 @@ class FlowExecutorService:
             envs = EnvironmentService.get_by_project(db, product_id)
             if envs:
                 fallback_env = envs[0]
+                env_id = fallback_env.id
                 logger.info(f"      ℹ️ Resolved null env_id in execute_flow_logic to fallback environment ID: {env_id}")
         
         global_timeout_ms = None
         global_retry_actions = None
         global_retry_test = 0
-        eff_ft = flow_type or 'api'
+        eff_ft = flow_meta.get('flow_type') or flow_type or 'api'
         schedule = None
         if schedule_id:
             from app.models.schedule_models import ScheduleModel
@@ -75,7 +85,8 @@ class FlowExecutorService:
                     global_retry_actions = schedule.virtual_users
                 if schedule.ramp_up_seconds is not None:
                     global_retry_test = schedule.ramp_up_seconds
-                eff_ft = getattr(schedule, 'flow_type', None) or eff_ft
+                if not flow_meta.get('flow_type'):
+                    eff_ft = getattr(schedule, 'flow_type', None) or eff_ft
 
         from app.models.api_test_history_models import ApiExecutionHistory, WebExecutionHistory, MobileExecutionHistory
         if eff_ft == 'mobile':
@@ -149,8 +160,20 @@ class FlowExecutorService:
             nodes = flow_data.get('nodes', [])
             edges = flow_data.get('edges', [])
 
-            # Resolve effective flow type robustly
-            effective_flow_type = flow_type if flow_type in ['mobile', 'e2e', 'web'] else (flow_data.get('flow_type') or flow_meta.get('flow_type') or 'api')
+            # Resolve effective flow type robustly: prefer actual flow's type when e2e/mobile
+            loaded_ft = flow_data.get('flow_type') or flow_meta.get('flow_type')
+            if loaded_ft in ['mobile', 'e2e', 'web']:
+                effective_flow_type = loaded_ft
+            elif flow_type in ['mobile', 'e2e', 'web']:
+                effective_flow_type = flow_type
+            else:
+                # Check if cards only contain e2eSteps and 0 apiCalls
+                has_any_e2e = any(bool((c or {}).get('e2eSteps')) for c in (cards or {}).values())
+                has_any_api = any(bool((c or {}).get('apiCalls')) for c in (cards or {}).values())
+                if has_any_e2e and not has_any_api:
+                    effective_flow_type = 'e2e'
+                else:
+                    effective_flow_type = loaded_ft or flow_type or 'api'
             
             logger.info(f"📊 [execute_flow_logic] Loaded Flow ID: {f_id} ({effective_flow_type}) - {len(nodes)} nodes, {len(edges)} edges")
             if not nodes:
@@ -618,7 +641,14 @@ class FlowExecutorService:
                                             if global_timeout_ms is not None:
                                                 step_data['timeout'] = global_timeout_ms
 
-                                            url = ensure_absolute_url(url)
+                                            env_base_url = None
+                                            for b_key in ('baseUrl', 'BASE_URL', 'baseurl'):
+                                                if b_key in current_path_vars:
+                                                    b_val = current_path_vars[b_key]
+                                                    env_base_url = b_val.get('value') if isinstance(b_val, dict) else str(b_val)
+                                                    if env_base_url:
+                                                        break
+                                            url = ensure_absolute_url(url, base_url=env_base_url)
                                             
                                             # ✅ RE-ENABLED: Normalize URL for Docker internal networking
                                             url = FlowExecutorService.sanitize_url_for_docker(url)
@@ -773,6 +803,10 @@ class FlowExecutorService:
 
                                                     # --- Assertions (delegated to assertion_engine) ---
                                                     assertions_raw = step_data.get('assertions', [])
+                                                    has_status_assertion = any(
+                                                        (a.get('source') or a.get('type') or '').lower() in ('statuscode', 'status', 'status_code')
+                                                        for a in assertions_raw if isinstance(a, dict)
+                                                    )
                                                     if assertions_raw:
                                                         assertion_results, assertions_passed = evaluate_all_assertions(
                                                             assertions_raw, resp_status, resp_headers,
@@ -783,7 +817,7 @@ class FlowExecutorService:
 
                                                     if step_data.get('assertions') and not assertions_passed:
                                                         final_error_message = "Assertions Failed"
-                                                    elif resp_status >= 400:
+                                                    elif resp_status >= 400 and not (has_status_assertion and assertions_passed):
                                                         final_error_message = f"HTTP Error {resp_status}"
                                                     elif resp_status == 0:
                                                         final_error_message = "Step Timeout/Incomplete"
@@ -817,8 +851,12 @@ class FlowExecutorService:
                                         final_error_message = str(outer_ex)
 
                                 # --- Global Error Check ---
-                                # Guarantee that ANY step returning an error status is correctly flagged as a failure
-                                if not final_error_message and resp_status >= 400:
+                                # Guarantee that ANY step returning an error status (without a passing status assertion) is flagged as a failure
+                                has_status_assert_outer = any(
+                                    (a.get('source') or a.get('type') or '').lower() in ('statuscode', 'status', 'status_code')
+                                    for a in (step_data.get('assertions') or []) if isinstance(a, dict)
+                                )
+                                if not final_error_message and resp_status >= 400 and not (has_status_assert_outer and assertions_passed):
                                     final_error_message = resp_text if resp_text else f"Execution Failed with status {resp_status}: {resp_reason}"
 
                                 with execution_lock:
@@ -1034,6 +1072,34 @@ class FlowExecutorService:
                 HistoryService.save_batch(db, history_buffer, user_id)
                 history_buffer.clear()
 
+            # Ensure scheduled executions never end with 0 history rows if a flow had no executable steps
+            if schedule_id and flow_success_count == 0 and flow_fail_count == 0 and not failed_item_ids:
+                actual_exec_type = "mobile" if effective_flow_type == 'mobile' else ("web" if effective_flow_type in ['e2e', 'web'] else "api")
+                empty_hist = ExecutionHistoryCreate(
+                    batch_id=f"{base_batch_id}_path_1",
+                    api_id="empty_flow",
+                    api_name="Nenhum passo configurado no fluxo",
+                    project_id=p_id or product_id,
+                    flow_id=flow_meta.get('id'),
+                    node_id="start",
+                    schedule_id=schedule_id,
+                    feature_name=feature_name,
+                    node_name=feature_name,
+                    method=actual_exec_type.upper(),
+                    url="",
+                    status_code=0,
+                    status_text="Empty Flow",
+                    response_body="",
+                    response_time=0,
+                    environment_id=env_id,
+                    error_message="Nenhum passo de teste (API ou E2E) configurado nos nós deste fluxo.",
+                    assertions=None,
+                    execution_type=actual_exec_type,
+                    retry_count=current_session_retry_count
+                )
+                HistoryService.save_batch(db, [empty_hist], user_id)
+                flow_fail_count = 1
+
             return flow_success_count, flow_fail_count
 
         except Exception as e:
@@ -1050,29 +1116,100 @@ class FlowExecutorService:
             return 0, 0
 
     @staticmethod
+    def _select_executable_flow(flows: list, target_type: str):
+        """
+        Selects the best flow for execution from a feature's flows list.
+        Prefers a flow matching target_type that actually has steps_count > 0.
+        If all matching flows have 0 steps (e.g., an empty 'Fluxo API' auto-created alongside a recorded 'Fluxo Front'),
+        falls back to any flow in the feature that has steps_count > 0.
+        """
+        if not flows:
+            return None, target_type
+
+        def matches_flow_type(f_item, t_type):
+            ft = f_item.get('flow_type')
+            if not ft:
+                return True
+            if t_type == 'mobile':
+                return ft in ['mobile', 'e2e']
+            if t_type in ['e2e', 'web']:
+                return ft in ['e2e', 'web']
+            return ft == t_type
+
+        typed_flows = [f for f in flows if matches_flow_type(f, target_type)]
+        typed_with_steps = [f for f in typed_flows if (f.get('steps_count') or 0) > 0]
+        if typed_with_steps:
+            chosen = typed_with_steps[0]
+            return chosen, chosen.get('flow_type') or target_type
+
+        any_with_steps = [f for f in flows if (f.get('steps_count') or 0) > 0]
+        if any_with_steps:
+            chosen = any_with_steps[0]
+            resolved_type = chosen.get('flow_type') or target_type
+            logger.info(
+                f"ℹ️  Flow of type '{target_type}' has 0 steps; auto-switching to flow '{chosen.get('name')}' "
+                f"(ID: {chosen.get('id')}, Type: {resolved_type}, Steps: {chosen.get('steps_count')})."
+            )
+            return chosen, resolved_type
+
+        if typed_flows:
+            return typed_flows[0], typed_flows[0].get('flow_type') or target_type
+        return flows[0], flows[0].get('flow_type') or target_type
+
+    @staticmethod
     def get_merged_variables(db: Session, product_id: int, env_id: int):
         from app.services.environment_service import EnvironmentService
+        from app.models.environment_model import Environment
+        from app.models.variable_model import Variable
+        from app.models.product_models import ProductModel
         
         logger.info(f"🔍 [get_merged_variables] Fetching vars for Product: {product_id}, Env: {env_id}")
         
-        global_vars = VariableService.get_all(db, product_id, environment_id=None)
+        env_obj = None
+        if env_id:
+            env_obj = db.query(Environment).filter(Environment.id == env_id).first()
+        else:
+            envs = EnvironmentService.get_by_project(db, product_id)
+            if envs:
+                env_obj = envs[0]
+                env_id = env_obj.id
+                logger.warning(f"    ⚠️ No Environment selected (Scheduled?). Fallback to First Env: {env_obj.name} (ID: {env_obj.id})")
+
+        project_ids = [product_id] if product_id else []
+        if product_id:
+            prod = db.query(ProductModel).filter(ProductModel.id == product_id).first()
+            if prod and getattr(prod, 'team_id', None) and prod.team_id not in project_ids:
+                project_ids.append(prod.team_id)
+        if env_obj and env_obj.project_id and env_obj.project_id not in project_ids:
+            project_ids.append(env_obj.project_id)
+
+        global_vars = db.query(Variable).filter(
+            Variable.project_id.in_(project_ids),
+            Variable.environment_id.is_(None)
+        ).order_by(Variable.id.asc()).all() if project_ids else []
         logger.info(f"    found {len(global_vars)} global vars")
         
         env_vars = []
         if env_id:
-            env_vars = VariableService.get_all(db, product_id, environment_id=env_id)
+            env_vars = db.query(Variable).filter(
+                Variable.environment_id == env_id
+            ).order_by(Variable.id.asc()).all()
             logger.info(f"    found {len(env_vars)} env vars for env_id {env_id}")
-        else:
-            # FIX: If no environment selected (Global), we SHOULD attempts to find a default environment
-            # because most flows rely on environment-specific variables (like BASE_URL).
-            envs = EnvironmentService.get_by_project(db, product_id)
-            if envs:
-                fallback_env = envs[0]
-                logger.warning(f"    ⚠️ No Environment selected (Scheduled?). Fallback to First Env: {fallback_env.name} (ID: {fallback_env.id})")
-                extra_vars = VariableService.get_all(db, product_id, environment_id=fallback_env.id)
-                env_vars.extend(extra_vars)
 
         variables = {}
+        # Seed baseUrl / BASE_URL from Environment.base_url if present
+        if env_obj and getattr(env_obj, "base_url", None):
+            clean_base = env_obj.base_url.strip().rstrip('/')
+            if clean_base:
+                for b_key in ("baseUrl", "BASE_URL", "baseurl"):
+                    variables[b_key] = {
+                        "name": b_key,
+                        "value": clean_base,
+                        "type": "static",
+                        "faker_type": None,
+                        "faker_options": {}
+                    }
+
         for v in global_vars:
             variables[v.name] = {
                 "name": v.name,
@@ -1124,30 +1261,20 @@ class FlowExecutorService:
 
         logger.info(f"🚀 Executing Feature Group: {feature.name} (ID: {feature.id})")
 
-
-        logger.info(f"🚀 Executing Feature Group: {feature.name} (ID: {feature.id})")
-
-        # FIX: Only execute the latest flow to match UI behavior (1 Feature = 1 Active Flow)
-        # list_by_project returns flows ordered by updated_at desc
+        # FIX: Select the latest flow with executable steps
         if flows:
-            # Filter flows by type safely
-            def matches_flow_type(f_item, target_type):
-                ft = f_item.get('flow_type')
-                if not ft:
-                    return True
-                if target_type == 'mobile':
-                    return ft in ['mobile', 'e2e']
-                if target_type in ['e2e', 'web']:
-                    return ft in ['e2e', 'web']
-                return ft == target_type
-
-            typed_flows = [f for f in flows if matches_flow_type(f, flow_type)]
-            
-            if not typed_flows:
-                logger.warning(f"No flows of type '{flow_type}' found for feature {feature.id}. Falling back to latest regardless of type.")
-                latest_flow = flows[0]
-            else:
-                latest_flow = typed_flows[0]
+            latest_flow, resolved_flow_type = FlowExecutorService._select_executable_flow(flows, flow_type)
+            if resolved_flow_type and resolved_flow_type != flow_type:
+                flow_type = resolved_flow_type
+                if schedule_id:
+                    try:
+                        from app.models.schedule_models import ScheduleModel
+                        sched = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
+                        if sched and sched.type == 'feature':
+                            sched.flow_type = resolved_flow_type
+                            db.commit()
+                    except Exception as sched_upd_err:
+                        logger.warning(f"Could not update schedule.flow_type to {resolved_flow_type}: {sched_upd_err}")
 
             if len(flows) > 1:
                 logger.info(f"ℹ️  Selecting flow '{latest_flow.get('name')}' (ID: {latest_flow.get('id')}, Type: {latest_flow.get('flow_type')}) for execution.")
@@ -1315,27 +1442,16 @@ class FlowExecutorService:
                 flows = FlowService.list_by_project(thread_db, feature['id'], company_id)
                 
                 if flows:
-                    def matches_flow_type(f_item, target_type):
-                        ft = f_item.get('flow_type')
-                        if not ft:
-                            return True
-                        if target_type == 'mobile':
-                            return ft in ['mobile', 'e2e']
-                        if target_type in ['e2e', 'web']:
-                            return ft in ['e2e', 'web']
-                        return ft == target_type
-
-                    typed_flows = [f for f in flows if matches_flow_type(f, flow_type)]
-                    if not typed_flows:
-                        logger.warning(f"No flows matching type '{flow_type}' found for feature {feature['id']}. Skipping.")
+                    latest_flow, resolved_ft = FlowExecutorService._select_executable_flow(flows, flow_type)
+                    if not latest_flow or (latest_flow.get('steps_count', 0) == 0):
+                        logger.warning(f"No flows with executable steps found for feature {feature['id']}. Skipping.")
                         return f_success, f_fail
-                    latest_flow = typed_flows[0]
                     s, f = FlowExecutorService.execute_flow_logic(
                         thread_db, latest_flow, product_id, env_id, company_id, 
                         variables.copy(),
                         feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id,
                         capture_video=capture_video, capture_screenshot=capture_screenshot,
-                        flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
+                        flow_type=resolved_ft or flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
                         failed_item_ids=failed_item_ids
                     )
                     f_success = s
