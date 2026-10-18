@@ -9,12 +9,14 @@ class ProductBase(BaseModel):
     platform: Optional[str] = 'web'
     notification_urls: Optional[str] = None
     channel_type: Optional[str] = 'webhook'
+    team_id: Optional[int] = None
 
 class ProductCreate(ProductBase):
     initial_environment_name: Optional[str] = None
 
 class ProductResponse(ProductBase):
     id: int
+    team_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

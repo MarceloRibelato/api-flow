@@ -93,6 +93,12 @@ async def lifespan(app: FastAPI):
                     conn.execute(text("ALTER TABLE service_mocks ALTER COLUMN product_id DROP NOT NULL;"))
             except Exception as e:
                 pass
+            try:
+                with engine.begin() as conn:
+                    from sqlalchemy import text
+                    conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL;"))
+            except Exception as e:
+                pass
 
 
             

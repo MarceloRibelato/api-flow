@@ -6,6 +6,7 @@ from jose import jwt
 from app.database import get_db
 from app.models.team_models import TeamDB
 from app.models.mock_models import ServiceMockDB
+from app.models.product_models import ProductModel
 from app.models.company_models import CompanyDB
 from app.models.user_models import UserDB
 from app.auth import get_current_user
@@ -33,6 +34,7 @@ def list_teams(db: Session = Depends(get_db), current_user: Optional[UserDB] = D
             "description": t.description,
             "company_id": t.company_id,
             "mock_count": len(t.mocks) if t.mocks else 0,
+            "product_count": len(t.products) if t.products else 0,
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "updated_at": t.updated_at.isoformat() if t.updated_at else None
         })
@@ -64,6 +66,7 @@ def create_team(payload: Dict[str, Any] = Body(...), db: Session = Depends(get_d
         "description": team.description,
         "company_id": team.company_id,
         "mock_count": 0,
+        "product_count": 0,
         "created_at": team.created_at.isoformat() if team.created_at else None,
         "updated_at": team.updated_at.isoformat() if team.updated_at else None
     }
@@ -83,6 +86,7 @@ def get_team(team_id: int, db: Session = Depends(get_db)):
         "description": team.description,
         "company_id": team.company_id,
         "mock_count": len(team.mocks) if team.mocks else 0,
+        "product_count": len(team.products) if team.products else 0,
         "created_at": team.created_at.isoformat() if team.created_at else None,
         "updated_at": team.updated_at.isoformat() if team.updated_at else None
     }
@@ -112,6 +116,7 @@ def update_team(team_id: int, payload: Dict[str, Any] = Body(...), db: Session =
         "description": team.description,
         "company_id": team.company_id,
         "mock_count": len(team.mocks) if team.mocks else 0,
+        "product_count": len(team.products) if team.products else 0,
         "created_at": team.created_at.isoformat() if team.created_at else None,
         "updated_at": team.updated_at.isoformat() if team.updated_at else None
     }
@@ -120,14 +125,47 @@ def update_team(team_id: int, payload: Dict[str, Any] = Body(...), db: Session =
 @router.delete("/v1/teams/{team_id}")
 @router.delete("/teams/{team_id}")
 def delete_team(team_id: int, db: Session = Depends(get_db)):
-    """Exclui um time e seus mocks associados."""
+    """Exclui um time e seus mocks associados (desvinculando produtos)."""
     team = db.query(TeamDB).filter(TeamDB.id == team_id).first()
     if not team:
         raise HTTPException(status_code=404, detail="Time não encontrado.")
 
+    db.query(ProductModel).filter(ProductModel.team_id == team_id).update(
+        {ProductModel.team_id: None}, synchronize_session=False
+    )
     db.delete(team)
     db.commit()
     return {"message": "Time excluído com sucesso.", "id": team_id}
+
+
+@router.get("/v1/teams/{team_id}/products")
+@router.get("/teams/{team_id}/products")
+def list_team_products(team_id: int, db: Session = Depends(get_db), current_user: Optional[UserDB] = Depends(get_current_user)):
+    """Lista todos os projetos (produtos) pertencentes a um time específico."""
+    team = db.query(TeamDB).filter(TeamDB.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=404, detail="Time não encontrado.")
+
+    query = db.query(ProductModel).filter(ProductModel.team_id == team_id)
+    if current_user and current_user.company_id:
+        query = query.filter(ProductModel.company_id == current_user.company_id)
+    products = query.order_by(ProductModel.created_at.asc()).all()
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "image_url": p.image_url,
+            "platform": p.platform,
+            "notification_urls": p.notification_urls,
+            "channel_type": p.channel_type,
+            "team_id": p.team_id,
+            "team_name": team.name,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+            "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        }
+        for p in products
+    ]
 
 
 # ==============================================================================

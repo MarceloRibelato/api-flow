@@ -23,4 +23,5 @@ celery_app.conf.update(
     enable_utc=True,
     worker_concurrency=4,  # Adjust based on server capacity
     worker_prefetch_multiplier=1,
+    worker_hijack_root_logger=False,
 )

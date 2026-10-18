@@ -17,12 +17,19 @@ from app.models.service_token_models import ServiceTokenDB
 from app.models.performance_models import PerformanceTestResult
 from app.models.integration_models import ProjectIntegrationDB
 from app.models.team_models import TeamDB
+from app.models.mock_models import ServiceMockDB, MockRuleDB, MockLogDB
 from app.models.audit_models import AuditLogDB
+from app.models.hitl_models import HitlSessionDB
+from app.models.agent_models import AgentSettingsDB, AgentMemoryDB
+from app.models.front_recording_models import FrontRecordingDB
 
 __all__ = [
     "UserDB",
     "CompanyDB",
     "TeamDB",
+    "ServiceMockDB",
+    "MockRuleDB",
+    "MockLogDB",
     "ProductModel",
     "FeatureModel",
     "FlowDB",
@@ -37,4 +44,8 @@ __all__ = [
     "PerformanceTestResult",
     "ProjectIntegrationDB",
     "AuditLogDB",
+    "HitlSessionDB",
+    "AgentSettingsDB",
+    "AgentMemoryDB",
+    "FrontRecordingDB",
 ]

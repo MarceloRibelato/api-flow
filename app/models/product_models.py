@@ -20,6 +20,14 @@ class ProductModel(Base):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
     company_rel = relationship("CompanyDB", back_populates="products")
 
+    # Team / Squad
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True)
+    team = relationship("TeamDB", back_populates="products", foreign_keys=[team_id])
+
+    @property
+    def team_name(self):
+        return self.team.name if self.team else None
+
     # Relationship to features
     features = relationship("FeatureModel", back_populates="product", cascade="all, delete-orphan")
 

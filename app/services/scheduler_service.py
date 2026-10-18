@@ -148,7 +148,35 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
     """
     Original callback function now executed by Celery worker.
     """
+    root_logger = logging.getLogger()
+    if not any(getattr(h, 'baseFilename', '').endswith('api.log') for h in root_logger.handlers):
+        try:
+            import os
+            from logging.handlers import RotatingFileHandler
+            log_file = "/app/api.log" if os.path.exists("/app") else "api.log"
+            fh = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+            root_logger.addHandler(fh)
+            root_logger.setLevel(logging.INFO)
+        except Exception:
+            pass
+
     logger.info(f"Executing scheduled job logic: {schedule_id}, failed_item_ids={failed_item_ids}")
+    try:
+        import app.models.mock_models  # noqa: F401
+        from sqlalchemy.orm import configure_mappers, relationship
+        from app.database import Base
+        from app.models.team_models import TeamDB
+        if any(getattr(m, '_configure_failed', False) for m in Base.registry.mappers):
+            TeamDB.__mapper__.add_property('mocks', relationship('ServiceMockDB', back_populates='team', cascade='all, delete-orphan'))
+            for m in Base.registry.mappers:
+                m._configure_failed = False
+            Base.registry._new_mappers = True
+            configure_mappers()
+            logger.info("Recovered SQLAlchemy mappers in Celery worker memory")
+    except Exception as mapper_err:
+        logger.warning(f"Mapper check/recovery warning: {mapper_err}")
+
     db = SessionLocal()
     
     success_count = 0
@@ -446,6 +474,18 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
                 db.commit()
             except Exception as db_err:
                 logger.error(f"Failed to set failure status in DB: {db_err}")
+                db.rollback()
+        elif schedule_id:
+            try:
+                from sqlalchemy import text
+                db.rollback()
+                db.execute(
+                    text("UPDATE schedules SET last_run_status = 'failure', status = CASE WHEN cron_expression IS NULL THEN 'failure' ELSE status END WHERE id = :sid"),
+                    {"sid": schedule_id}
+                )
+                db.commit()
+            except Exception as raw_db_err:
+                logger.error(f"Failed raw SQL failure status update for schedule {schedule_id}: {raw_db_err}")
                 db.rollback()
 
     finally:

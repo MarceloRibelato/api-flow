@@ -1,11 +1,32 @@
+from typing import Optional
 from sqlalchemy.orm import Session
 from app.models.product_models import ProductModel, ProductMobileSettingsDB
 from app.schemas.product_schemas import ProductCreate, ProductMobileSettingsCreate
 
 class ProductService:
+    _team_col_checked = False
+
     @staticmethod
-    def list(db: Session, company_id: int, skip: int = 0, limit: int = 100):
-        return db.query(ProductModel).filter(ProductModel.company_id == company_id).order_by(ProductModel.created_at.asc()).offset(skip).limit(limit).all()
+    def _ensure_team_column(db: Session):
+        if not ProductService._team_col_checked:
+            try:
+                from sqlalchemy import text
+                db.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL;"))
+                db.commit()
+            except Exception:
+                db.rollback()
+            ProductService._team_col_checked = True
+
+    @staticmethod
+    def list(db: Session, company_id: int, skip: int = 0, limit: int = 100, team_id: Optional[int] = None):
+        ProductService._ensure_team_column(db)
+        query = db.query(ProductModel).filter(ProductModel.company_id == company_id)
+        if team_id is not None:
+            if team_id == 0:
+                query = query.filter(ProductModel.team_id.is_(None))
+            else:
+                query = query.filter(ProductModel.team_id == team_id)
+        return query.order_by(ProductModel.created_at.asc()).offset(skip).limit(limit).all()
 
     @staticmethod
     def create(db: Session, product: ProductCreate, company_id: int):
@@ -16,6 +37,7 @@ class ProductService:
             platform=product.platform,
             notification_urls=product.notification_urls,
             channel_type=product.channel_type,
+            team_id=product.team_id,
             company_id=company_id
         )
         db.add(db_product)
@@ -84,6 +106,7 @@ class ProductService:
             db_product.platform = product_data.platform
             db_product.notification_urls = product_data.notification_urls
             db_product.channel_type = product_data.channel_type
+            db_product.team_id = product_data.team_id
             db.commit()
             db.refresh(db_product)
             return db_product

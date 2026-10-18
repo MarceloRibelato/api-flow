@@ -2,6 +2,8 @@ import logging
 from sqlalchemy.orm import Session
 from app.celery_app import celery_app
 from app.database import SessionLocal
+import app.models  # noqa: F401
+import app.models.mock_models  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

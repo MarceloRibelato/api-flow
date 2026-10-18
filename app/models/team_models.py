@@ -18,3 +18,10 @@ class TeamDB(Base):
     # Relationships
     company = relationship("CompanyDB", foreign_keys=[company_id], lazy="select")
     mocks = relationship("ServiceMockDB", back_populates="team", cascade="all, delete-orphan")
+    products = relationship("ProductModel", back_populates="team")
+
+
+import app.models.mock_models  # noqa: E402, F401
+import app.models.product_models  # noqa: E402, F401
+
+

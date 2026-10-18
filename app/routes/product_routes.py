@@ -49,13 +49,14 @@ class MobilePingPayload(BaseModel):
 def list_products(
     skip: int = 0,
     limit: int = 100,
+    team_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
     """
-    Listar todos os produtos da empresa do usuário.
+    Listar todos os produtos da empresa do usuário (opcionalmente filtrados por time).
     """
-    return ProductService.list(db, company_id=current_user.company_id, skip=skip, limit=limit)
+    return ProductService.list(db, company_id=current_user.company_id, skip=skip, limit=limit, team_id=team_id)
 
 @router.post("/", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
 def create_product(
