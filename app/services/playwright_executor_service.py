@@ -719,14 +719,53 @@ class PlaywrightExecutorService:
                         try:
                             import time
                             t1 = time.time()
-                            # Two-tier action: 1) Try natural actionability check with adaptive timeout
-                            #                  2) Fall back to forced click if obscured by transient overlay/animation
                             natural_timeout = min(timeout, 3000)
+
+                            # Check if element is a checkbox/radio (including custom web components)
+                            is_check_or_radio = False
                             try:
-                                await el.click(timeout=natural_timeout)
-                            except Exception as nat_err:
-                                logger.info(f"Natural click unfulfilled ({nat_err}), resorting to forced click fallback")
-                                await el.click(timeout=timeout, force=True)
+                                is_check_or_radio = await el.evaluate("""e => {
+                                    if (!e) return false;
+                                    const tag = (e.tagName || '').toLowerCase();
+                                    const type = (e.type || '').toLowerCase();
+                                    const role = (e.getAttribute('role') || '').toLowerCase();
+                                    if (tag === 'input' && (type === 'checkbox' || type === 'radio')) return true;
+                                    if (role === 'checkbox' || role === 'radio') return true;
+                                    if (tag.includes('checkbox') || tag.includes('radio')) return true;
+                                    if (e.querySelector && e.querySelector('input[type="checkbox"], input[type="radio"]')) return true;
+                                    if (e.shadowRoot && e.shadowRoot.querySelector('input[type="checkbox"], input[type="radio"]')) return true;
+                                    return false;
+                                }""")
+                            except Exception:
+                                pass
+
+                            if is_check_or_radio:
+                                # For checkboxes: try checking inner native input or Playwright check() first
+                                clicked_cb = False
+                                try:
+                                    sub_input = el.locator('input[type="checkbox"], input[type="radio"], [part~="checkbox"], input').first
+                                    if await sub_input.count() > 0:
+                                        try:
+                                            await sub_input.click(timeout=natural_timeout, force=True)
+                                            clicked_cb = True
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+
+                                if not clicked_cb:
+                                    try:
+                                        await el.click(timeout=natural_timeout)
+                                    except Exception:
+                                        await el.click(timeout=timeout, force=True)
+                            else:
+                                # Two-tier action: 1) Try natural actionability check with adaptive timeout
+                                #                  2) Fall back to forced click if obscured by transient overlay/animation
+                                try:
+                                    await el.click(timeout=natural_timeout)
+                                except Exception as nat_err:
+                                    logger.info(f"Natural click unfulfilled ({nat_err}), resorting to forced click fallback")
+                                    await el.click(timeout=timeout, force=True)
                             t2 = time.time()
                             logger.info(f"⏱️ Click timing: click_exec={round((t2-t1)*1000)}ms")
                         except Exception as click_err:
@@ -762,10 +801,12 @@ class PlaywrightExecutorService:
                     else:
                         raise ValueError("Selector is missing for click step")
                         
-                elif step_type == 'type':
+                elif step_type in ['type', 'select', 'select_option']:
                     await self._wait_for_loading_to_finish()
                     selector = properties.get('selector', '')
                     value = str(properties.get('value', ''))
+                    selected_text = str(properties.get('text', '') or properties.get('selectedText', '') or '')
+                    select_by = properties.get('select_by', 'auto') # 'index', 'name', 'value', or 'auto'
                     if selector:
                         if db and user_id:
                             hitl_sel = await self._handle_hitl_pause(target, selector, step, db, user_id)
@@ -780,19 +821,217 @@ class PlaywrightExecutorService:
                             t1 = time.time()
                             try:
                                 await el.wait_for(state="attached", timeout=timeout)
-                                tag = await el.evaluate("e => e.tagName.toLowerCase()")
+                                tag = await el.evaluate("e => e.tagName ? e.tagName.toLowerCase() : ''")
                             except:
                                 tag = ""
                                 
-                            if tag == 'select':
-                                await el.select_option(value=value, timeout=timeout)
-                            else:
-                                type_attr = await el.evaluate("e => e.type ? e.type.toLowerCase() : ''")
-                                if type_attr in ['radio', 'checkbox']:
+                            # Check if element is a selectbox, combobox or dropdown
+                            is_select = await el.evaluate("""e => {
+                                if (!e) return false;
+                                const tag = (e.tagName || '').toLowerCase();
+                                const role = (e.getAttribute('role') || '').toLowerCase();
+                                const hasPopup = (e.getAttribute('aria-haspopup') || '').toLowerCase();
+                                if (tag === 'select') return true;
+                                if (tag.includes('select') || tag.includes('combo') || tag.includes('dropdown') || tag.includes('picker')) return true;
+                                if (role === 'combobox' || role === 'listbox') return true;
+                                if (hasPopup === 'listbox' || hasPopup === 'true' || hasPopup === 'menu') return true;
+                                if (e.querySelector && e.querySelector('select')) return true;
+                                return false;
+                            }""") or (step_type in ['select', 'select_option']) or ('select' in tag) or ('combo' in tag)
+
+                            if is_select:
+                                selected = False
+                                target_label = selected_text or value
+                                
+                                # 1. Native <select> handling
+                                if tag == 'select' or await el.locator('select').count() > 0:
+                                    select_target = el if tag == 'select' else el.locator('select').first
+                                    # A. If selecting by index (1-based: 1 is 1st, 5 is 5th)
+                                    if (select_by == 'index' or (select_by == 'auto' and value.isdigit())) and value.isdigit():
+                                        num = int(value)
+                                        if num > 0:
+                                            try:
+                                                await select_target.select_option(index=num - 1, timeout=min(timeout, 2000))
+                                                selected = True
+                                            except Exception:
+                                                pass
+                                        if not selected:
+                                            try:
+                                                await select_target.select_option(index=num, timeout=min(timeout, 2000))
+                                                selected = True
+                                            except Exception:
+                                                pass
+
+                                    # B. If selecting by name / text
+                                    if not selected and (select_by in ['name', 'auto'] or target_label):
+                                        try:
+                                            await select_target.select_option(label=target_label or value, timeout=min(timeout, 2000))
+                                            selected = True
+                                        except Exception:
+                                            pass
+
+                                    # C. If selecting by value attribute
+                                    if not selected and value and select_by in ['value', 'auto']:
+                                        try:
+                                            await select_target.select_option(value=value, timeout=min(timeout, 2000))
+                                            selected = True
+                                        except Exception:
+                                            pass
+
+                                    # D. JS DOM fallback for native select
+                                    if not selected:
+                                        try:
+                                            selected = await select_target.evaluate("""(sel, args) => {
+                                                const { val, txt, mode } = args;
+                                                const num = parseInt(val, 10);
+                                                if ((mode === 'index' || (mode === 'auto' && !isNaN(num))) && !isNaN(num)) {
+                                                    const idx = num > 0 && num <= sel.options.length ? num - 1 : num;
+                                                    if (idx >= 0 && idx < sel.options.length) {
+                                                        sel.selectedIndex = idx;
+                                                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                                                        return true;
+                                                    }
+                                                }
+                                                for (let i = 0; i < sel.options.length; i++) {
+                                                    const opt = sel.options[i];
+                                                    const matchName = opt.text.trim().toLowerCase() === (txt || val).trim().toLowerCase();
+                                                    const matchVal = opt.value === val;
+                                                    if ((mode === 'name' && matchName) || (mode === 'value' && matchVal) || (mode === 'auto' && (matchName || matchVal))) {
+                                                        sel.selectedIndex = i;
+                                                        sel.value = opt.value;
+                                                        sel.dispatchEvent(new Event('input', { bubbles: true }));
+                                                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                                                        return true;
+                                                    }
+                                                }
+                                                return false;
+                                            }""", {"val": value, "txt": target_label, "mode": select_by})
+                                        except Exception:
+                                            pass
+                                
+                                # 2. Custom Select / Web Component / Dropdown (e.g. vaadin-select, vaadin-combo-box, MUI, etc.)
+                                if not selected:
+                                    items_selector = "vaadin-select-overlay vaadin-item, vaadin-combo-box-overlay vaadin-combo-box-item, [role='listbox'] [role='option'], [role='option'], vaadin-item, vaadin-combo-box-item, .dropdown-menu .dropdown-item, .select-options li"
+                                    items_loc = self._page.locator(items_selector)
+                                    item_count = await items_loc.count()
+
+                                    # If not opened yet, click trigger element to reveal options
+                                    if item_count == 0:
+                                        try:
+                                            await el.click(timeout=min(timeout, 2000))
+                                            await self._page.wait_for_timeout(350)
+                                            item_count = await items_loc.count()
+                                        except Exception as open_err:
+                                            logger.info(f"Dropdown open click failed: {open_err}")
+
+                                    # If items are visible in dropdown list:
+                                    if item_count > 0:
+                                        # A. If selecting by index (1-based: 1 is 1st item, 5 is 5th item)
+                                        if (select_by == 'index' or (select_by == 'auto' and value.isdigit())) and value.isdigit():
+                                            num = int(value)
+                                            target_idx = (num - 1) if (0 < num <= item_count) else (num if num < item_count else 0)
+                                            try:
+                                                await items_loc.nth(target_idx).click(timeout=min(timeout, 3000))
+                                                selected = True
+                                                logger.info(f"Selected item index {target_idx} (item {num} of {item_count}) from dropdown")
+                                            except Exception as click_item_err:
+                                                logger.warning(f"Error clicking item {target_idx}: {click_item_err}")
+
+                                        # B. If selecting by name / text
+                                        if not selected and (select_by in ['name', 'auto'] or target_label):
+                                            search_txt = (target_label or value).strip().lower()
+                                            for idx in range(item_count):
+                                                it = items_loc.nth(idx)
+                                                try:
+                                                    it_txt = (await it.inner_text()).strip().lower()
+                                                    if search_txt == it_txt or (search_txt in it_txt and len(search_txt) >= 2):
+                                                        await it.click(timeout=min(timeout, 3000))
+                                                        selected = True
+                                                        logger.info(f"Selected item '{it_txt}' matching '{search_txt}'")
+                                                        break
+                                                except Exception:
+                                                    continue
+
+                                # 3. Vaadin / Custom Component JS items/value fallback
+                                if not selected:
                                     try:
-                                        await el.check(timeout=min(timeout, 3000))
+                                        selected = await el.evaluate("""(elem, args) => {
+                                            const { val, mode } = args;
+                                            if (!elem) return false;
+                                            const num = parseInt(val, 10);
+                                            if (elem.items && Array.isArray(elem.items) && elem.items.length > 0) {
+                                                let it = null;
+                                                if ((mode === 'index' || (mode === 'auto' && !isNaN(num))) && !isNaN(num)) {
+                                                    if (num > 0 && num <= elem.items.length) {
+                                                        it = elem.items[num - 1];
+                                                    } else if (num >= 0 && num < elem.items.length) {
+                                                        it = elem.items[num];
+                                                    }
+                                                }
+                                                if (!it) {
+                                                    it = elem.items.find(x => typeof x === 'string' ? x.toLowerCase() === val.toLowerCase() : (x.id == val || x.value == val || (x.label && x.label.toLowerCase() === val.toLowerCase())));
+                                                }
+                                                if (it) {
+                                                    elem.selectedItem = it;
+                                                    elem.value = typeof it === 'object' ? (it.id || it.value || it.label) : it;
+                                                    elem.dispatchEvent(new CustomEvent('change', { bubbles: true, composed: true }));
+                                                    return true;
+                                                }
+                                            }
+                                            if ('value' in elem) {
+                                                elem.value = val;
+                                                elem.dispatchEvent(new CustomEvent('change', { bubbles: true, composed: true }));
+                                                return true;
+                                            }
+                                            return false;
+                                        }""", {"val": value, "mode": select_by})
                                     except Exception:
-                                        await el.check(timeout=timeout, force=True)
+                                        pass
+                            else:
+                                # Check if element is a checkbox/radio
+                                is_check = await el.evaluate("""e => {
+                                    if (!e) return false;
+                                    const tag = (e.tagName || '').toLowerCase();
+                                    const type = (e.type || '').toLowerCase();
+                                    const role = (e.getAttribute('role') || '').toLowerCase();
+                                    return ['checkbox', 'radio'].includes(type) || ['checkbox', 'radio'].includes(role) || tag.includes('checkbox') || tag.includes('radio');
+                                }""")
+                                if is_check:
+                                    should_check = value.lower() in ['true', '1', 'on', 'yes', 'checked'] if value else True
+                                    sub = el.locator('input[type="checkbox"], input[type="radio"], [part~="checkbox"], input').first
+                                    target_el = sub if (await sub.count() > 0) else el
+                                    if should_check:
+                                        try:
+                                            await target_el.check(timeout=min(timeout, 3000))
+                                        except Exception:
+                                            await target_el.click(timeout=timeout, force=True)
+                                    else:
+                                        try:
+                                            await target_el.uncheck(timeout=min(timeout, 3000))
+                                        except Exception:
+                                            await target_el.click(timeout=timeout, force=True)
+                                elif tag not in ['input', 'textarea']:
+                                    # Custom component or div: check if it wraps an inner input/textarea
+                                    inner_input = el.locator('input, textarea, [contenteditable="true"]').first
+                                    if await inner_input.count() > 0:
+                                        try:
+                                            await inner_input.fill(value, timeout=min(timeout, 3000))
+                                        except Exception:
+                                            await inner_input.fill(value, timeout=timeout, force=True)
+                                    else:
+                                        # Try setting value property via JS
+                                        set_js = await el.evaluate("""(e, val) => {
+                                            if (e && 'value' in e) {
+                                                e.value = val;
+                                                e.dispatchEvent(new Event('input', { bubbles: true }));
+                                                e.dispatchEvent(new Event('change', { bubbles: true }));
+                                                return true;
+                                            }
+                                            return false;
+                                        }""", value)
+                                        if not set_js:
+                                            await el.focus()
+                                            await self._page.keyboard.type(value)
                                 else:
                                     try:
                                         await el.fill(value, timeout=min(timeout, 3000))

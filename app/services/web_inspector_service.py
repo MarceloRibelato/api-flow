@@ -42,7 +42,16 @@ BLOCKED_HOSTNAMES = {
     "host.docker.internal", "127.0.0.1", "0.0.0.0"
 }
 
-def _validate_url(url: str):
+INFRASTRUCTURE_BLOCKED_HOSTNAMES = {
+    "flow-backend", "flow-db", "flow-redis", 
+    "flow-celery-worker", "flow-db-migration"
+}
+
+CLOUD_METADATA_HOSTS = {
+    "169.254.169.254", "metadata.google.internal", "metadata", "instance-data"
+}
+
+def _validate_url(url: str, allow_local: bool = False):
     """Protects against SSRF by validating the URL hostname and resolved IP address."""
     if not url:
         return
@@ -57,6 +66,21 @@ def _validate_url(url: str):
     if not hostname:
         raise ValueError("URL inválida: hostname não especificado.")
     
+    if allow_local:
+        if hostname in CLOUD_METADATA_HOSTS or "metadata.google" in hostname:
+            raise ValueError("Navegação bloqueada: endpoint de metadados de nuvem restrito.")
+        if hostname in INFRASTRUCTURE_BLOCKED_HOSTNAMES:
+            raise ValueError(f"Navegação bloqueada: acesso a host interno proibido ({hostname}).")
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if str(ip) == "169.254.169.254" or ip.is_link_local:
+                raise ValueError("Navegação bloqueada: endpoint de metadados de nuvem restrito.")
+        except ValueError as ve:
+            if "Navegação bloqueada" in str(ve):
+                raise ve
+            pass
+        return
+
     if hostname in BLOCKED_HOSTNAMES:
         raise ValueError(f"Navegação bloqueada: acesso a host interno proibido ({hostname}).")
     
@@ -328,14 +352,20 @@ class _WebInspectorServiceImpl:
     @classmethod
     async def start_session(cls, session_id: str, initial_url: str = None, steps: list = None, user_id: Optional[int] = None) -> dict:
         """Starts a persistent playwright browser session using an isolated context from the shared browser."""
+        try:
+            from app.config import settings
+            allow_local = getattr(settings, "WEB_INSPECTOR_ALLOW_LOCAL", True)
+        except Exception:
+            allow_local = True
+
         # SSRF Protection: Validate initial URL and any pre-existing navigation steps
         if initial_url:
-            _validate_url(initial_url)
+            _validate_url(initial_url, allow_local=allow_local)
         for s in (steps or []):
             if s.get("type") in ("navigate", "browser"):
                 step_url = s.get("properties", {}).get("url") or s.get("properties", {}).get("value")
                 if step_url:
-                    _validate_url(step_url)
+                    _validate_url(step_url, allow_local=allow_local)
 
         async with _session_lock:
             if session_id in _active_sessions:
@@ -390,14 +420,19 @@ class _WebInspectorServiceImpl:
                 if initial_url and (not steps or not has_nav_step):
                     if not initial_url.startswith('http'):
                         initial_url = f"https://{initial_url}"
-                    logger.info(f"🌐 [WebInspector] Navigating to {initial_url}...")
                     try:
-                        await page.goto(initial_url, wait_until="commit", timeout=60000)
+                        from app.services.url_utils import sanitize_url_for_docker
+                        nav_url = sanitize_url_for_docker(initial_url)
+                    except Exception:
+                        nav_url = initial_url
+                    logger.info(f"🌐 [WebInspector] Navigating to {nav_url} (original: {initial_url})...")
+                    try:
+                        await page.goto(nav_url, wait_until="commit", timeout=60000)
                     except Exception as e:
                         logger.warning(f"🌐 [WebInspector] Initial goto(commit) failed: {e}, retrying...")
                         await asyncio.sleep(1)
                         try:
-                            await page.goto(initial_url, wait_until="domcontentloaded", timeout=30000)
+                            await page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
                         except Exception:
                             pass
                     try:
@@ -646,20 +681,31 @@ class _WebInspectorServiceImpl:
             if action_type in ("navigate", "browser"):
                 url = props.get("url") or props.get("value")
                 if url:
-                    _validate_url(url)
+                    try:
+                        from app.config import settings
+                        allow_local = getattr(settings, "WEB_INSPECTOR_ALLOW_LOCAL", True)
+                    except Exception:
+                        allow_local = True
+                    _validate_url(url, allow_local=allow_local)
                     if not url.startswith('http'):
                         url = f"https://{url}"
+                    try:
+                        from app.services.url_utils import sanitize_url_for_docker
+                        nav_url = sanitize_url_for_docker(url)
+                    except Exception:
+                        nav_url = url
+                    logger.info(f"🌐 [WebInspector] Navigating to {nav_url} (original: {url})...")
                     # "commit" is the most lenient wait — just waits for navigation to start
                     # (first bytes received). Avoids "Could not connect to navigation engine"
                     # which happens in Docker when the browser can't sustain the "load" wait.
                     try:
-                        await page.goto(url, wait_until="commit", timeout=60000)
+                        await page.goto(nav_url, wait_until="commit", timeout=60000)
                     except Exception as goto_err:
                         logger.warning(f"🌐 [WebInspector] goto(commit) failed, retrying with domcontentloaded: {goto_err}")
                         # Last-resort retry — sometimes commit fails on the very first request
                         await asyncio.sleep(1)
                         try:
-                            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                            await page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
                         except Exception:
                             pass  # If we still fail, proceed with whatever is loaded
                     # Give SPAs time to hydrate after navigation commits
@@ -672,23 +718,39 @@ class _WebInspectorServiceImpl:
 
             elif action_type == "tap" or action_type == "click":
                 button = props.get("button", "left")
+                step_timeout = min(props.get("timeout", 4000) or 4000, 5000)
                 if selector:
                     # Ensure element is in view
                     locator = page.locator(selector).first
                     try:
-                        await locator.scroll_into_view_if_needed(timeout=5000)
+                        await locator.scroll_into_view_if_needed(timeout=2000)
                         # Move to element first so hover/focus CSS effects fire (real-user behaviour)
-                        await locator.hover(timeout=1000)
+                        await locator.hover(timeout=800)
                     except Exception:
                         pass
                     
                     try:
                         # Standard click handles scrolling automatically
-                        await locator.click(button=button, timeout=15000)
+                        await locator.click(button=button, timeout=step_timeout)
                     except Exception as click_err:
-                        # Fallback for obscured elements
-                        logger.info(f"🌐 [WebInspector] Click failed for {selector}, retrying with force=True: {click_err}")
-                        await locator.click(button=button, force=True, timeout=8000)
+                        # 1. Fast local heuristic healing
+                        healed = False
+                        try:
+                            from app.services.heuristic_healer_service import HeuristicHealerService
+                            healed_sel, _ = await HeuristicHealerService.attempt_heal(page, selector, "", "click")
+                            if healed_sel:
+                                logger.info(f"✨ [WebInspector] Fast Heuristic Click Success! Replacing '{selector}' with '{healed_sel}'")
+                                locator = page.locator(healed_sel).first
+                                props["selector"] = healed_sel
+                                await locator.click(button=button, timeout=2500)
+                                healed = True
+                        except Exception:
+                            pass
+
+                        if not healed:
+                            # Fallback for obscured elements
+                            logger.info(f"🌐 [WebInspector] Click failed for {selector}, retrying with force=True: {click_err}")
+                            await locator.click(button=button, force=True, timeout=2500)
                 else:
                     # Coordinate-based click: move first to trigger hover, then click
                     x, y = props.get("x"), props.get("y")
@@ -724,35 +786,54 @@ class _WebInspectorServiceImpl:
                 await page.mouse.wheel(delta_x, delta_y)
             elif action_type == "type" or action_type == "fill":
                 val = props.get("value")
+                if val is None:
+                    val = ""
+                step_timeout = min(props.get("timeout", 4000) or 4000, 5000)
                 locator = page.locator(selector).first
+                
+                type_success = False
                 try:
-                    # Standard fill() is usually the most reliable for state updates
+                    await locator.fill(str(val), timeout=step_timeout)
+                    type_success = True
+                except Exception as fill_err:
+                    # 1. Attempt fast Heuristic Healing (e.g. placeholder fallback, similar id/class)
                     try:
-                        await locator.fill(str(val), timeout=15000)
-                    except Exception as fill_err:
+                        from app.services.heuristic_healer_service import HeuristicHealerService
+                        healed_sel, _ = await HeuristicHealerService.attempt_heal(page, selector, str(val), "type")
+                        if healed_sel:
+                            logger.info(f"✨ [WebInspector] Fast Heuristic Type Success! Replacing '{selector}' with '{healed_sel}'")
+                            locator = page.locator(healed_sel).first
+                            props["selector"] = healed_sel
+                            await locator.fill(str(val), timeout=2500)
+                            type_success = True
+                    except Exception:
+                        pass
+
+                    # 2. If still unfulfilled, try focus and press_sequentially with short timeout
+                    if not type_success:
                         logger.warning(f"🌐 [WebInspector] Standard fill failed for {selector}, trying press_sequentially: {fill_err}")
-                        await locator.focus()
-                        await locator.press_sequentially(str(val), delay=30)
-                    
+                        try:
+                            await locator.focus(timeout=1500)
+                            await locator.press_sequentially(str(val), delay=20)
+                            type_success = True
+                        except Exception:
+                            pass
+
+                if type_success:
                     # Dispatch events to be extra sure
                     try:
                         await locator.evaluate("el => { el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('change', {bubbles: true})); el.dispatchEvent(new Event('blur', {bubbles: true})); }")
                     except Exception:
                         pass
-                except Exception as type_err:
-                    logger.warning(f"🌐 [WebInspector] Robust type failed for {selector}, falling back to native fill: {type_err}")
-                    try:
-                        await locator.fill(str(val), timeout=8000)
-                    except Exception:
-                        # Final attempt: just try to type at the current focus
-                        await page.keyboard.type(str(val))
+                else:
+                    raise RuntimeError(f"Elemento não encontrado para preenchimento: {selector}")
             elif action_type in ("keypress", "keyboard"):
                 key = props.get("key") or props.get("value") or "Enter"
                 text = props.get("text")
                 if selector:
                     try:
                         locator = page.locator(selector).first
-                        await locator.press(key, timeout=8000)
+                        await locator.press(key, timeout=2500)
                     except Exception as kp_err:
                         logger.warning(f"🌐 [WebInspector] Keypress on {selector} failed ({kp_err}), trying page.keyboard.press")
                         await page.keyboard.press(key)
@@ -767,8 +848,8 @@ class _WebInspectorServiceImpl:
                 if selector:
                     locator = page.locator(selector).first
                     try:
-                        await locator.scroll_into_view_if_needed(timeout=4000)
-                        await locator.hover(timeout=8000)
+                        await locator.scroll_into_view_if_needed(timeout=1500)
+                        await locator.hover(timeout=2500)
                     except Exception as hover_err:
                         logger.warning(f"🌐 [WebInspector] Hover failed for {selector}: {hover_err}")
                 else:

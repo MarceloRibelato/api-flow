@@ -88,6 +88,35 @@ class TestWebInspectorSecurityAndSSRF(unittest.TestCase):
             with self.assertRaises(ValueError, msg=f"Protocol in '{url}' should be blocked"):
                 _validate_url(url)
 
+    def test_validate_url_allows_local_when_allow_local_true(self):
+        """Allows localhost, internal docker frontends, and private networks when allow_local=True."""
+        local_urls = [
+            "http://localhost:3000",
+            "http://localhost:5173/dashboard",
+            "http://127.0.0.1:8080",
+            "http://flow-frontend",
+            "http://192.168.1.50:3000",
+            "http://10.0.0.10:8000"
+        ]
+        for url in local_urls:
+            try:
+                _validate_url(url, allow_local=True)
+            except ValueError as e:
+                self.fail(f"Local URL '{url}' should be allowed when allow_local=True: {e}")
+
+    def test_validate_url_blocks_cloud_metadata_and_backend_even_with_allow_local(self):
+        """Still blocks cloud metadata and backend internal infrastructure services when allow_local=True."""
+        blocked_even_when_local = [
+            "http://169.254.169.254/latest/meta-data/",
+            "https://metadata.google.internal/computeMetadata/v1/",
+            "http://flow-db:5432",
+            "http://flow-redis:6379",
+            "http://flow-backend:8000"
+        ]
+        for url in blocked_even_when_local:
+            with self.assertRaises(ValueError, msg=f"Sensitive target '{url}' should still be blocked"):
+                _validate_url(url, allow_local=True)
+
 
 class TestWebInspectorAutoCorrection(unittest.IsolatedAsyncioTestCase):
     """Test suite validating icon-based candidate scoring and AI auto-correction."""

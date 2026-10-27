@@ -347,10 +347,10 @@ class FrontRecordingService:
                             "order": global_order,
                             "type": "browser",
                             "name": "Navegar para Página",
-                            "properties": {"value": value, "timeout": 30000}
+                            "properties": {"value": str(value) if value is not None else "", "timeout": 30000}
                         })
                     elif action == 'click':
-                         e2e_steps_payload.append({
+                        e2e_steps_payload.append({
                             "id": str(uuid.uuid4()),
                             "order": global_order,
                             "type": "click",
@@ -364,7 +364,37 @@ class FrontRecordingService:
                             "order": global_order,
                             "type": "type",
                             "name": f"Digitar em {label}" if label != 'Campo' else f"Digitar em {selector.split(' > ')[-1]}",
-                            "properties": {"selector": selector, "value": value, "timeout": 30000, "isIframe": data.get('isIframe', False), "frameUrl": data.get('frameUrl', '')}
+                            "properties": {"selector": selector, "value": str(value) if value is not None else "", "timeout": 30000, "isIframe": data.get('isIframe', False), "frameUrl": data.get('frameUrl', '')}
+                        })
+                    elif action == 'select':
+                        label = data.get('label', 'Seleção')
+                        sel_text = data.get('selectedText') or str(value)
+                        e2e_steps_payload.append({
+                            "id": str(uuid.uuid4()),
+                            "order": global_order,
+                            "type": "select",
+                            "name": f"Selecionar '{sel_text}' em {label}" if label != 'Seleção' else f"Selecionar '{sel_text}'",
+                            "properties": {
+                                "selector": selector,
+                                "value": str(value) if value is not None else "",
+                                "text": sel_text,
+                                "timeout": 30000,
+                                "isIframe": data.get('isIframe', False),
+                                "frameUrl": data.get('frameUrl', '')
+                            }
+                        })
+                    elif action == 'assert':
+                        e2e_steps_payload.append({
+                            "id": str(uuid.uuid4()),
+                            "order": global_order,
+                            "type": "assert",
+                            "name": data.get('label') or f"Validar: {str(value)[:20]}",
+                            "properties": {
+                                "selector": selector,
+                                "value": str(value) if value is not None else "",
+                                "operator": data.get('operator', 'visible'),
+                                "timeout": 30000
+                            }
                         })
                     
                 else: # API Request

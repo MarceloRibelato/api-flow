@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # Security
     ALLOWED_ORIGINS: str = ""  # Comma-separated list, e.g. "http://localhost:5173,http://flow.qa"
     VERIFY_SSL: bool = False   # Set to True in production
+    WEB_INSPECTOR_ALLOW_LOCAL: bool = True
 
     model_config = SettingsConfigDict(
         env_file=ENV_PATH, env_file_encoding="utf-8", extra="ignore"
