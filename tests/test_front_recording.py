@@ -33,6 +33,26 @@ def test_save_front_recording(client, db_session):
     assert script_resp.status_code == 200
     assert "page.click('button.submit')" in script_resp.json()["script"]
 
+    # Verify E2E Flow generation has nodeType='e2e' and color='#c4a35a'
+    flow_e2e_resp = client.get(f"/flow/load/{feat_id}?flow_type=e2e", headers=headers)
+    assert flow_e2e_resp.status_code == 200
+    e2e_data = flow_e2e_resp.json()
+    e2e_recorded_node = next(n for n in e2e_data["nodes"] if n["id"] != "start")
+    assert e2e_recorded_node["data"]["nodeType"] == "e2e"
+    assert e2e_recorded_node["data"]["color"] == "#c4a35a"
+    assert e2e_data["cardData"][e2e_recorded_node["id"]]["nodeType"] == "e2e"
+    assert len(e2e_data["cardData"][e2e_recorded_node["id"]]["e2eSteps"]) > 0
+
+    # Verify API Flow generation has nodeType='api' and color='#5eab8b'
+    flow_api_resp = client.get(f"/flow/load/{feat_id}?flow_type=api", headers=headers)
+    assert flow_api_resp.status_code == 200
+    api_data = flow_api_resp.json()
+    api_recorded_node = next(n for n in api_data["nodes"] if n["id"] != "start")
+    assert api_recorded_node["data"]["nodeType"] == "api"
+    assert api_recorded_node["data"]["color"] == "#5eab8b"
+    assert api_data["cardData"][api_recorded_node["id"]]["nodeType"] == "api"
+    assert len(api_data["cardData"][api_recorded_node["id"]]["e2eSteps"]) == 0
+
 def test_list_front_recordings(client, db_session):
     token = get_auth_token_and_admin(client, db_session, "recording_list_user")
     headers = {"Authorization": f"Bearer {token}"}

@@ -213,65 +213,150 @@ class FrontRecordingService:
         existing_flow_e2e = FlowService.load(db, recording.feature_id, company_id, flow_type="e2e")
         existing_flow_api = FlowService.load(db, recording.feature_id, company_id, flow_type="api")
         
-        nodes = []
-        edges = []
-        card_data = {}
+        nodes_e2e = []
+        edges_e2e = []
+        card_data_e2e = {}
+
+        nodes_api = []
+        edges_api = []
+        card_data_api = {}
         
         base_name_e2e = f"Fluxo Front: {recording.name}"
         base_name_api = f"Fluxo API: {recording.name}"
         
-        start_x = 0
-        last_existing_node_id = None
+        start_x_e2e = 0
+        last_existing_node_id_e2e = None
+
+        start_x_api = 0
+        last_existing_node_id_api = None
         
+        # Prepare E2E Flow baseline
         if existing_flow_e2e and existing_flow_e2e.get("nodes"):
-            nodes = list(existing_flow_e2e["nodes"])
-            edges = list(existing_flow_e2e["edges"])
-            card_data = dict(existing_flow_e2e.get("cardData", {}))
+            nodes_e2e = list(existing_flow_e2e["nodes"])
+            edges_e2e = list(existing_flow_e2e["edges"])
+            card_data_e2e = dict(existing_flow_e2e.get("cardData", {}))
             base_name_e2e = existing_flow_e2e.get("name") or base_name_e2e
             
-            if existing_flow_api and existing_flow_api.get("name"):
-                 base_name_api = existing_flow_api.get("name")
-                 
-            # Find the rightmost node to append our new nodes
+            # Sanitize legacy/misconfigured E2E nodes
+            for n in nodes_e2e:
+                nid = n.get("id")
+                if nid and nid != "start":
+                    c_info = card_data_e2e.get(nid, {})
+                    if c_info.get("e2eSteps"):
+                        c_info["nodeType"] = "e2e"
+                        if c_info.get("color") in ["#3b82f6", "#5eab8b"]:
+                            c_info["color"] = "#c4a35a"
+                    if n.get("data"):
+                        if c_info.get("e2eSteps") or n["data"].get("nodeType") == "api":
+                            n["data"]["nodeType"] = "e2e"
+                        if n["data"].get("color") in ["#3b82f6", "#5eab8b"]:
+                            n["data"]["color"] = "#c4a35a"
+
+            # Find rightmost node to append
             max_x = -9999
-            for n in nodes:
+            for n in nodes_e2e:
                 x_pos = n.get("position", {}).get("x", 0)
                 if x_pos > max_x:
                     max_x = x_pos
-                    last_existing_node_id = n.get("id")
-                    
-            start_x = max_x + 300
+                    last_existing_node_id_e2e = n.get("id")
+            start_x_e2e = max_x + 300
         else:
-            # ADD START NODE
-            nodes.append({
+            # ADD START NODE for E2E
+            nodes_e2e.append({
                 "id": "start",
                 "type": "startNode",
                 "position": {"x": -300, "y": 100},
                 "data": {
                     "name": "Start", 
                     "color": "#10b981",
+                    "nodeType": "start",
                     "childCount": 0,
                     "isCollapsed": False
                 }
             })
-            card_data["start"] = {
+            card_data_e2e["start"] = {
                 "name": "Start",
                 "color": "#10b981",
+                "nodeType": "start",
                 "description": "Início do fluxo",
                 "apiCalls": [],
                 "e2eSteps": [],
                 "bddScenarios": [],
                 "envData": {}
             }
-            last_existing_node_id = "start"
-            start_x = 0
+            last_existing_node_id_e2e = "start"
+            start_x_e2e = 0
+
+        # Prepare API Flow baseline
+        if existing_flow_api and existing_flow_api.get("nodes"):
+            nodes_api = list(existing_flow_api["nodes"])
+            edges_api = list(existing_flow_api["edges"])
+            card_data_api = dict(existing_flow_api.get("cardData", {}))
+            base_name_api = existing_flow_api.get("name") or base_name_api
+            
+            # Sanitize API nodes
+            for n in nodes_api:
+                nid = n.get("id")
+                if nid and nid != "start":
+                    c_info = card_data_api.get(nid, {})
+                    c_info["nodeType"] = "api"
+                    c_info["e2eSteps"] = []
+                    if c_info.get("color") in ["#3b82f6", "#c4a35a"]:
+                        c_info["color"] = "#5eab8b"
+                    if n.get("data"):
+                        n["data"]["nodeType"] = "api"
+                        if n["data"].get("color") in ["#3b82f6", "#c4a35a"]:
+                            n["data"]["color"] = "#5eab8b"
+
+            max_x = -9999
+            for n in nodes_api:
+                x_pos = n.get("position", {}).get("x", 0)
+                if x_pos > max_x:
+                    max_x = x_pos
+                    last_existing_node_id_api = n.get("id")
+            start_x_api = max_x + 300
+        else:
+            # ADD START NODE for API
+            nodes_api.append({
+                "id": "start",
+                "type": "startNode",
+                "position": {"x": -300, "y": 100},
+                "data": {
+                    "name": "Start", 
+                    "color": "#10b981",
+                    "nodeType": "start",
+                    "childCount": 0,
+                    "isCollapsed": False
+                }
+            })
+            card_data_api["start"] = {
+                "name": "Start",
+                "color": "#10b981",
+                "nodeType": "start",
+                "description": "Início do fluxo",
+                "apiCalls": [],
+                "e2eSteps": [],
+                "bddScenarios": [],
+                "envData": {}
+            }
+            last_existing_node_id_api = "start"
+            start_x_api = 0
 
         spacing_x = 300
 
-        if steps and last_existing_node_id:
-            edges.append({
-                "id": f"edge-{last_existing_node_id}-node-recorded-{recording.id}-0",
-                "source": last_existing_node_id,
+        if steps and last_existing_node_id_e2e:
+            edges_e2e.append({
+                "id": f"edge-{last_existing_node_id_e2e}-node-recorded-{recording.id}-0",
+                "source": last_existing_node_id_e2e,
+                "target": f"node-recorded-{recording.id}-0",
+                "type": "buttonedge",
+                "animated": True
+            })
+
+        if steps and last_existing_node_id_api:
+            edges_api.append({
+                "id": f"edge-{last_existing_node_id_api}-node-recorded-{recording.id}-0",
+                "source": last_existing_node_id_api,
                 "target": f"node-recorded-{recording.id}-0",
                 "type": "buttonedge",
                 "animated": True
@@ -280,23 +365,45 @@ class FrontRecordingService:
         for idx, step in enumerate(steps):
             node_id = f"node-recorded-{recording.id}-{idx}"
             
-            # Node - Data must match NodeDataBasic (no description here)
-            nodes.append({
+            # E2E Node (Web Automation)
+            nodes_e2e.append({
                 "id": node_id,
                 "type": "custom",
-                "position": {"x": start_x + (idx * spacing_x), "y": 100},
+                "position": {"x": start_x_e2e + (idx * spacing_x), "y": 100},
                 "data": {
                     "name": step["name"], 
-                    "color": "#3b82f6",
+                    "color": "#c4a35a",
+                    "nodeType": "e2e",
+                    "childCount": 0,
+                    "isCollapsed": False
+                }
+            })
+
+            # API Node
+            nodes_api.append({
+                "id": node_id,
+                "type": "custom",
+                "position": {"x": start_x_api + (idx * spacing_x), "y": 100},
+                "data": {
+                    "name": step["name"], 
+                    "color": "#5eab8b",
+                    "nodeType": "api",
                     "childCount": 0,
                     "isCollapsed": False
                 }
             })
             
-            # Edge from previous step
+            # Edges from previous step
             if idx > 0:
                 source_id = f"node-recorded-{recording.id}-{idx-1}"
-                edges.append({
+                edges_e2e.append({
+                    "id": f"edge-recorded-{source_id}-{node_id}",
+                    "source": source_id,
+                    "target": node_id,
+                    "type": "buttonedge",
+                    "animated": True
+                })
+                edges_api.append({
                     "id": f"edge-recorded-{source_id}-{node_id}",
                     "source": source_id,
                     "target": node_id,
@@ -413,10 +520,11 @@ class FrontRecordingService:
                         "extracts": []
                     })
 
-            # Card Data
-            card_data[node_id] = {
+            # Card Data for E2E Flow
+            card_data_e2e[node_id] = {
                 "name": step["name"],
-                "color": "#3b82f6",
+                "color": "#c4a35a",
+                "nodeType": "e2e",
                 "description": f"Etapa automática gerada da gravação: {recording.name}",
                 "apiCalls": api_calls_payload,
                 "e2eSteps": e2e_steps_payload,
@@ -424,33 +532,38 @@ class FrontRecordingService:
                 "envData": {}
             }
 
+            # Card Data for API Flow (clean, without e2eSteps)
+            card_data_api[node_id] = {
+                "name": step["name"],
+                "color": "#5eab8b",
+                "nodeType": "api",
+                "description": f"Etapa automática gerada da gravação: {recording.name}",
+                "apiCalls": api_calls_payload,
+                "e2eSteps": [],
+                "bddScenarios": [],
+                "envData": {}
+            }
+
         # 3. SAVE DOUBLE FLOWS (E2E and API)
-        import copy
-        
         # A. Save E2E Flow
         flow_schema_e2e = FlowSaveSchema(
             projectId=recording.feature_id,
             flow_type="e2e",
             name=base_name_e2e,
-            nodes=nodes,
-            edges=edges,
-            cardData=card_data
+            nodes=nodes_e2e,
+            edges=edges_e2e,
+            cardData=card_data_e2e
         )
         FlowService.save(db, flow_schema_e2e, company_id, user_id)
         logger.info(f"✅ Auto-Generated/Updated E2E Flow for recording {recording.name}")
 
         # B. Save API Flow (Parallel)
-        # We clone the card data and remove E2E steps for a clean API view
-        card_data_api = copy.deepcopy(card_data)
-        for nid in card_data_api:
-            card_data_api[nid]["e2eSteps"] = []
-            
         flow_schema_api = FlowSaveSchema(
             projectId=recording.feature_id,
             flow_type="api",
             name=base_name_api,
-            nodes=nodes,
-            edges=edges,
+            nodes=nodes_api,
+            edges=edges_api,
             cardData=card_data_api
         )
         FlowService.save(db, flow_schema_api, company_id, user_id)
