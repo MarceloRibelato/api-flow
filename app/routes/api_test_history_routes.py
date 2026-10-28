@@ -52,7 +52,7 @@ def get_execution_history(
     method: Optional[str] = None,
     status_code: Optional[int] = None,
     node_id: Optional[str] = None,
-    execution_type: Optional[str] = Query(None, pattern="^(api|web|mobile)$"),
+    execution_type: Optional[str] = Query(None, pattern="^(api|web|mobile|e2e)$"),
     batch_id: Optional[str] = None,
     sort_by: Optional[str] = Query('created_at', pattern="^(created_at|id|response_time)$"),
     order: Optional[str] = Query('desc', pattern="^(asc|desc)$"),
@@ -61,6 +61,8 @@ def get_execution_history(
 ):
     """Retorna o histórico paginado e filtrado (Unificado)"""
     try:
+        if execution_type == "e2e":
+            execution_type = "web"
         return HistoryService.get_all(
             db,
             current_user.company_id,
@@ -94,13 +96,15 @@ def get_history_batches(
     project_id: Optional[int] = None,
     flow_id: Optional[Union[int, str]] = None,
     schedule_type: Optional[str] = None,
-    execution_type: Optional[str] = Query(None, pattern="^(api|web|mobile)$"),
+    execution_type: Optional[str] = Query(None, pattern="^(api|web|mobile|e2e)$"),
     exclude_api: bool = Query(False),
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
     """Retorna os batches agrupados e paginados"""
     try:
+        if execution_type == "e2e":
+            execution_type = "web"
         return HistoryService.get_batches(
             db=db,
             company_id=current_user.company_id,

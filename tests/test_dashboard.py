@@ -60,7 +60,7 @@ def test_dashboard_delayed(client, db_session):
     assert len(data) >= 1
     assert data[0]["response_time"] == 3000
 
-def test_dashboard_day-stats(client, db_session):
+def test_dashboard_day_stats(client, db_session):
     token = get_auth_token_and_admin(client, db_session, "dash_user_day-stats")
     headers = {"Authorization": f"Bearer {token}"}
     setup_history_data(db_session)
