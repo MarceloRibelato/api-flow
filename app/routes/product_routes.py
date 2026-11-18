@@ -353,6 +353,154 @@ def list_mobile_devices(
         ProductMobileDeviceDB.product_id == product_id
     ).all()
 
+@router.post("/{product_id}/mobile-devices/validate")
+def validate_mobile_device(
+    product_id: int,
+    device: MobileDeviceCreate,
+    exclude_device_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """Validar configurações de um dispositivo antes de salvar na matriz."""
+    from app.models.product_models import ProductMobileDeviceDB
+    from app.services.product_service import ProductService
+    from app.services.mobile_device_pool_service import MobileDevicePoolService
+    import json
+    import subprocess
+    import requests as _requests
+
+    checks = []
+    errors = []
+    warnings = []
+
+    dev_name = (device.device_name or "").strip()
+    label = (device.label or "").strip()
+    if not label or not dev_name:
+        errors.append("Nome de exibição e Device Name (UDID) são obrigatórios.")
+        return {"valid": False, "checks": checks, "errors": errors, "warnings": warnings}
+
+    # 1. Duplicidade na matriz
+    dup_q = db.query(ProductMobileDeviceDB).filter(
+        ProductMobileDeviceDB.product_id == product_id,
+        ProductMobileDeviceDB.device_name == dev_name
+    )
+    if exclude_device_id is not None:
+        dup_q = dup_q.filter(ProductMobileDeviceDB.id != exclude_device_id)
+    if dup_q.first():
+        msg = f"O dispositivo '{dev_name}' já está cadastrado neste produto."
+        errors.append(msg)
+        checks.append({"name": "duplicate", "ok": False, "message": msg})
+
+    # 2. Custom Capabilities JSON
+    if device.custom_capabilities and str(device.custom_capabilities).strip():
+        try:
+            parsed_caps = json.loads(device.custom_capabilities)
+            if not isinstance(parsed_caps, dict):
+                raise ValueError("Deve ser um objeto JSON")
+            checks.append({"name": "custom_capabilities", "ok": True, "message": "Custom Capabilities JSON válido."})
+        except Exception as json_err:
+            msg = f"JSON inválido em Custom Capabilities: {json_err}"
+            errors.append(msg)
+            checks.append({"name": "custom_capabilities", "ok": False, "message": msg})
+
+    settings_obj = ProductService.get_mobile_settings(db, product_id)
+    eff_provider = (device.provider_override or getattr(settings_obj, "provider", None) or "appium_local").strip()
+    eff_server_url = (device.server_url or getattr(settings_obj, "server_url", None) or "http://localhost:4723").strip()
+    eff_platform = (device.platform or "android").lower()
+    eff_app_id = (device.app_identifier or getattr(settings_obj, "app_identifier", None) or "").strip()
+
+    # 3. Provider & Servidor Appium
+    appium_ok = False
+    if eff_provider == "appium_local":
+        check_url = eff_server_url
+        if "localhost" in check_url or "127.0.0.1" in check_url:
+            check_url = check_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+        try:
+            resp = _requests.get(f"{check_url.rstrip('/')}/status", timeout=3)
+            if resp.status_code < 500:
+                appium_ok = True
+                checks.append({"name": "appium_server", "ok": True, "message": f"Servidor Appium acessível ({eff_server_url})."})
+            else:
+                msg = f"Servidor Appium respondeu com erro HTTP {resp.status_code} em {eff_server_url}."
+                errors.append(msg)
+                checks.append({"name": "appium_server", "ok": False, "message": msg})
+        except Exception:
+            msg = f"Não foi possível conectar ao servidor Appium em {eff_server_url}. Verifique se o Appium está iniciado."
+            errors.append(msg)
+            checks.append({"name": "appium_server", "ok": False, "message": msg})
+
+        # 4. ADB device & App instalado (Android)
+        if eff_platform == "android":
+            adb_available = MobileDevicePoolService.is_adb_available()
+            adb_devices = MobileDevicePoolService.get_connected_adb_devices() if adb_available else []
+            real_adb_devices = [
+                d for d in adb_devices
+                if d.get("serial") and d.get("serial") != "USB-DETECTED"
+            ]
+
+            if not adb_available or (len(real_adb_devices) == 0 and appium_ok):
+                warnings.append(
+                    f"ADB não está acessível diretamente neste servidor (API em container). A presença de '{dev_name}' e o app instalado serão validados pelo Appium ({eff_server_url}) na execução."
+                )
+                checks.append({
+                    "name": "adb_device",
+                    "ok": True,
+                    "message": f"Verificação ADB delegada ao Appium ({eff_server_url})."
+                })
+            else:
+                matched_adb = next((d for d in real_adb_devices if d.get("serial") == dev_name), None)
+                if not matched_adb:
+                    msg = f"Dispositivo '{dev_name}' não encontrado no 'adb devices'."
+                    errors.append(msg)
+                    checks.append({"name": "adb_device", "ok": False, "message": msg})
+                elif matched_adb.get("state") != "device":
+                    msg = f"Dispositivo '{dev_name}' está com status '{matched_adb.get('state')}' (precisa estar como 'device')."
+                    errors.append(msg)
+                    checks.append({"name": "adb_device", "ok": False, "message": msg})
+                else:
+                    checks.append({"name": "adb_device", "ok": True, "message": f"Dispositivo '{dev_name}' conectado via ADB."})
+
+                    is_app_file = (
+                        eff_app_id.lower().endswith((".apk", ".aab", ".ipa"))
+                        or "\\" in eff_app_id
+                        or (eff_app_id.startswith("/") and not eff_app_id.startswith(("com.", "br.", "io.")))
+                    )
+                    if eff_app_id and not is_app_file:
+                        pkg_base = eff_app_id.split("/", 1)[0].strip()
+                        adb_bin = MobileDevicePoolService._find_adb_binary() or "adb"
+                        try:
+                            pm_res = subprocess.run(
+                                [adb_bin, "-s", dev_name, "shell", "pm", "path", pkg_base],
+                                capture_output=True,
+                                text=True,
+                                timeout=4
+                            )
+                            if pm_res.returncode == 0 and (pm_res.stdout or "").strip():
+                                checks.append({"name": "app_installed", "ok": True, "message": f"App '{pkg_base}' instalado em '{dev_name}'."})
+                            else:
+                                msg = f"App '{pkg_base}' não está instalado no dispositivo '{dev_name}'."
+                                errors.append(msg)
+                                checks.append({"name": "app_installed", "ok": False, "message": msg})
+                        except Exception as pm_err:
+                            warnings.append(f"Não foi possível verificar instalação do app '{pkg_base}': {pm_err}")
+    else:
+        eff_user = (device.auth_user or getattr(settings_obj, "auth_user", None) or "").strip()
+        eff_token = (device.auth_token or getattr(settings_obj, "auth_token", None) or "").strip()
+        if not eff_user or not eff_token:
+            msg = f"Credenciais (usuário e chave) obrigatórias para o provedor '{eff_provider}'."
+            errors.append(msg)
+            checks.append({"name": "cloud_credentials", "ok": False, "message": msg})
+        else:
+            checks.append({"name": "cloud_credentials", "ok": True, "message": f"Credenciais configuradas para '{eff_provider}'."})
+
+    return {
+        "valid": len(errors) == 0,
+        "checks": checks,
+        "errors": errors,
+        "warnings": warnings
+    }
+
+
 @router.post("/{product_id}/mobile-devices", response_model=MobileDeviceResponse, status_code=status.HTTP_201_CREATED)
 def create_mobile_device(
     product_id: int,

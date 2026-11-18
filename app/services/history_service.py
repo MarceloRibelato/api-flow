@@ -119,13 +119,12 @@ class HistoryService:
     def update_video_url_by_batch(db: Session, batch_id: str, video_url: str):
         if not batch_id or not video_url:
             return
+        batch_id_clean = str(batch_id)[:100]
         for ModelClass in (WebExecutionHistory, MobileExecutionHistory, ApiExecutionHistory):
-            updated = db.query(ModelClass).filter(
-                ModelClass.batch_id == batch_id,
+            db.query(ModelClass).filter(
+                ModelClass.batch_id == batch_id_clean,
                 ModelClass.video_url == None
             ).update({"video_url": video_url})
-            if updated:
-                break
         db.commit()
 
     @staticmethod

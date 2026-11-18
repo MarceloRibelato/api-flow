@@ -256,6 +256,21 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
         session.trust_env = False
 
         # --- EXECUTION LOGIC ---
+        mobile_parallel_mode = 'distribute'
+        mobile_device_ids = None
+        if getattr(schedule, 'flow_type', None) == 'mobile':
+            try:
+                import redis as _redis
+                from app.config import settings as _settings
+                _rc = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
+                _raw = _rc.get(f'mobile_exec_opts:{schedule.id}')
+                if _raw:
+                    _opts = json.loads(_raw)
+                    mobile_parallel_mode = _opts.get('mobile_parallel_mode') or 'distribute'
+                    mobile_device_ids = _opts.get('mobile_device_ids')
+            except Exception:
+                pass
+
         if getattr(schedule, 'flow_type', 'api') == 'performance':
             logger.info(f"🚀 Running Scheduled PERFORMANCE Test for {schedule.type} {schedule.target_id}")
             from app.services.performance_service import PerformanceService
@@ -390,7 +405,9 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
                     capture_screenshot=getattr(schedule, 'capture_screenshot', False),
                     visible_execution=getattr(schedule, 'visible_execution', False),
                     dataset_row=row,
-                    failed_item_ids=failed_item_ids
+                    failed_item_ids=failed_item_ids,
+                    mobile_parallel_mode=mobile_parallel_mode,
+                    mobile_device_ids=mobile_device_ids
                 )
                 s += row_s
                 f += row_f
@@ -420,7 +437,9 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
                     capture_screenshot=getattr(schedule, 'capture_screenshot', False),
                     visible_execution=getattr(schedule, 'visible_execution', False),
                     dataset_row=row,
-                    failed_item_ids=failed_item_ids
+                    failed_item_ids=failed_item_ids,
+                    mobile_parallel_mode=mobile_parallel_mode,
+                    mobile_device_ids=mobile_device_ids
                 )
                 s += row_s
                 f += row_f
@@ -454,21 +473,45 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
                     capture_screenshot=getattr(schedule, 'capture_screenshot', False),
                     visible_execution=getattr(schedule, 'visible_execution', False),
                     dataset_row=row,
-                    failed_item_ids=failed_item_ids
+                    failed_item_ids=failed_item_ids,
+                    mobile_parallel_mode=mobile_parallel_mode,
+                    mobile_device_ids=mobile_device_ids
                 )
                 s += row_s
                 f += row_f
                 
             success_count = s
             fail_count = f
+
+            # Check if execution was cancelled by user
+            was_cancelled = False
+            try:
+                import redis as _redis
+                from app.config import settings as _settings
+                _rc = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
+                if _rc.get(f'exec_cancel:{schedule_id}'):
+                    was_cancelled = True
+            except Exception:
+                pass
             
             # Update Schedule Status
-            schedule.last_run_status = 'failure' if fail_count > 0 else 'success'
+            if was_cancelled:
+                schedule.last_run_status = 'cancelled'
+            else:
+                schedule.last_run_status = 'failure' if fail_count > 0 else 'success'
             db.commit()
 
-        # Mark one-time schedule as actually completed
+        # Mark one-time schedule as actually completed (or cancelled)
         if not schedule.cron_expression:
-            schedule.status = 'completed'
+            is_cancelled_flag = False
+            try:
+                import redis as _redis
+                from app.config import settings as _settings
+                _rc = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
+                is_cancelled_flag = bool(_rc.get(f'exec_cancel:{schedule_id}'))
+            except Exception:
+                pass
+            schedule.status = 'cancelled' if (is_cancelled_flag or schedule.last_run_status == 'cancelled') else 'completed'
             db.commit()
 
     except Exception as e:

@@ -60,6 +60,14 @@ class MobileDevicePoolService:
         return "adb"
 
     @classmethod
+    def is_adb_available(cls) -> bool:
+        """Retorna True se o binário ADB está instalado e executável neste ambiente."""
+        adb_bin = cls._find_adb_binary()
+        if os.path.isabs(adb_bin):
+            return os.path.isfile(adb_bin) and os.access(adb_bin, os.X_OK)
+        return shutil.which(adb_bin) is not None
+
+    @classmethod
     def get_connected_adb_devices(cls) -> List[Dict[str, Any]]:
         """
         Executa 'adb devices -l' e retorna a lista de aparelhos físicos/emuladores
@@ -140,75 +148,121 @@ class MobileDevicePoolService:
         cls,
         db: Optional[Session] = None,
         product_id: Optional[int] = None,
-        device_id: Optional[int] = None
+        device_id: Optional[int] = None,
+        wait_timeout_s: float = 30.0,
+        allowed_device_ids: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         """
         Aloca um dispositivo e reserva portas dedicadas (systemPort e mjpegServerPort).
-        Retorna informações para injeção nas capabilities do Appium.
+        Aguarda brevemente caso todos os aparelhos ativos do pool estejam ocupados.
         """
-        with cls._lock:
-            selected_device = None
+        import time as _time
+        deadline = _time.time() + max(0.0, wait_timeout_s)
+        while True:
+            should_wait = False
+            with cls._lock:
+                selected_device = None
+                selected_adb_serial = None
+                lock_key = None
 
-            # 1. Busca por device_id específico
-            if db and product_id and device_id:
-                dev = db.query(ProductMobileDeviceDB).filter(
-                    ProductMobileDeviceDB.id == device_id,
-                    ProductMobileDeviceDB.product_id == product_id
-                ).first()
-                if dev:
-                    selected_device = dev
-                    cls._locked_devices.add(dev.id)
-                    logger.info(f"📱 [Device Pool] Locked specified device ID {dev.id} ({dev.label})")
+                # 1a. Busca por serial ADB explícito (quando device_id é str)
+                if isinstance(device_id, str) and device_id.strip():
+                    adb_serial = device_id.strip()
+                    adb_key = f"adb:{adb_serial}"
+                    if adb_key in cls._locked_devices and _time.time() < deadline:
+                        should_wait = True
+                    else:
+                        selected_adb_serial = adb_serial
+                        lock_key = adb_key
+                        cls._locked_devices.add(adb_key)
+                        logger.info(f"📱 [Device Pool] Locked specified ADB device {adb_serial}")
 
-            # 2. Se nenhum especificado, busca um ativo disponível no banco
-            elif db and product_id:
-                active_devices = db.query(ProductMobileDeviceDB).filter(
-                    ProductMobileDeviceDB.product_id == product_id,
-                    ProductMobileDeviceDB.is_active == True
-                ).all()
+                # 1b. Busca por device_id específico no banco
+                elif db and product_id and device_id:
+                    dev = db.query(ProductMobileDeviceDB).filter(
+                        ProductMobileDeviceDB.id == device_id,
+                        ProductMobileDeviceDB.product_id == product_id
+                    ).first()
+                    if dev:
+                        if dev.id in cls._locked_devices and _time.time() < deadline:
+                            should_wait = True
+                        else:
+                            selected_device = dev
+                            lock_key = dev.id
+                            cls._locked_devices.add(dev.id)
+                            logger.info(f"📱 [Device Pool] Locked specified device ID {dev.id} ({dev.label})")
 
-                for dev in active_devices:
-                    if dev.id not in cls._locked_devices:
-                        selected_device = dev
-                        cls._locked_devices.add(dev.id)
-                        logger.info(f"📱 [Device Pool] Auto-allocated idle device ID {dev.id} ({dev.label})")
-                        break
+                # 2. Se nenhum especificado, busca um ativo disponível no banco (ou fallback para ADB conectado)
+                elif db and product_id:
+                    active_devices = db.query(ProductMobileDeviceDB).filter(
+                        ProductMobileDeviceDB.product_id == product_id,
+                        ProductMobileDeviceDB.is_active == True
+                    ).all()
+                    if allowed_device_ids:
+                        allowed_set = {int(d) for d in allowed_device_ids if str(d).isdigit()}
+                        active_devices = [d for d in active_devices if d.id in allowed_set]
 
-            # 3. Alocação de portas dinâmicas
-            allocated_sys_port = None
-            for port in range(cls.SYSTEM_PORT_MIN, cls.SYSTEM_PORT_MAX + 1):
-                if port not in cls._allocated_system_ports:
-                    allocated_sys_port = port
-                    cls._allocated_system_ports.add(port)
-                    break
-            if not allocated_sys_port:
-                allocated_sys_port = cls.SYSTEM_PORT_MIN
+                    for dev in active_devices:
+                        if dev.id not in cls._locked_devices:
+                            selected_device = dev
+                            lock_key = dev.id
+                            cls._locked_devices.add(dev.id)
+                            logger.info(f"📱 [Device Pool] Auto-allocated idle device ID {dev.id} ({dev.label})")
+                            break
 
-            allocated_mjpeg_port = None
-            for port in range(cls.MJPEG_PORT_MIN, cls.MJPEG_PORT_MAX + 1):
-                if port not in cls._allocated_mjpeg_ports:
-                    allocated_mjpeg_port = port
-                    cls._allocated_mjpeg_ports.add(port)
-                    break
-            if not allocated_mjpeg_port:
-                allocated_mjpeg_port = cls.MJPEG_PORT_MIN
+                    if not selected_device and active_devices and _time.time() < deadline:
+                        should_wait = True
+                    elif not active_devices and not allowed_device_ids:
+                        ready_adb = [d for d in cls.get_connected_adb_devices() if d.get("state") == "device" and d.get("serial")]
+                        for adb_dev in ready_adb:
+                            adb_key = f"adb:{adb_dev['serial']}"
+                            if adb_key not in cls._locked_devices:
+                                selected_adb_serial = adb_dev["serial"]
+                                lock_key = adb_key
+                                cls._locked_devices.add(adb_key)
+                                logger.info(f"📱 [Device Pool] Auto-allocated idle ADB device {selected_adb_serial}")
+                                break
+                        if not selected_adb_serial and ready_adb and _time.time() < deadline:
+                            should_wait = True
 
-            logger.info(
-                f"🔌 [Device Pool] Assigned ports: systemPort={allocated_sys_port}, "
-                f"mjpegServerPort={allocated_mjpeg_port} (Device: {selected_device.label if selected_device else 'Default/Product'})"
-            )
+                if not should_wait:
+                    # 3. Alocação de portas dinâmicas
+                    allocated_sys_port = None
+                    for port in range(cls.SYSTEM_PORT_MIN, cls.SYSTEM_PORT_MAX + 1):
+                        if port not in cls._allocated_system_ports:
+                            allocated_sys_port = port
+                            cls._allocated_system_ports.add(port)
+                            break
+                    if not allocated_sys_port:
+                        allocated_sys_port = cls.SYSTEM_PORT_MIN
 
-            return {
-                "device": selected_device,
-                "device_id": selected_device.id if selected_device else None,
-                "system_port": allocated_sys_port,
-                "systemPort": allocated_sys_port,
-                "mjpeg_port": allocated_mjpeg_port,
-                "mjpegServerPort": allocated_mjpeg_port,
-                "device_name": selected_device.device_name if selected_device else None,
-                "platform": getattr(selected_device, "platform", "android") if selected_device else None,
-                "platform_version": getattr(selected_device, "platform_version", None) if selected_device else None,
-            }
+                    allocated_mjpeg_port = None
+                    for port in range(cls.MJPEG_PORT_MIN, cls.MJPEG_PORT_MAX + 1):
+                        if port not in cls._allocated_mjpeg_ports:
+                            allocated_mjpeg_port = port
+                            cls._allocated_mjpeg_ports.add(port)
+                            break
+                    if not allocated_mjpeg_port:
+                        allocated_mjpeg_port = cls.MJPEG_PORT_MIN
+
+                    logger.info(
+                        f"🔌 [Device Pool] Assigned ports: systemPort={allocated_sys_port}, "
+                        f"mjpegServerPort={allocated_mjpeg_port} (Device: {selected_device.label if selected_device else 'Default/Product'})"
+                    )
+
+                    return {
+                        "device": selected_device,
+                        "device_id": lock_key if lock_key is not None else (selected_device.id if selected_device else None),
+                        "system_port": allocated_sys_port,
+                        "systemPort": allocated_sys_port,
+                        "mjpeg_port": allocated_mjpeg_port,
+                        "mjpegServerPort": allocated_mjpeg_port,
+                        "device_name": selected_device.device_name if selected_device else selected_adb_serial,
+                        "platform": getattr(selected_device, "platform", "android") if selected_device else ("android" if selected_adb_serial else None),
+                        "platform_version": getattr(selected_device, "platform_version", None) if selected_device else None,
+                    }
+
+            _time.sleep(0.5)
 
     @classmethod
     def release_device(

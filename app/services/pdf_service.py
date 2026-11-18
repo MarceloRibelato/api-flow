@@ -336,36 +336,61 @@ class PDFService:
         return frames
 
     @staticmethod
-    def generate_e2e_report(db: Session, schedule_id: int):
+    @staticmethod
+    def generate_e2e_report(db: Session, schedule_id: int, batch_id: str = None, execution_type: str = None):
         """
-        Premium E2E PDF report with embedded screenshots and video frames.
+        Premium Web/Mobile E2E PDF report with embedded screenshots and scenario grouping.
         """
         import os, re
+        from app.models.api_test_history_models import ApiExecutionHistory, WebExecutionHistory, MobileExecutionHistory
 
-        schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
-        if not schedule: return None
+        schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first() if schedule_id else None
+        if not schedule and not batch_id:
+            return None
 
-        history_all = db.query(ApiExecutionHistory).filter(
-            ApiExecutionHistory.schedule_id == schedule_id
-        ).order_by(ApiExecutionHistory.id.asc()).all()
+        eff_type = (execution_type or (getattr(schedule, 'flow_type', None) if schedule else None) or '').lower()
+        if eff_type == 'mobile':
+            model_order = [MobileExecutionHistory, WebExecutionHistory, ApiExecutionHistory]
+        elif eff_type in ('web', 'e2e'):
+            model_order = [WebExecutionHistory, MobileExecutionHistory, ApiExecutionHistory]
+        else:
+            model_order = [MobileExecutionHistory, WebExecutionHistory, ApiExecutionHistory]
 
-        # Fallback: if no direct schedule match, try to find via the most recent batch_id
-        # that belongs to this schedule (useful when schedule was re-used or ID mismatch)
+        history_all = []
+        matched_model = None
+        base_batch = re.sub(r'(_retry|_path).*$', '', batch_id) if batch_id else None
+
+        for Model in model_order:
+            if base_batch:
+                rows = db.query(Model).filter(
+                    Model.batch_id.like(f"{base_batch}%")
+                ).order_by(Model.id.asc()).all()
+                if rows:
+                    history_all = rows
+                    matched_model = Model
+                    break
+            if schedule_id:
+                rows = db.query(Model).filter(
+                    Model.schedule_id == schedule_id
+                ).order_by(Model.id.asc()).all()
+                if rows:
+                    history_all = rows
+                    matched_model = Model
+                    break
+
         if not history_all:
-            recent = db.query(ApiExecutionHistory).filter(
-                ApiExecutionHistory.schedule_id == schedule_id
-            ).order_by(ApiExecutionHistory.id.desc()).first()
-            if not recent:
-                # Last-resort: pick the most recent block of history globally
-                recent = db.query(ApiExecutionHistory).order_by(ApiExecutionHistory.id.desc()).first()
-            if recent and recent.batch_id:
-                history_all = db.query(ApiExecutionHistory).filter(
-                    ApiExecutionHistory.batch_id == recent.batch_id
-                ).order_by(ApiExecutionHistory.id.asc()).all()
+            return None
 
-        if not history_all: return None
+        if not schedule and getattr(history_all[0], 'schedule_id', None):
+            schedule = db.query(ScheduleModel).filter(ScheduleModel.id == history_all[0].schedule_id).first()
 
-        # All steps (browser + any API support steps)
+        is_mobile_report = (
+            eff_type == 'mobile'
+            or matched_model is MobileExecutionHistory
+            or any(str(getattr(h, 'method', '') or '').upper() == 'MOBILE' for h in history_all)
+        )
+
+        # All steps (browser/mobile + any API support steps)
         history = history_all
 
         # --- Metrics ---
@@ -376,7 +401,8 @@ class PDFService:
         total_ms = sum(h.response_time or 0 for h in history)
         video_url_rel = next((h.video_url for h in history_all if h.video_url), None)
 
-        env_name = schedule.environment.name if schedule.environment else "Global / Padrão"
+        flow_title = (schedule.name if schedule else None) or getattr(history_all[0], 'feature_name', None) or 'Execucao E2E'
+        env_name = schedule.environment.name if (schedule and schedule.environment) else "Global / Padrão"
 
         # --- PDF Setup ---
         pdf = FPDF()
@@ -398,12 +424,13 @@ class PDFService:
         pdf.set_xy(12, 10)
         pdf.set_font('Arial', 'B', 22)
         pdf.set_text_color(255, 255, 255)
-        pdf.cell(0, 12, PDFService._s('Relatorio de Automacao E2E'), ln=True)
+        report_heading = 'Relatorio de Automacao Mobile' if is_mobile_report else 'Relatorio de Automacao Web (E2E)'
+        pdf.cell(0, 12, PDFService._s(report_heading), ln=True)
 
         pdf.set_xy(12, 24)
         pdf.set_font('Arial', '', 10)
         pdf.set_text_color(148, 163, 184)  # slate-400
-        pdf.cell(0, 6, PDFService._s(f'Fluxo: {schedule.name}'), ln=True)
+        pdf.cell(0, 6, PDFService._s(f'Fluxo: {flow_title}'), ln=True)
         pdf.set_xy(12, 30)
         pdf.cell(0, 6, PDFService._s(f'Ambiente: {env_name}'), ln=True)
         pdf.set_xy(12, 36)
@@ -478,11 +505,14 @@ class PDFService:
 
         screenshot_gallery = []
 
-        # --- Group all items by node_name ---
+        # --- Group all items by (scenario path, node_name) ---
         from collections import OrderedDict
         node_groups = OrderedDict()
         for item in history:
-            node_key = item.node_name or 'Fluxo Principal'
+            b_id = str(getattr(item, 'batch_id', '') or '')
+            p_match = re.search(r'_path_(\d+)', b_id)
+            path_prefix = f"Cenario {p_match.group(1)} | " if p_match else ""
+            node_key = f"{path_prefix}{item.node_name or 'Fluxo Principal'}"
             if node_key not in node_groups:
                 node_groups[node_key] = []
             node_groups[node_key].append(item)
@@ -599,16 +629,18 @@ class PDFService:
                         pdf.cell(190, 4, err_msg, ln=True)
                         pdf.set_text_color(0, 0, 0)
 
-                    # Display Inline Screenshots for E2E steps
-                    if not is_api:
+                    # Display Inline Screenshots only for failed E2E/Mobile steps to keep PDF lightweight
+                    if not is_api and not status_ok:
                         combo = (item.response_body or '') + (item.error_message or '')
                         shot_rel = PDFService._extract_screenshot_path(combo)
                         if shot_rel:
                             shot_path = PDFService._resolve_media_path(shot_rel)
                             if shot_path:
                                 try:
+                                    if pdf.get_y() > 195:
+                                        pdf.add_page()
                                     pdf.ln(2)
-                                    pdf.image(shot_path, x=15, w=80)
+                                    pdf.image(shot_path, x=15, w=55 if is_mobile_report else 85)
                                     pdf.ln(2)
                                 except Exception:
                                     pass

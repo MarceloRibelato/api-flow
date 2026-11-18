@@ -69,13 +69,20 @@ class MobileHealingEngine:
             highest_score = 0.0
             best_node = None
             orig_sel_clean = str(original_selector).lower()
+            is_type_intent = (
+                "type " in (step_name or "").lower()
+                or "type " in (step_desc or "").lower()
+                or "@hint=" in orig_sel_clean
+            )
 
             for element in root.iter():
                 text = element.attrib.get('text', '').lower()
                 desc = element.attrib.get('content-desc', '').lower()
                 res_id = element.attrib.get('resource-id', '').lower()
+                hint = element.attrib.get('hint', '').lower()
+                cls_name = element.attrib.get('class', '').lower()
 
-                node_texts = [t for t in [text, desc, res_id] if t]
+                node_texts = [t for t in [text, desc, res_id, hint] if t]
                 if not node_texts:
                     continue
 
@@ -92,6 +99,12 @@ class MobileHealingEngine:
                         if full_ratio > 0.7:
                             score += (full_ratio * 3.0)
 
+                if is_type_intent and score > 0:
+                    if "edittext" in cls_name or "textfield" in cls_name:
+                        score += 3.0
+                    elif any(marker in desc for marker in ("icon_", "btn_")) or "imageview" in cls_name:
+                        score -= 1.5
+
                 if score > highest_score:
                     highest_score = score
                     best_node = element
@@ -100,10 +113,13 @@ class MobileHealingEngine:
                 text_val = best_node.attrib.get('text', '')
                 desc_val = best_node.attrib.get('content-desc', '')
                 res_val = best_node.attrib.get('resource-id', '')
+                hint_val = best_node.attrib.get('hint', '')
 
                 healed_selector = None
                 if res_val:
                     healed_selector = f"//*[@resource-id='{res_val}']"
+                elif hint_val:
+                    healed_selector = f"//*[@hint='{hint_val}']"
                 elif desc_val:
                     healed_selector = f"//*[@content-desc='{desc_val}']"
                 elif text_val:

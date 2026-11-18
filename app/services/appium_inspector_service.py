@@ -17,6 +17,7 @@ redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 # Em memória (Cache L1) local do Worker atual
 _active_sessions: Dict[str, AppiumExecutorService] = {}
 _session_progress: Dict[str, Dict[str, Any]] = {}
+_session_last_used: Dict[str, float] = {}
 
 class AppiumInspectorService:
     """
@@ -28,8 +29,33 @@ class AppiumInspectorService:
         pass
 
     @classmethod
+    def _touch_session(cls, session_id: str):
+        _session_last_used[session_id] = time.time()
+
+    @classmethod
+    def _cleanup_zombie_sessions(cls, ttl_seconds: int = 900):
+        now = time.time()
+        expired = [sid for sid, ts in list(_session_last_used.items()) if now - ts > ttl_seconds]
+        for sid in expired:
+            logger.info(f"🧹 [Inspector] Cleaning up idle mobile session {sid} (TTL {ttl_seconds}s)")
+            cls.stop_session(sid)
+
+    @classmethod
+    def get_screenshot_bytes(cls, session_id: str) -> Optional[bytes]:
+        executor = _active_sessions.get(session_id)
+        if not executor or not executor._driver:
+            return None
+        try:
+            cls._touch_session(session_id)
+            return executor._driver.get_screenshot_as_png()
+        except Exception:
+            return None
+
+    @classmethod
     def start_session(cls, session_id: str, db, product_id: int, steps: List[Dict[str, Any]] = None) -> dict:
         """Starts a persistent driver session if one does not exist."""
+        cls._cleanup_zombie_sessions()
+        cls._touch_session(session_id)
         # 1. Verifica cache L1 (Memória local)
         if session_id in _active_sessions:
             logger.info(f"🔍 [Inspector] Session {session_id} is already active locally.")
@@ -80,6 +106,22 @@ class AppiumInspectorService:
                         "status": "running"
                     }
                     try:
+                        if (step.get("properties") or {}).get("remapOnReach") or step.get("remapOnReach"):
+                            logger.info(f"🎯 [Inspector] Remap breakpoint reached at index {idx} ({step_name}). Halting without executing.")
+                            _session_progress[session_id] = {
+                                "current_index": idx,
+                                "total_steps": total_steps,
+                                "step_name": step_name,
+                                "node_name": node_name,
+                                "status": "paused",
+                                "remap_requested": True
+                            }
+                            snapshot = cls.get_snapshot(session_id)
+                            snapshot["paused_step_index"] = idx
+                            snapshot["is_paused"] = True
+                            snapshot["remap_requested"] = True
+                            return snapshot
+
                         logger.info(f"🔍 [Inspector] Replaying step {idx + 1}/{total_steps} ({node_name} - {step_name}): {step}")
                         result = executor.execute_step_sync(step, db=db)
                         if result.get("status", 500) >= 400:
@@ -90,20 +132,6 @@ class AppiumInspectorService:
                             _session_progress[session_id]["warning"] = result.get("warning")
                         else:
                             _session_progress[session_id]["warning"] = None
-
-                        if step.get("type") == "wait":
-                            logger.info(f"⏸️ [Inspector] Pause step reached at index {idx} ({step_name}). Halting replay for interactive debug.")
-                            _session_progress[session_id] = {
-                                "current_index": idx,
-                                "total_steps": total_steps,
-                                "step_name": step_name,
-                                "node_name": node_name,
-                                "status": "paused"
-                            }
-                            snapshot = cls.get_snapshot(session_id)
-                            snapshot["paused_step_index"] = idx
-                            snapshot["is_paused"] = True
-                            return snapshot
 
                         time.sleep(1.0)
                     except Exception as e:
@@ -147,6 +175,7 @@ class AppiumInspectorService:
 
     @classmethod
     def stop_session(cls, session_id: str):
+        _session_last_used.pop(session_id, None)
         if session_id in _session_progress:
             del _session_progress[session_id]
         if session_id in _active_sessions:
@@ -163,19 +192,17 @@ class AppiumInspectorService:
         except Exception: pass
 
     @classmethod
-    def get_snapshot(cls, session_id: str) -> dict:
+    def get_snapshot(cls, session_id: str, skip_tree: bool = False) -> dict:
         """Takes a base64 screenshot and retrieves current DOM tree parsed into JSON."""
         executor = _active_sessions.get(session_id)
         if not executor or not executor._driver:
             raise ValueError(f"Session {session_id} not found or driver disposed.")
+        cls._touch_session(session_id)
         
         driver = executor._driver
         try:
             b64_image = driver.get_screenshot_as_base64()
-            xml_source = driver.page_source
-            
-            # Parse XML into an easily consumable JSON hierarchical list
-            parsed_tree = cls._parse_page_source(xml_source)
+            parsed_tree = [] if skip_tree else cls._parse_page_source(driver.page_source)
             window_size = driver.get_window_size()
             
             return {
@@ -191,7 +218,7 @@ class AppiumInspectorService:
             raise e
 
     @classmethod
-    def interact(cls, session_id: str, action: dict, db=None) -> dict:
+    def interact(cls, session_id: str, action: dict, db=None, skip_tree: bool = False) -> dict:
         """
         Executes a direct Appium action and returns the new snapshot.
         action struct: { "type": "tap", "properties": {"selector": "..."} }
@@ -199,6 +226,7 @@ class AppiumInspectorService:
         executor = _active_sessions.get(session_id)
         if not executor or not executor._driver:
             raise ValueError(f"Session {session_id} not found or driver disposed.")
+        cls._touch_session(session_id)
 
         try:
             logger.info(f"🔍 [Inspector] Interactive Execution: {action}")
@@ -208,9 +236,9 @@ class AppiumInspectorService:
                 raise Exception(result.get("text", "Unknown Appium Execution Error"))
             
             # Sleep briefly to let animations settle
-            time.sleep(1.0)
+            time.sleep(0.4 if skip_tree else 0.8)
             
-            return cls.get_snapshot(session_id)
+            return cls.get_snapshot(session_id, skip_tree=skip_tree)
         except Exception as e:
             logger.error(f"🔍 [Inspector] Interaction failed: {e}")
             raise e
@@ -242,6 +270,19 @@ class AppiumInspectorService:
             first_el = els[0]
             loc = first_el.location
             size = first_el.size
+            boxes = []
+            for el in els[:10]:
+                try:
+                    el_loc = el.location
+                    el_size = el.size
+                    boxes.append({
+                        "x": el_loc["x"],
+                        "y": el_loc["y"],
+                        "width": el_size["width"],
+                        "height": el_size["height"]
+                    })
+                except Exception:
+                    pass
             
             return {
                 "found": True,
@@ -251,7 +292,8 @@ class AppiumInspectorService:
                     "y": loc['y'],
                     "width": size['width'],
                     "height": size['height']
-                }
+                },
+                "boxes": boxes
             }
         except Exception as e:
             logger.error(f"🔍 [Inspector] Selector test failed: {e}", exc_info=True)
@@ -424,6 +466,17 @@ class AppiumInspectorService:
             
         if not selectors:
             selectors.append({"value": f"//{target_node.get('class', '*')}", "strategy": "xpath", "count": 1})
+
+        # Validate real match counts against live driver (cap at first 8 candidates for speed)
+        executor = _active_sessions.get(session_id)
+        if executor and executor._driver:
+            for sel in selectors[:8]:
+                try:
+                    matches = executor._find_elements(sel["value"], timeout_ms=400)
+                    sel["count"] = len(matches) if matches is not None else 0
+                except Exception:
+                    pass
+            selectors.sort(key=lambda s: (0 if s.get("count") == 1 else (1 if (s.get("count") or 0) > 1 else 2)))
             
         return {"success": True, "selectors": selectors}
 
@@ -485,7 +538,45 @@ class AppiumInspectorService:
                     target_candidates.append({"node": node, "score": score})
 
             target_candidates.sort(key=lambda c: c["score"], reverse=True)
-            best = target_candidates[0]["node"] if target_candidates else (tree[0] if tree else None)
+            top_score = target_candidates[0]["score"] if target_candidates else 0
+            best = target_candidates[0]["node"] if target_candidates else None
+
+            # Real LLM fallback when heuristic score is low/ambiguous and db is available
+            if (not best or top_score < 15) and db is not None and tree:
+                try:
+                    from app.services.analysis_service import AnalysisService
+                    compact_tree = [
+                        {
+                            "idx": idx,
+                            "class": n.get("class"),
+                            "text": n.get("text"),
+                            "content_desc": n.get("content_desc"),
+                            "resource_id": n.get("resource_id"),
+                            "hint": n.get("hint"),
+                            "clickable": n.get("clickable"),
+                        }
+                        for idx, n in enumerate(tree[:80])
+                        if n.get("text") or n.get("content_desc") or n.get("resource_id") or n.get("hint") or n.get("clickable")
+                    ]
+                    prompt = (
+                        f"You are a mobile QA automation expert. A mobile step failed.\n"
+                        f"Failed step: type={step_type}, name='{step_name}', old_selector='{old_selector}', value='{expected_val}'.\n"
+                        f"Select the best matching node index `idx` from this UI tree JSON:\n"
+                        f"{json.dumps(compact_tree, ensure_ascii=False)}\n"
+                        f"Respond ONLY with JSON: {{\"idx\": <int or null>}}"
+                    )
+                    llm_raw = AnalysisService._call_llm(db, prompt)
+                    if llm_raw:
+                        match_json = re.search(r'\{[^}]*"idx"\s*:\s*(\d+)[^}]*\}', str(llm_raw))
+                        if match_json:
+                            llm_idx = int(match_json.group(1))
+                            if 0 <= llm_idx < len(tree):
+                                best = tree[llm_idx]
+                except Exception as llm_err:
+                    logger.warning(f"LLM fallback in mobile ai_analyze_full_tree_and_correct failed: {llm_err}")
+
+            if not best and tree:
+                best = tree[0]
 
             if not best:
                 return {"success": False, "error": "Unable to analyze DOM tree for correction."}

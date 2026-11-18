@@ -8,6 +8,12 @@ import asyncio
 import ipaddress
 from urllib.parse import urlparse
 from typing import Dict, List, Any, Optional
+from app.services.ephemeral_observer import (
+    EPHEMERAL_MESSAGE_OBSERVER_SCRIPT,
+    check_ephemeral_text,
+    ensure_ephemeral_observer,
+    extract_selector_text_hint,
+)
 try:
     from playwright.async_api import async_playwright, Page, BrowserContext, Browser
 except ImportError:
@@ -131,9 +137,12 @@ const results = [];
                         // - It doesn't have an internal interactable child that covers it (delegation)
                         // - OR it has an explicit click handler
                         if (isCustom) {
+                            const hasInnerControl = !!(
+                                el.querySelector('input, textarea, select, button, [contenteditable="true"]') ||
+                                (el.shadowRoot && el.shadowRoot.querySelector('input, textarea, select, button, [contenteditable="true"]'))
+                            );
+                            if (hasInnerControl) return false;
                             if (el.getAttribute('onclick') || el.getAttribute('role') === 'button') return true;
-                            // If it's a wrapper for an input (like vsg-vlv-input), we want the input instead.
-                            // But we keep it as a fallback if no children are found.
                             return true; 
                         }
                         if (el.hasAttribute('tabindex') && el.getAttribute('tabindex') !== '-1') return true;
@@ -185,28 +194,71 @@ const results = [];
                         extractedText = `[icon: ${iconAttr}]`;
                     }
 
+                    // Discover Custom Element / Shadow Host context (e.g. vaadin-text-field)
+                    let customHost = null;
+                    try {
+                        let p = el.parentElement;
+                        while (p && p !== document.body) {
+                            if (p.tagName && p.tagName.indexOf('-') !== -1) { customHost = p; break; }
+                            p = p.parentElement;
+                        }
+                        if (!customHost && el.getRootNode && el.getRootNode().host) {
+                            customHost = el.getRootNode().host;
+                        }
+                    } catch(e) {}
+
+                    let resolvedLabel = (el.getAttribute('aria-label') || '').substring(0, 50);
+                    if (!resolvedLabel) {
+                        try {
+                            const ariaLabelledBy = el.getAttribute('aria-labelledby');
+                            if (ariaLabelledBy) {
+                                const rootNode = el.getRootNode ? el.getRootNode() : document;
+                                for (const refId of ariaLabelledBy.split(/\\s+/)) {
+                                    if (!refId) continue;
+                                    const refEl = document.getElementById(refId)
+                                        || (rootNode && rootNode.getElementById ? rootNode.getElementById(refId) : null)
+                                        || (customHost && customHost.shadowRoot ? customHost.shadowRoot.getElementById(refId) : null)
+                                        || (customHost ? customHost.querySelector(`#${CSS.escape(refId)}`) : null);
+                                    if (refEl && refEl.textContent && refEl.textContent.trim()) {
+                                        resolvedLabel = refEl.textContent.trim().substring(0, 50);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!resolvedLabel && el.id) {
+                                let lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+                                if (lbl && lbl.innerText.trim()) resolvedLabel = lbl.innerText.trim().substring(0, 50);
+                            }
+                            if (!resolvedLabel) {
+                                let pLbl = el.closest('label');
+                                if (pLbl && pLbl.innerText.trim()) resolvedLabel = pLbl.innerText.trim().substring(0, 50);
+                            }
+                            if (!resolvedLabel && customHost) {
+                                const hostLabel = customHost.getAttribute('label') || customHost.getAttribute('aria-label');
+                                if (hostLabel && hostLabel.trim()) {
+                                    resolvedLabel = hostLabel.trim().substring(0, 50);
+                                } else if (customHost.shadowRoot) {
+                                    const partLbl = customHost.shadowRoot.querySelector('[part~="label"], label');
+                                    if (partLbl && partLbl.textContent && partLbl.textContent.trim()) {
+                                        resolvedLabel = partLbl.textContent.trim().substring(0, 50);
+                                    }
+                                }
+                            }
+                        } catch(e) {}
+                    }
+
                     results.push({
                         id: `lws-${index}`, // Store our JIT pointer mapped to React
                         tagName: el.tagName,
                         type: el.type || '',
                         text: extractedText,
                         iconAttr: (iconAttr || '').substring(0, 50),
-                        placeholder: el.placeholder?.substring(0, 50) || '',
-                        nameAttr: el.name || '',
-                        idAttr: el.id || '',
+                        placeholder: (el.placeholder || (customHost && customHost.getAttribute('placeholder')) || '').substring(0, 50),
+                        nameAttr: el.name || (customHost && customHost.getAttribute('name')) || '',
+                        idAttr: (customHost && customHost.id && (!el.id || /-[0-9]+$/.test(el.id))) ? customHost.id : (el.id || ''),
                         pointerEvents: style.pointerEvents,
                         className: (typeof el.className === 'string' ? el.className : '').substring(0, 100),
-                        labelAttr: (el.getAttribute('aria-label') || '').substring(0, 50) || (function(){
-                            try {
-                                if (el.id) {
-                                    let lbl = document.querySelector(`label[for="${el.id}"]`);
-                                    if (lbl) return lbl.innerText.trim().substring(0, 50);
-                                }
-                                let pLbl = el.closest('label');
-                                if (pLbl) return pLbl.innerText.trim().substring(0, 50);
-                            } catch(e) {}
-                            return '';
-                        })(),
+                        labelAttr: resolvedLabel,
                         bounds: {
                             x: rect.x,
                             y: rect.y,
@@ -367,79 +419,49 @@ class _WebInspectorServiceImpl:
                 if step_url:
                     _validate_url(step_url, allow_local=allow_local)
 
+        global _shared_browser
+        existing_session_healthy = False
         async with _session_lock:
             if session_id in _active_sessions:
                 logger.info(f"🌐 [WebInspector] Session {session_id} exists. Checking health...")
-                try:
-                    logger.info(f"🌐 [WebInspector] Session {session_id} healthy, returning snapshot.")
-                    return await cls.get_snapshot(session_id)
-                except Exception as e:
-                    logger.warning(f"🌐 [WebInspector] Session {session_id} unhealthy, recreating. Error: {e}")
-                    await cls.stop_session(session_id)
+                existing_session_healthy = True
 
-            logger.info(f"🌐 [WebInspector] Starting fresh isolated session {session_id}...")
-            
+        if existing_session_healthy:
             try:
-                browser = await cls._get_shared_browser()
-                
-                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                
-                context = await browser.new_context(
-                    viewport={"width": 1280, "height": 720},
-                    user_agent=user_agent,
-                    extra_http_headers={
-                        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-                    },
-                    ignore_https_errors=True
-                )
-                await context.add_init_script(QA_FLOW_EXTRACTOR_SCRIPT)
-                
-                page = await context.new_page()
-                
-                # Failsafe stealth: Handle various library versions and module vs function ambiguity
-                try:
-                    # For async, we use stealth_async
-                    if hasattr(playwright_stealth, 'stealth_async'):
-                        await playwright_stealth.stealth_async(page)
-                    elif hasattr(playwright_stealth, 'stealth'):
-                        s = playwright_stealth.stealth
-                        if callable(s):
-                            # Try it, some versions auto-detect
-                            if asyncio.iscoroutinefunction(s): await s(page)
-                            else: s(page)
-                except Exception as stealth_e:
-                    logger.warning(f"🌐 [WebInspector] Stealth application warning (non-fatal): {stealth_e}")
+                logger.info(f"🌐 [WebInspector] Session {session_id} healthy, returning snapshot.")
+                return await cls.get_snapshot(session_id)
+            except Exception as e:
+                logger.warning(f"🌐 [WebInspector] Session {session_id} unhealthy, recreating. Error: {e}")
+                await cls.stop_session(session_id)
 
-                # If we have pre-existing steps to replay, we normally skip the bare initial_url navigation
-                # because the steps list itself will contain a 'browser' step to do it.
-                # HOWEVER, if steps are provided but NONE of them is a navigate step, we MUST navigate first.
-                has_nav_step = False
-                if steps:
-                    has_nav_step = any(s.get("type") in ("navigate", "browser") for s in steps)
-                
-                if initial_url and (not steps or not has_nav_step):
-                    if not initial_url.startswith('http'):
-                        initial_url = f"https://{initial_url}"
+        logger.info(f"🌐 [WebInspector] Starting fresh isolated session {session_id}...")
+
+        context = None
+        page = None
+        try:
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+            async with _session_lock:
+                for attempt in range(2):
                     try:
-                        from app.services.url_utils import sanitize_url_for_docker
-                        nav_url = sanitize_url_for_docker(initial_url)
-                    except Exception:
-                        nav_url = initial_url
-                    logger.info(f"🌐 [WebInspector] Navigating to {nav_url} (original: {initial_url})...")
-                    try:
-                        await page.goto(nav_url, wait_until="commit", timeout=60000)
-                    except Exception as e:
-                        logger.warning(f"🌐 [WebInspector] Initial goto(commit) failed: {e}, retrying...")
-                        await asyncio.sleep(1)
-                        try:
-                            await page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
-                        except Exception:
-                            pass
-                    try:
-                        await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(2.5) # Reduced buffer for async
+                        browser = await cls._get_shared_browser()
+                        context = await browser.new_context(
+                            viewport={"width": 1280, "height": 720},
+                            user_agent=user_agent,
+                            extra_http_headers={
+                                "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                            },
+                            ignore_https_errors=True
+                        )
+                        await context.add_init_script(QA_FLOW_EXTRACTOR_SCRIPT)
+                        await context.add_init_script(EPHEMERAL_MESSAGE_OBSERVER_SCRIPT)
+                        page = await context.new_page()
+                        break
+                    except Exception as ctx_err:
+                        logger.warning(f"🌐 [WebInspector] Browser/context creation failed (attempt {attempt + 1}): {ctx_err}")
+                        _shared_browser = None
+                        if attempt == 1:
+                            raise
 
                 _active_sessions[session_id] = {
                     "context": context,
@@ -450,66 +472,118 @@ class _WebInspectorServiceImpl:
                     "user_id": user_id
                 }
 
-                # Attach request listener
-                page.on("request", lambda request: asyncio.create_task(cls._handle_request(session_id, request)))
-                
-                # Run lazy cleanup on new session creation
-                asyncio.create_task(cls._cleanup_zombie_sessions())
+            # Failsafe stealth: Handle various library versions and module vs function ambiguity
+            try:
+                if hasattr(playwright_stealth, 'stealth_async'):
+                    await playwright_stealth.stealth_async(page)
+                elif hasattr(playwright_stealth, 'stealth'):
+                    s = playwright_stealth.stealth
+                    if callable(s):
+                        if asyncio.iscoroutinefunction(s): await s(page)
+                        else: s(page)
+            except Exception as stealth_e:
+                logger.warning(f"🌐 [WebInspector] Stealth application warning (non-fatal): {stealth_e}")
 
-                if steps:
-                    logger.info(f"🌐 [WebInspector] Executing {len(steps)} pre-existing steps...")
-                    failed_step_index = None
-                    failed_step_error = None
-                    for i, step in enumerate(steps):
-                        step_name = step.get("name") or step.get("type") or f"Passo {i + 1}"
-                        node_name = step.get("_sourceNodeName") or step.get("nodeName") or "Nó Atual"
-                        _session_progress[session_id] = {
-                            "current_index": i,
-                            "total_steps": len(steps),
-                            "step_name": step_name,
-                            "node_name": node_name,
-                            "status": "running"
-                        }
-                        try:
-                            # Use skip_tree=True and return_snapshot=False for intermediate steps to speed up execution
-                            is_last = (i == len(steps) - 1)
-                            # Intermediate steps use 0.5s settle time, last one uses 1.5s for full hydration
-                            await cls.interact(session_id, step, skip_tree=not is_last, settle_time=0.5 if not is_last else 1.5, return_snapshot=is_last)
-                        except Exception as step_err:
-                            failed_step_index = i
-                            failed_step_error = str(step_err).split('\n')[0]  # first line only
-                            logger.error(f"🌐 [WebInspector] Pre-existing step {i} ({step.get('type')}) failed: {step_err}")
-                            if session_id in _session_progress:
-                                _session_progress[session_id]["status"] = "failed"
-                            # Stop execution but do not crash the session so user can debug
-                            break
-                    
-                    if failed_step_index is None and session_id in _session_progress:
-                        _session_progress[session_id]["status"] = "completed"
-                else:
-                    failed_step_index = None
-                    failed_step_error = None
-                
-                logger.info(f"🌐 [WebInspector] Session {session_id} oriented to return snapshot.")
+            has_nav_step = False
+            if steps:
+                has_nav_step = any(s.get("type") in ("navigate", "browser") for s in steps)
+
+            if initial_url and (not steps or not has_nav_step):
+                if not initial_url.startswith('http'):
+                    initial_url = f"https://{initial_url}"
+                try:
+                    from app.services.url_utils import sanitize_url_for_docker
+                    nav_url = sanitize_url_for_docker(initial_url)
+                except Exception:
+                    nav_url = initial_url
+                logger.info(f"🌐 [WebInspector] Navigating to {nav_url} (original: {initial_url})...")
+                try:
+                    await page.goto(nav_url, wait_until="commit", timeout=60000)
+                except Exception as e:
+                    logger.warning(f"🌐 [WebInspector] Initial goto(commit) failed: {e}, retrying...")
+                    await asyncio.sleep(1)
+                    try:
+                        await page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
+                await asyncio.sleep(2.5)
+
+            # Attach request listener
+            page.on("request", lambda request: asyncio.create_task(cls._handle_request(session_id, request)))
+
+            # Run lazy cleanup on new session creation
+            asyncio.create_task(cls._cleanup_zombie_sessions())
+
+            if steps:
+                logger.info(f"🌐 [WebInspector] Executing {len(steps)} pre-existing steps...")
+                failed_step_index = None
+                failed_step_error = None
+                for i, step in enumerate(steps):
+                    if session_id not in _active_sessions:
+                        logger.info(f"🌐 [WebInspector] Session {session_id} was closed during replay; aborting.")
+                        break
+                    step_name = step.get("name") or step.get("type") or f"Passo {i + 1}"
+                    node_name = step.get("_sourceNodeName") or step.get("nodeName") or "Nó Atual"
+                    _session_progress[session_id] = {
+                        "current_index": i,
+                        "total_steps": len(steps),
+                        "step_name": step_name,
+                        "node_name": node_name,
+                        "status": "running"
+                    }
+                    try:
+                        # Use skip_tree=True and return_snapshot=False for intermediate steps to speed up execution
+                        is_last = (i == len(steps) - 1)
+                        # Intermediate steps use 0.5s settle time, last one uses 1.5s for full hydration
+                        await cls.interact(session_id, step, skip_tree=not is_last, settle_time=0.5 if not is_last else 1.5, return_snapshot=is_last)
+                    except Exception as step_err:
+                        failed_step_index = i
+                        failed_step_error = str(step_err).split('\n')[0]  # first line only
+                        logger.error(f"🌐 [WebInspector] Pre-existing step {i} ({step.get('type')}) failed: {step_err}")
+                        if session_id in _session_progress:
+                            _session_progress[session_id]["status"] = "failed"
+                        # Stop execution but do not crash the session so user can debug
+                        break
+
+                if failed_step_index is None and session_id in _session_progress:
+                    _session_progress[session_id]["status"] = "completed"
+            else:
+                failed_step_index = None
+                failed_step_error = None
+
+            logger.info(f"🌐 [WebInspector] Session {session_id} oriented to return snapshot.")
+            try:
                 result, image_bytes = await cls.get_snapshot(session_id)
-                # Inject replay metadata so the frontend can highlight the failing step
-                if failed_step_index is not None:
-                    result["failed_step_index"] = failed_step_index
-                    result["failed_step_error"] = failed_step_error
-                logger.info(f"🌐 [WebInspector] Snapshot captured for {session_id}, type: {type(result)}")
-                return result, image_bytes
+            except Exception as snap_err:
+                logger.warning(f"🌐 [WebInspector] Snapshot failed after replay ({snap_err}), returning fallback metadata.")
+                safe_url = ""
+                try:
+                    safe_url = page.url if page else ""
+                except Exception:
+                    pass
+                result, image_bytes = {"url": safe_url, "tree": [], "has_binary_image": False}, b""
+            # Inject replay metadata so the frontend can highlight the failing step
+            if failed_step_index is not None:
+                result["failed_step_index"] = failed_step_index
+                result["failed_step_error"] = failed_step_error
+            logger.info(f"🌐 [WebInspector] Snapshot captured for {session_id}, type: {type(result)}")
+            return result, image_bytes
 
-            except Exception as e:
-                logger.error(f"🌐 [WebInspector] FATAL failure in start_session: {e}")
-                traceback.print_exc(file=sys.stdout)
-                # Ensure cleanup of failed artifacts
-                if 'page' in locals() and page:
-                    try: await page.close()
-                    except: pass
-                if 'context' in locals() and context:
-                    try: await context.close()
-                    except: pass
-                raise e
+        except Exception as e:
+            logger.error(f"🌐 [WebInspector] FATAL failure in start_session: {e}")
+            traceback.print_exc(file=sys.stdout)
+            await cls.stop_session(session_id)
+            if page:
+                try: await page.close()
+                except: pass
+            if context:
+                try: await context.close()
+                except: pass
+            raise e
 
     @classmethod
     async def stop_session(cls, session_id: str):
@@ -678,6 +752,7 @@ class _WebInspectorServiceImpl:
         selector = props.get("selector")
 
         try:
+            await ensure_ephemeral_observer(page)
             if action_type in ("navigate", "browser"):
                 url = props.get("url") or props.get("value")
                 if url:
@@ -708,9 +783,13 @@ class _WebInspectorServiceImpl:
                             await page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
                         except Exception:
                             pass  # If we still fail, proceed with whatever is loaded
-                    # Give SPAs time to hydrate after navigation commits
+                    # Give SPAs time to hydrate and settle XHRs after navigation commits
                     try:
                         await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    except Exception:
+                        pass
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=4000)
                     except Exception:
                         pass
                     await asyncio.sleep(settle_time)
@@ -718,11 +797,12 @@ class _WebInspectorServiceImpl:
 
             elif action_type == "tap" or action_type == "click":
                 button = props.get("button", "left")
-                step_timeout = min(props.get("timeout", 4000) or 4000, 5000)
+                step_timeout = min(max(int(props.get("timeout") or 8000), 6000), 10000)
                 if selector:
-                    # Ensure element is in view
+                    # Wait for element to appear/become visible if screen is still loading
                     locator = page.locator(selector).first
                     try:
+                        await locator.wait_for(state="visible", timeout=step_timeout)
                         await locator.scroll_into_view_if_needed(timeout=2000)
                         # Move to element first so hover/focus CSS effects fire (real-user behaviour)
                         await locator.hover(timeout=800)
@@ -742,7 +822,7 @@ class _WebInspectorServiceImpl:
                                 logger.info(f"✨ [WebInspector] Fast Heuristic Click Success! Replacing '{selector}' with '{healed_sel}'")
                                 locator = page.locator(healed_sel).first
                                 props["selector"] = healed_sel
-                                await locator.click(button=button, timeout=2500)
+                                await locator.click(button=button, timeout=5000)
                                 healed = True
                         except Exception:
                             pass
@@ -750,7 +830,7 @@ class _WebInspectorServiceImpl:
                         if not healed:
                             # Fallback for obscured elements
                             logger.info(f"🌐 [WebInspector] Click failed for {selector}, retrying with force=True: {click_err}")
-                            await locator.click(button=button, force=True, timeout=2500)
+                            await locator.click(button=button, force=True, timeout=5000)
                 else:
                     # Coordinate-based click: move first to trigger hover, then click
                     x, y = props.get("x"), props.get("y")
@@ -758,11 +838,15 @@ class _WebInspectorServiceImpl:
                     await asyncio.sleep(0.05)   # brief hover dwell
                     await page.mouse.click(x, y, button=button)
 
-                # Wait for any navigation the click may have triggered (links, form submits)
+                # Wait for any navigation or SPA XHR the click may have triggered
                 try:
                     await page.wait_for_load_state("domcontentloaded", timeout=3000)
                 except Exception:
                     pass  # no navigation occurred — proceed
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=1500)
+                except Exception:
+                    pass
                 await asyncio.sleep(0.2)
                 
                 # 🧠 AUTO-SYNC: Generate stable selectors for the element we just clicked
@@ -788,14 +872,29 @@ class _WebInspectorServiceImpl:
                 val = props.get("value")
                 if val is None:
                     val = ""
-                step_timeout = min(props.get("timeout", 4000) or 4000, 5000)
+                step_timeout = min(max(int(props.get("timeout") or 8000), 6000), 10000)
                 locator = page.locator(selector).first
                 
                 type_success = False
-                try:
-                    await locator.fill(str(val), timeout=step_timeout)
-                    type_success = True
-                except Exception as fill_err:
+                fill_err = None
+                fill_deadline = time.time() + (step_timeout / 1000.0)
+                while time.time() < fill_deadline:
+                    remaining_ms = max(int((fill_deadline - time.time()) * 1000), 1000)
+                    try:
+                        await locator.wait_for(state="visible", timeout=min(remaining_ms, 5000))
+                        await locator.fill(str(val), timeout=min(remaining_ms, 5000))
+                        type_success = True
+                        break
+                    except Exception as e:
+                        fill_err = e
+                        err_msg = str(e).lower()
+                        # If element is still loading/disabled/detached, wait briefly and retry
+                        if any(k in err_msg for k in ("disabled", "not editable", "detached", "timeout", "waiting for")):
+                            await asyncio.sleep(0.3)
+                            continue
+                        break
+
+                if not type_success:
                     # 1. Attempt fast Heuristic Healing (e.g. placeholder fallback, similar id/class)
                     try:
                         from app.services.heuristic_healer_service import HeuristicHealerService
@@ -804,7 +903,7 @@ class _WebInspectorServiceImpl:
                             logger.info(f"✨ [WebInspector] Fast Heuristic Type Success! Replacing '{selector}' with '{healed_sel}'")
                             locator = page.locator(healed_sel).first
                             props["selector"] = healed_sel
-                            await locator.fill(str(val), timeout=2500)
+                            await locator.fill(str(val), timeout=5000)
                             type_success = True
                     except Exception:
                         pass
@@ -830,10 +929,11 @@ class _WebInspectorServiceImpl:
             elif action_type in ("keypress", "keyboard"):
                 key = props.get("key") or props.get("value") or "Enter"
                 text = props.get("text")
+                step_timeout = max(int(props.get("timeout") or 10000), 8000)
                 if selector:
                     try:
                         locator = page.locator(selector).first
-                        await locator.press(key, timeout=2500)
+                        await locator.press(key, timeout=step_timeout)
                     except Exception as kp_err:
                         logger.warning(f"🌐 [WebInspector] Keypress on {selector} failed ({kp_err}), trying page.keyboard.press")
                         await page.keyboard.press(key)
@@ -845,11 +945,13 @@ class _WebInspectorServiceImpl:
                 await asyncio.sleep(0.1)
 
             elif action_type == "hover":
+                step_timeout = max(int(props.get("timeout") or 10000), 8000)
                 if selector:
                     locator = page.locator(selector).first
                     try:
-                        await locator.scroll_into_view_if_needed(timeout=1500)
-                        await locator.hover(timeout=2500)
+                        await locator.wait_for(state="visible", timeout=step_timeout)
+                        await locator.scroll_into_view_if_needed(timeout=2000)
+                        await locator.hover(timeout=step_timeout)
                     except Exception as hover_err:
                         logger.warning(f"🌐 [WebInspector] Hover failed for {selector}: {hover_err}")
                 else:
@@ -861,6 +963,12 @@ class _WebInspectorServiceImpl:
             elif action_type in ("wait", "pause"):
                 ms = int(props.get("value") or 1000)
                 await asyncio.sleep(min(ms / 1000.0, 10.0))
+
+            elif action_type == "extract":
+                if selector:
+                    locator = page.locator(selector).first
+                    await locator.wait_for(state="attached", timeout=10000)
+                await asyncio.sleep(0.1)
 
             elif action_type == "wait_selector":
                 sel = selector or props.get("selector")
@@ -888,19 +996,48 @@ class _WebInspectorServiceImpl:
                 if not selector and not expected_val:
                     raise ValueError("Validação (assert) requer um seletor ou um texto esperado.")
 
-                if operator in ("visible", "is_visible"):
+                poll_max = min(timeout_val / 1000.0, 6.0)
+
+                async def _page_has_text(txt: str) -> bool:
+                    if not txt:
+                        return False
+                    if await check_ephemeral_text(page, txt, exact=False):
+                        return True
+                    body_text = await page.evaluate(
+                        """() => {
+                            const parts = [];
+                            if (document.body) {
+                                parts.push(document.body.innerText || document.body.textContent || '');
+                            }
+                            try {
+                                const toasts = document.querySelectorAll('[role="alert"], [role="status"], [aria-live], .Toastify__toast, .toast, .snackbar, .ant-message, .MuiSnackbar-root, .MuiAlert-root');
+                                for (const el of toasts) {
+                                    if (el.innerText || el.textContent) parts.push(el.innerText || el.textContent);
+                                }
+                            } catch (e) {}
+                            return parts.join('\\n');
+                        }"""
+                    )
+                    return txt.lower() in (body_text or "").lower()
+
+                if operator in ("visible", "is_visible", "exists", "present"):
                     if selector:
-                        await page.locator(selector).first.wait_for(state="visible", timeout=timeout_val)
+                        try:
+                            await page.locator(selector).first.wait_for(state="visible", timeout=timeout_val)
+                        except Exception as wait_err:
+                            hint = expected_val or extract_selector_text_hint(selector)
+                            if hint and await check_ephemeral_text(page, hint, exact=False):
+                                logger.info(f"✅ [WebInspector] Assert 'visible' passou via mensagem efêmera capturada: '{hint}'")
+                            else:
+                                raise wait_err
                     else:
                         start_t = time.time()
                         found = False
-                        poll_max = min(timeout_val / 1000.0, 6.0)
                         while (time.time() - start_t) < poll_max:
-                            body_text = await page.evaluate("() => document.body ? (document.body.innerText || document.body.textContent || '') : ''")
-                            if expected_val.lower() in body_text.lower():
+                            if await _page_has_text(expected_val):
                                 found = True
                                 break
-                            await asyncio.sleep(0.2)
+                            await asyncio.sleep(0.05)
                         if not found:
                             raise ValueError(f"Texto '{expected_val}' não foi encontrado na página.")
 
@@ -912,24 +1049,58 @@ class _WebInspectorServiceImpl:
 
                 elif operator == "equals":
                     if selector:
-                        locator = page.locator(selector).first
-                        await locator.wait_for(state="attached", timeout=timeout_val)
-                        actual_text = await locator.inner_text()
-                        if actual_text.strip() != expected_val:
-                            raise ValueError(f"Esperado '{expected_val}', mas encontrado '{actual_text.strip()}'.")
+                        start_t = time.time()
+                        matched = False
+                        actual_text = ""
+                        while (time.time() - start_t) < poll_max:
+                            try:
+                                locator = page.locator(selector).first
+                                if await locator.count() > 0:
+                                    actual_text = (await locator.inner_text()).strip()
+                                    if actual_text == expected_val:
+                                        matched = True
+                                        break
+                            except Exception:
+                                pass
+                            if await check_ephemeral_text(page, expected_val, exact=True):
+                                matched = True
+                                break
+                            await asyncio.sleep(0.05)
+                        if not matched:
+                            raise ValueError(f"Esperado '{expected_val}', mas encontrado '{actual_text}'.")
                     else:
                         raise ValueError("Seletor obrigatório para validação 'equals'.")
 
-                elif operator in ("contains", "includes"):
+                elif operator in ("contains", "includes", "text_contains"):
                     if selector:
-                        locator = page.locator(selector).first
-                        await locator.wait_for(state="attached", timeout=timeout_val)
-                        actual_text = await locator.inner_text()
-                        if expected_val.lower() not in actual_text.lower():
-                            raise ValueError(f"Texto '{expected_val}' não contido no elemento (encontrado: '{actual_text.strip()}').")
+                        start_t = time.time()
+                        matched = False
+                        actual_text = ""
+                        while (time.time() - start_t) < poll_max:
+                            try:
+                                locator = page.locator(selector).first
+                                if await locator.count() > 0:
+                                    actual_text = (await locator.inner_text()).strip()
+                                    if expected_val.lower() in actual_text.lower():
+                                        matched = True
+                                        break
+                            except Exception:
+                                pass
+                            if await check_ephemeral_text(page, expected_val, exact=False):
+                                matched = True
+                                break
+                            await asyncio.sleep(0.05)
+                        if not matched:
+                            raise ValueError(f"Texto '{expected_val}' não contido no elemento (encontrado: '{actual_text}').")
                     else:
-                        body_text = await page.evaluate("() => document.body ? (document.body.innerText || document.body.textContent || '') : ''")
-                        if expected_val.lower() not in body_text.lower():
+                        start_t = time.time()
+                        found = False
+                        while (time.time() - start_t) < poll_max:
+                            if await _page_has_text(expected_val):
+                                found = True
+                                break
+                            await asyncio.sleep(0.05)
+                        if not found:
                             raise ValueError(f"Texto '{expected_val}' não encontrado na página.")
 
             # Return fresh state
@@ -1019,6 +1190,72 @@ class _WebInspectorServiceImpl:
             js_script = """(e) => {
                 let opts = [];
                 
+                const isRandom = (str) => {
+                    const patterns = [
+                        /[0-9]{4,}/,                      // Pure numbers (indices/ids)
+                        /^[0-9a-f]{8}-[0-9a-f]{4}/i,      // UUIDs
+                        /:r[0-9a-zA-Z]+:/,               // React 18 internal IDs
+                        /^css-[a-zA-Z0-9]+/,             // Emotion/MUI
+                        /-sc-[a-zA-Z0-9]{5,}/,           // Styled Components hashes
+                        /_[a-zA-Z0-9]{5,}/,              // CSS Modules hashes
+                        /^[a-zA-Z]{1,2}-[0-9]+$/,        // Short hyphenated ID
+                        /-(?:input|field|button|select|checkbox|radio|area)-[0-9]+$/i, // Vaadin/WebComponent auto-generated IDs
+                        /^(?:input|vaadin|mat|el|v|mui|chakra|ant)-[a-z0-9-]+-[0-9]+$/i // Framework auto-indexed IDs
+                    ];
+                    return patterns.some(p => p.test(str));
+                };
+
+                const findCustomHost = (el) => {
+                    let p = el.parentElement;
+                    while (p && p !== document.body) {
+                        if (p.tagName && p.tagName.indexOf('-') !== -1) return p;
+                        p = p.parentElement;
+                    }
+                    return el.getRootNode?.()?.host || null;
+                };
+
+                const customHost = findCustomHost(e);
+
+                // Associated Label Recognition (Playwright Native + Shadow/Custom Element Pattern)
+                const findLabelText = (el) => {
+                    const clean = (t) => t ? t.replace(/[*:]/g, '').trim() : '';
+                    const ariaLabelledBy = el.getAttribute('aria-labelledby');
+                    if (ariaLabelledBy) {
+                        const rootNode = el.getRootNode ? el.getRootNode() : document;
+                        for (const refId of ariaLabelledBy.split(/\\s+/)) {
+                            if (!refId) continue;
+                            const refEl = document.getElementById(refId)
+                                || (rootNode && rootNode.getElementById ? rootNode.getElementById(refId) : null)
+                                || (customHost && customHost.shadowRoot ? customHost.shadowRoot.getElementById(refId) : null)
+                                || (customHost ? customHost.querySelector(`#${CSS.escape(refId)}`) : null);
+                            if (refEl && refEl.textContent && clean(refEl.textContent)) {
+                                return clean(refEl.textContent);
+                            }
+                        }
+                    }
+                    if (el.id) {
+                        let label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+                        if (label) return clean(label.innerText);
+                    }
+                    let parentLabel = el.closest('label');
+                    if (parentLabel) return clean(parentLabel.innerText);
+                    
+                    let prev = el.previousElementSibling;
+                    if (prev && prev.tagName === 'LABEL') return clean(prev.innerText);
+                    let next = el.nextElementSibling;
+                    if (next && next.tagName === 'LABEL') return clean(next.innerText);
+
+                    if (customHost) {
+                        const hostLbl = customHost.getAttribute('label') || customHost.getAttribute('aria-label');
+                        if (hostLbl && clean(hostLbl)) return clean(hostLbl);
+                        if (customHost.shadowRoot) {
+                            const partLbl = customHost.shadowRoot.querySelector('[part~="label"], label');
+                            if (partLbl && clean(partLbl.textContent)) return clean(partLbl.textContent);
+                        }
+                    }
+                    return null;
+                };
+
                 // Helper to get a human-readable name for the element
                 const getSemanticName = (el) => {
                     // 1. Explicit text content (for buttons/links)
@@ -1030,42 +1267,26 @@ class _WebInspectorServiceImpl:
                     if (aria) return aria;
                     
                     // 3. Form Specifics (Placeholder or associated Label)
+                    let lblText = findLabelText(el);
+                    if (lblText && lblText.length < 50) return lblText;
+
                     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
-                        let placeholder = el.getAttribute("placeholder");
+                        let placeholder = el.getAttribute("placeholder") || (customHost && customHost.getAttribute("placeholder"));
                         if (placeholder) return placeholder;
-                        
-                        // Try finding a label
-                        if (el.id) {
-                            let lbl = document.querySelector(`label[for="${el.id}"]`);
-                            if (lbl) return lbl.innerText.trim();
-                        }
-                        let parentLbl = el.closest('label');
-                        if (parentLbl) return parentLbl.innerText.trim();
                     }
                     
-                    // 4. Name attribute
+                    // 4. Name attribute (on element or custom host)
                     if (el.getAttribute("name")) return el.getAttribute("name");
+                    if (customHost && customHost.getAttribute("name")) return customHost.getAttribute("name");
+                    if (customHost && customHost.id && !isRandom(customHost.id)) return customHost.id;
                     
                     // 5. Fallback to Tag + ID (humanized)
-                    if (el.id && el.id.length < 30) return `${el.tagName.toLowerCase()}#${el.id}`;
+                    if (el.id && !isRandom(el.id) && el.id.length < 30) return `${el.tagName.toLowerCase()}#${el.id}`;
                     
                     return el.tagName.toLowerCase();
                 };
 
                 const semanticName = getSemanticName(e);
-
-                const isRandom = (str) => {
-                    const patterns = [
-                        /[0-9]{4,}/,                      // Pure numbers (indices/ids)
-                        /^[0-9a-f]{8}-[0-9a-f]{4}/i,      // UUIDs
-                        /:r[0-9a-zA-Z]+:/,               // React 18 internal IDs
-                        /^css-[a-zA-Z0-9]+/,             // Emotion/MUI
-                        /-sc-[a-zA-Z0-9]{5,}/,           // Styled Components hashes
-                        /_[a-zA-Z0-9]{5,}/,              // CSS Modules hashes
-                        /^[a-zA-Z]{1,2}-[0-9]+$/         // Short hyphenated ID
-                    ];
-                    return patterns.some(p => p.test(str));
-                };
 
                 const getCleanClass = (cls) => {
                     if (!cls || typeof cls !== 'string') return '';
@@ -1098,38 +1319,32 @@ class _WebInspectorServiceImpl:
                     if (e.id.includes('.')) opts.push(`[id="${e.id}"]`);
                     else opts.push(`#${e.id}`);
                 }
-                
-                // 4. Associated Label Recognition (Playwright Native Pattern)
-                const findLabelText = (el) => {
-                    const clean = (t) => t ? t.replace(/[*:]/g, '').trim() : '';
-                    if (el.id) {
-                        let label = document.querySelector(`label[for="${el.id}"]`);
-                        if (label) return clean(label.innerText);
-                    }
-                    let parentLabel = el.closest('label');
-                    if (parentLabel) return clean(parentLabel.innerText);
-                    
-                    let prev = el.previousElementSibling;
-                    if (prev && prev.tagName === 'LABEL') return clean(prev.innerText);
-                    let next = el.nextElementSibling;
-                    if (next && next.tagName === 'LABEL') return clean(next.innerText);
-                    
-                    return null;
-                };
 
+                // 4. Custom Element / Shadow Host Scoped Selectors (High Reliability for Vaadin / Web Components)
+                if (customHost) {
+                    const slotAttr = e.getAttribute('slot');
+                    const targetSub = slotAttr ? `${e.tagName.toLowerCase()}[slot="${slotAttr}"]` : e.tagName.toLowerCase();
+                    if (customHost.id && !isRandom(customHost.id)) {
+                        const hostIdSel = customHost.id.includes('.') ? `[id="${customHost.id}"]` : `#${customHost.id}`;
+                        opts.unshift(`${hostIdSel} ${targetSub}`);
+                        opts.push(`${hostIdSel} >> internal:role=${e.tagName.toLowerCase()}`);
+                    }
+                    const hostName = customHost.getAttribute('name');
+                    if (hostName && !isRandom(hostName)) {
+                        opts.push(`${customHost.tagName.toLowerCase()}[name="${hostName}"] ${targetSub}`);
+                    }
+                    const hostTestId = customHost.getAttribute('data-testid') || customHost.getAttribute('data-test');
+                    if (hostTestId) {
+                        opts.unshift(`[data-testid="${hostTestId}"] ${targetSub}`);
+                    }
+                }
+
+                // 5. Associated Label Recognition (Playwright Native Pattern)
                 let semanticLabel = findLabelText(e);
                 if (semanticLabel && semanticLabel.length > 1 && semanticLabel.length < 50) {
                     let cleanLabel = semanticLabel.replace(/"/g, '\\\\\"');
                     opts.push(`internal:label="${cleanLabel}"`);
                     opts.push(`label:has-text("${cleanLabel}") >> ${e.tagName.toLowerCase()}`);
-                }
-
-                // 5. Shadow Host Detection
-                let host = e.getRootNode()?.host;
-                if (host) {
-                    if (host.id && !isRandom(host.id)) {
-                        opts.push(`#${host.id} >> internal:role=${e.tagName.toLowerCase()}`);
-                    }
                 }
 
                 // 6. Text-Based locators

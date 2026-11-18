@@ -5,6 +5,11 @@ import time as _time
 from playwright.async_api import async_playwright
 import playwright_stealth
 import asyncio
+from app.services.ephemeral_observer import (
+    EPHEMERAL_MESSAGE_OBSERVER_SCRIPT,
+    check_ephemeral_text,
+    extract_selector_text_hint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +121,7 @@ class PlaywrightExecutorService:
                 context_args["storage_state"] = storage_state
                 
             self._context = await self._browser.new_context(**context_args)
+            await self._context.add_init_script(EPHEMERAL_MESSAGE_OBSERVER_SCRIPT)
             
             # Enable Tracing (Time Machine) for this context
             try:
@@ -552,7 +558,13 @@ class PlaywrightExecutorService:
                 }
             } catch (e) {}
             try {
-                const labelled = document.querySelectorAll('[aria-label], [data-tooltip], [role="alert"], [role="tooltip"], [aria-live], .tooltip, .toast, .alert, .popover');
+                if (window.__getFlowEphemeralText) {
+                    const ephemeral = window.__getFlowEphemeralText(20000);
+                    if (ephemeral) collected.push(ephemeral);
+                }
+            } catch (e) {}
+            try {
+                const labelled = document.querySelectorAll('[aria-label], [data-tooltip], [role="alert"], [role="status"], [role="tooltip"], [aria-live], .tooltip, .toast, .Toastify__toast, .snackbar, .alert, .popover');
                 for (const el of labelled) {
                     const aria = el.getAttribute('aria-label');
                     if (aria) collected.push(aria);
@@ -687,18 +699,7 @@ class PlaywrightExecutorService:
 
                         # Wait until load so subsequent steps don't fail immediately because the page hasn't loaded
                         await self._page.goto(url, timeout=timeout, wait_until='load')
-                        
-                        # Capture a screenshot if requested, to ensure UI shows the page was loaded
-                        if capture_screenshot:
-                            try:
-                                screenshot_bytes = await self._page.screenshot()
-                                s_url = await self._save_screenshot(screenshot_bytes)
-                                step_result["text"] = f"Navigated to {url} [Screenshot: {s_url}]"
-                            except Exception as e:
-                                logger.warning(f"Failed to capture screenshot after navigation: {e}")
-                                step_result["text"] = f"Navigated to {url}"
-                        else:
-                            step_result["text"] = f"Navigated to {url}"
+                        step_result["text"] = f"Navigated to {url}"
                     else:
                         raise ValueError("URL is missing for browser step")
 
@@ -1012,12 +1013,27 @@ class PlaywrightExecutorService:
                                             await target_el.click(timeout=timeout, force=True)
                                 elif tag not in ['input', 'textarea']:
                                     # Custom component or div: check if it wraps an inner input/textarea
-                                    inner_input = el.locator('input, textarea, [contenteditable="true"]').first
+                                    # Prioritize slotted/visible real input over shadow-root fallback (e.g. Vaadin text fields)
+                                    slotted_input = el.locator('input[slot="input"], input:not([part="value"]), textarea, [contenteditable="true"]').first
+                                    inner_input = slotted_input if await slotted_input.count() > 0 else el.locator('input, textarea, [contenteditable="true"]').first
                                     if await inner_input.count() > 0:
                                         try:
                                             await inner_input.fill(value, timeout=min(timeout, 3000))
                                         except Exception:
                                             await inner_input.fill(value, timeout=timeout, force=True)
+                                        
+                                        # Also sync custom element host state if needed (e.g. Vaadin text fields)
+                                        try:
+                                            await el.evaluate("""(host, val) => {
+                                                if (host && host.tagName && host.tagName.includes('-')) {
+                                                    if ('value' in host && host.value !== val) {
+                                                        host.value = val;
+                                                        host.dispatchEvent(new CustomEvent('change', { bubbles: true, composed: true }));
+                                                    }
+                                                }
+                                            }""", value)
+                                        except Exception:
+                                            pass
                                     else:
                                         # Try setting value property via JS
                                         set_js = await el.evaluate("""(e, val) => {
@@ -1165,8 +1181,15 @@ class PlaywrightExecutorService:
 
                     if operator == 'visible':
                         if selector:
-                            await target.locator(selector).first.wait_for(state="visible", timeout=timeout)
-                            step_result["text"] = f"Assertion passed: {selector} is visible"
+                            try:
+                                await target.locator(selector).first.wait_for(state="visible", timeout=timeout)
+                                step_result["text"] = f"Assertion passed: {selector} is visible"
+                            except Exception as wait_err:
+                                hint = expected_value or extract_selector_text_hint(selector)
+                                if hint and await check_ephemeral_text(target, hint, exact=False):
+                                    step_result["text"] = f"Assertion passed (ephemeral message captured): '{hint}'"
+                                else:
+                                    raise wait_err
                         else:
                             start_t = time.time()
                             found = False
@@ -1178,7 +1201,7 @@ class PlaywrightExecutorService:
                                     break
                                 if (time.time() - start_t) >= poll_max:
                                     break
-                                await asyncio.sleep(0.1)
+                                await asyncio.sleep(0.05)
 
                             if found:
                                 step_result["text"] = f"Assertion passed: text '{expected_value}' found on page"
@@ -1205,13 +1228,20 @@ class PlaywrightExecutorService:
                             else:
                                 raise ValueError(f"Assertion failed: expected title '{expected_value}', but found '{actual_value}'")
                         elif selector:
-                            candidates = await self._extract_element_candidates(target.locator(selector), timeout=timeout)
-                            norm_expected = self._normalize_text(expected_value)
-                            matched = any(self._normalize_text(c) == norm_expected for c in candidates)
+                            actual_val = ""
+                            matched = False
+                            try:
+                                candidates = await self._extract_element_candidates(target.locator(selector), timeout=timeout)
+                                norm_expected = self._normalize_text(expected_value)
+                                matched = any(self._normalize_text(c) == norm_expected for c in candidates)
+                                actual_val = candidates[0] if candidates else ""
+                            except Exception:
+                                pass
+                            if not matched and expected_value:
+                                matched = await check_ephemeral_text(target, expected_value, exact=True)
                             if matched:
                                 step_result["text"] = f"Assertion passed: text for {selector} equals '{expected_value}'"
                             else:
-                                actual_val = candidates[0] if candidates else ""
                                 raise ValueError(f"Assertion failed: expected '{expected_value}', but found '{actual_val}'")
                         else:
                             raise ValueError("Selector is missing for 'equals' assertion")
@@ -1234,13 +1264,19 @@ class PlaywrightExecutorService:
                             found = False
                             actual_value = ""
                             while True:
-                                actual_value = await self._extract_element_text(target.locator(selector), timeout=timeout)
-                                if self._text_matches(expected_value, actual_value):
+                                try:
+                                    actual_value = await self._extract_element_text(target.locator(selector), timeout=min(timeout or 2000, 1500))
+                                    if self._text_matches(expected_value, actual_value):
+                                        found = True
+                                        break
+                                except Exception:
+                                    pass
+                                if await check_ephemeral_text(target, expected_value, exact=False):
                                     found = True
                                     break
                                 if (time.time() - start_t) >= poll_max:
                                     break
-                                await asyncio.sleep(0.1)
+                                await asyncio.sleep(0.05)
 
                             if found:
                                 step_result["text"] = f"Assertion passed: text for {selector} contains '{expected_value}'"
@@ -1257,7 +1293,7 @@ class PlaywrightExecutorService:
                                     break
                                 if (time.time() - start_t) >= poll_max:
                                     break
-                                await asyncio.sleep(0.1)
+                                await asyncio.sleep(0.05)
 
                             if found:
                                 step_result["text"] = f"Assertion passed: page content contains '{expected_value}'"
@@ -1400,7 +1436,7 @@ class PlaywrightExecutorService:
                         from app.main import VIDEO_DIR
                         SCREENSHOT_DIR = os.path.join(os.path.dirname(VIDEO_DIR), "screenshots")
                         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-                        safe_name = "".join(c if c.isalnum() else "_" for c in f"{step_type}_{name}")[:40]
+                        safe_name = "".join(c if (c.isascii() and c.isalnum()) else "_" for c in f"{step_type}_{name}")[:40]
                         screenshot_name = f"live_{safe_name}.png"
                         path = os.path.join(SCREENSHOT_DIR, screenshot_name)
                         await self._page.screenshot(path=path, full_page=False)

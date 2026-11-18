@@ -32,9 +32,9 @@ class AppiumExecutorService:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self, video_dir: str = None, db=None, product_id: int = None, device_id: int = None):
+    async def start(self, video_dir: str = None, db=None, product_id: int = None, device_id: int = None, allowed_device_ids: list = None):
         import asyncio
-        return await asyncio.to_thread(self.start_sync, video_dir, db, product_id, device_id)
+        return await asyncio.to_thread(self.start_sync, video_dir, db, product_id, device_id, allowed_device_ids)
 
     async def execute_step(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
         import asyncio
@@ -107,7 +107,7 @@ class AppiumExecutorService:
         except Exception as err:
             logger.warning(f"⚠️ [Appium] Could not restart app '{pkg}': {err}")
 
-    def start_sync(self, video_dir: str = None, db=None, product_id: int = None, device_id: int = None):
+    def start_sync(self, video_dir: str = None, db=None, product_id: int = None, device_id: int = None, allowed_device_ids: list = None):
         """Inicializa o driver mobile com as configurações do produto e pool de dispositivos."""
         try:
             self._is_first_step = True
@@ -133,7 +133,8 @@ class AppiumExecutorService:
                     self._acquired_device_info = MobileDevicePoolService.acquire_device(
                         db=db,
                         product_id=product_id,
-                        device_id=device_id
+                        device_id=device_id,
+                        allowed_device_ids=allowed_device_ids
                     )
                     pool_dev = self._acquired_device_info.get("device")
                     if pool_dev:
@@ -153,6 +154,8 @@ class AppiumExecutorService:
                             self._settings["app_identifier"] = pool_dev.app_identifier
                         if pool_dev.custom_capabilities:
                             self._settings["custom_capabilities"] = pool_dev.custom_capabilities
+                    elif self._acquired_device_info.get("device_name"):
+                        self._settings["device_name"] = self._acquired_device_info["device_name"]
                 except Exception as pool_err:
                     logger.warning(f"⚠️ [Device Pool] acquire_device notice: {pool_err}")
 
@@ -213,6 +216,26 @@ class AppiumExecutorService:
                 except Exception as cap_err:
                     logger.warning(f"⚠️ [Appium] Failed to set custom capability '{cap_key}': {cap_err}")
 
+    @staticmethod
+    def _format_appium_connection_error(server_url: str, err: Exception) -> str | None:
+        """Return a user-friendly message when the Appium server is unreachable or not started."""
+        err_text = f"{type(err).__name__}: {err}"
+        markers = (
+            "Connection refused",
+            "Max retries exceeded",
+            "NewConnectionError",
+            "Failed to establish a new connection",
+            "NameResolutionError",
+            "RemoteDisconnected",
+            "ConnectTimeoutError",
+        )
+        if any(m in err_text for m in markers):
+            return (
+                f"Não foi possível conectar ao servidor Appium ({server_url}). "
+                f"O Appium falhou ou não foi iniciado. Verifique se o serviço está rodando na porta configurada."
+            )
+        return None
+
     def _start_appium_local(self):
         """Conecta ao servidor Appium local via webdriver.Remote."""
         try:
@@ -231,7 +254,10 @@ class AppiumExecutorService:
                 options.platform_name = "Android"
                 options.set_capability("appium:automationName", "UiAutomator2")
 
-            options.set_capability("appium:deviceName", self._settings["device_name"])
+            dev_name_cap = self._settings["device_name"]
+            options.set_capability("appium:deviceName", dev_name_cap)
+            if dev_name_cap and dev_name_cap not in ("Android Emulator", "iPhone Simulator", "Android", "iOS"):
+                options.set_capability("appium:udid", dev_name_cap)
             if self._settings.get("platform_version"):
                 options.set_capability("appium:platformVersion", self._settings["platform_version"])
             if self._settings.get("app_identifier"):
@@ -262,6 +288,12 @@ class AppiumExecutorService:
                         else:
                             options.set_capability("appium:appPackage", app_id)
                             options.set_capability("appium:appWaitActivity", "*")
+                            dev_name = self._settings.get("device_name")
+                            dev_arg = f"-s {dev_name}" if dev_name and dev_name != "Android Emulator" else ""
+                            resolved_act = self._resolve_android_launch_activity(app_id, dev_arg)
+                            if resolved_act:
+                                options.set_capability("appium:appActivity", resolved_act)
+                                logger.info(f"📱 [Appium] Auto-resolved launchable activity: {resolved_act}")
             # Ensure physical/emulator device screen is awake, unlocked, and stays on
             if not is_ios:
                 try:
@@ -306,15 +338,84 @@ class AppiumExecutorService:
                 server_url = server_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
                 logger.info("📱 [Appium] Auto-rewriting localhost to host.docker.internal for Docker networking")
 
-            self._driver = appium_webdriver.Remote(
-                command_executor=server_url,
-                options=options
-            )
+            try:
+                self._driver = appium_webdriver.Remote(
+                    command_executor=server_url,
+                    options=options
+                )
+            except Exception as remote_err:
+                err_str = str(remote_err)
+                if not is_ios and ("Unable to resolve the launchable activity" in err_str or "No activity found" in err_str):
+                    logger.warning(f"📱 [Appium] Activity resolution failed for '{app_id}'. Trying '.MainActivity' fallback...")
+                    try:
+                        options.set_capability("appium:appActivity", ".MainActivity")
+                        options.set_capability("appium:appWaitActivity", "*")
+                        self._driver = appium_webdriver.Remote(
+                            command_executor=server_url,
+                            options=options
+                        )
+                    except Exception as main_act_err:
+                        logger.warning(f"📱 [Appium] '.MainActivity' fallback failed ({main_act_err}). Trying autoLaunch=False attach fallback...")
+                        # Remove appPackage/appActivity so Appium attaches to the current device screen
+                        for cap_key in ("appium:appPackage", "appium:appActivity", "appium:appWaitActivity", "appPackage", "appActivity", "appWaitActivity"):
+                            options._caps.pop(cap_key, None)
+                        options.set_capability("appium:autoLaunch", False)
+                        self._driver = appium_webdriver.Remote(
+                            command_executor=server_url,
+                            options=options
+                        )
+                        if app_id:
+                            activated = False
+                            try:
+                                self._driver.activate_app(app_id)
+                                activated = True
+                            except Exception as act_err:
+                                logger.warning(f"📱 [Appium] activate_app('{app_id}') failed after attach: {act_err}")
+                            if not activated:
+                                try:
+                                    current_pkg = getattr(self._driver, "current_package", None) or ""
+                                except Exception:
+                                    current_pkg = ""
+                                pkg_base = app_id.split("/")[0]
+                                if current_pkg and (current_pkg == pkg_base or current_pkg.startswith(pkg_base) or pkg_base in current_pkg):
+                                    logger.info(f"📱 [Appium] App flavor already in foreground: {current_pkg}. Continuing session.")
+                                else:
+                                    raise RuntimeError(
+                                        f"Não foi possível abrir o app '{app_id}' no dispositivo "
+                                        f"'{self._settings.get('device_name', 'Android')}' (pacote não instalado ou sem Activity lançável; "
+                                        f"tela atual: '{current_pkg or 'desconhecida'}'). "
+                                        f"Verifique o App ID nas Configurações Mobile (ex: sufixo .dev/.hml ou 'pacote/activity')."
+                                    )
+                else:
+                    friendly_conn_err = self._format_appium_connection_error(server_url, remote_err)
+                    if friendly_conn_err:
+                        logger.error(f"📱 [Appium] {friendly_conn_err} (raw: {remote_err})")
+                        raise RuntimeError(friendly_conn_err) from remote_err
+                    raise
             self._driver.implicitly_wait(0)
             try:
                 self._driver.update_settings({"waitForIdleTimeout": 0})
             except Exception:
                 pass
+            if not is_ios and self._settings.get("app_identifier"):
+                _app_id = self._settings["app_identifier"]
+                _is_file = (
+                    _app_id.lower().endswith(('.apk', '.aab', '.ipa', '.app')) or
+                    '\\' in _app_id or
+                    ('/' in _app_id and not _app_id.startswith(('com.', 'br.', 'io.')))
+                )
+                if not _is_file:
+                    _pkg_base = _app_id.split("/", 1)[0].strip()
+                    try:
+                        _cur_pkg = getattr(self._driver, "current_package", None) or ""
+                    except Exception:
+                        _cur_pkg = ""
+                    if _pkg_base and _cur_pkg and _cur_pkg != _pkg_base and _pkg_base not in _cur_pkg:
+                        logger.warning(f"📱 [Appium] App '{_pkg_base}' not in foreground after session start (current: '{_cur_pkg}'). Calling activate_app...")
+                        try:
+                            self._driver.activate_app(_pkg_base)
+                        except Exception as _act_err:
+                            logger.warning(f"📱 [Appium] activate_app('{_pkg_base}') warning: {_act_err}")
             logger.info(f"📱 [Appium] Connected to local server at {server_url}")
 
         except ImportError:
@@ -501,9 +602,104 @@ class AppiumExecutorService:
         except Exception as err:
             logger.warning(f"⚠️ [Appium] Backspace keycode clear fallback error: {err}")
 
+    def _resolve_android_launch_activity(self, pkg: str, dev_arg: str = "") -> str:
+        """
+        Pre-validates via ADB whether `pkg` is installed on the target Android device
+        and resolves its MAIN/LAUNCHER activity via `resolve-activity` / `dumpsys package`
+        to avoid opaque Appium 'No activity found' errors.
+        """
+        import subprocess
+        import re
+        try:
+            pm_path = subprocess.run(
+                f"adb {dev_arg} shell pm path {pkg}",
+                shell=True, capture_output=True, text=True, timeout=5
+            )
+            if pm_path.returncode == 0 and not pm_path.stdout.strip():
+                # Package is NOT installed on the connected device; look for similar packages
+                hint = ""
+                try:
+                    last_part = pkg.split(".")[-1].lower()
+                    brand_part = pkg.split(".")[2].lower() if len(pkg.split(".")) > 2 else ""
+                    pkgs_out = subprocess.run(
+                        f"adb {dev_arg} shell pm list packages",
+                        shell=True, capture_output=True, text=True, timeout=5
+                    )
+                    if pkgs_out.returncode == 0:
+                        candidates = [
+                            line.replace("package:", "").strip()
+                            for line in pkgs_out.stdout.splitlines()
+                            if (last_part and last_part in line.lower()) or (brand_part and brand_part in line.lower())
+                        ]
+                        if candidates:
+                            hint = f" Pacotes similares encontrados no dispositivo: {', '.join(candidates[:5])}."
+                except Exception:
+                    pass
+                raise Exception(
+                    f"O pacote '{pkg}' não está instalado no dispositivo conectado.{hint} "
+                    "Verifique o App ID nas Configurações Mobile ou informe no formato 'pacote/activity'."
+                )
+
+            # Try standard resolve-activity first
+            res = subprocess.run(
+                f"adb {dev_arg} shell cmd package resolve-activity --brief {pkg}",
+                shell=True, capture_output=True, text=True, timeout=5
+            )
+            if res.returncode == 0:
+                lines = [l.strip() for l in res.stdout.splitlines() if l.strip() and "/" in l]
+                if lines:
+                    return lines[-1].split("/", 1)[1]
+
+            # Fallback: inspect dumpsys package for MAIN/LAUNCHER activity or MainActivity
+            dump = subprocess.run(
+                f"adb {dev_arg} shell dumpsys package {pkg}",
+                shell=True, capture_output=True, text=True, timeout=6
+            )
+            if dump.returncode == 0 and dump.stdout:
+                m = re.search(rf"{re.escape(pkg)}/([A-Za-z0-9_.$]+)", dump.stdout)
+                if m:
+                    return m.group(1)
+        except Exception as e:
+            if "não está instalado no dispositivo" in str(e):
+                raise
+            logger.debug(f"ADB pre-check skipped/failed: {e}")
+        return None
+
     def execute_step_sync(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
-        """Executa um passo nativo no Appium/Cloud."""
+        """Executa um passo nativo no Appium/Cloud com suporte a retentativas e resolução de variáveis."""
+        props = dict(step_data.get('properties', {}) or {})
+        max_attempts = max(1, int(props.get('retries', 0) or 0) + 1)
+
+        # Resolve {{VAR}} across common mobile step properties when variables are configured
+        variables = getattr(self, '_variables', None) or {}
+        if variables:
+            try:
+                from app.services.variable_resolver import replace_vars
+                for key in ('selector', 'android_selector', 'ios_selector', 'target_text', 'target_label', 'value', 'url'):
+                    if isinstance(props.get(key), str) and '{{' in props[key]:
+                        props[key] = replace_vars(props[key], variables)
+                step_data = {**step_data, 'properties': props}
+            except Exception as var_err:
+                logger.warning(f"📱 Variable interpolation warning: {var_err}")
+
+        last_result = None
+        for attempt in range(max_attempts):
+            last_result = self._execute_step_sync_once(step_data, capture_screenshot=capture_screenshot, db=db, user_id=user_id)
+            if last_result.get('status', 500) < 400:
+                if attempt > 0:
+                    last_result['retry_count'] = attempt
+                return last_result
+            if attempt < max_attempts - 1:
+                logger.info(f"🔄 [Appium] Retrying step '{step_data.get('name', step_data.get('type'))}' (attempt {attempt + 2}/{max_attempts})")
+                time.sleep(0.5)
+        if last_result is not None and max_attempts > 1:
+            last_result['retry_count'] = max_attempts - 1
+        return last_result
+
+    def _execute_step_sync_once(self, step_data: dict, capture_screenshot: bool = False, db=None, user_id=None) -> dict:
+        """Executa uma tentativa única de passo nativo no Appium/Cloud."""
         self._last_strategy_used = 'standard'
+        self._last_healed_selector = None
         step_type = step_data.get('type')
         props = step_data.get('properties', {})
         step_name = step_data.get('name', step_type)
@@ -807,6 +1003,50 @@ class AppiumExecutorService:
                 if not el:
                     raise Exception(f"Element with identifier '{selector}' not found for typing.")
 
+                # Verify that the matched element actually contains recorded (x, y) coordinates if provided;
+                # ONLY override when the selector is generic/positional (e.g. //android.widget.EditText) so
+                # semantic selectors ('CPF', //*[@hint='Senha']) are never hijacked across different screen resolutions.
+                tx = props.get('x')
+                ty = props.get('y')
+                sel_str = str(selector or '').strip()
+                is_generic_input_selector = (
+                    '@' not in sel_str
+                    and ('EditText' in sel_str or 'TextField' in sel_str or '[' in sel_str)
+                )
+                if tx is not None and ty is not None and is_generic_input_selector:
+                    try:
+                        tx_f, ty_f = float(tx), float(ty)
+                        loc = el.location
+                        sz = el.size
+                        in_bounds = (
+                            (loc['x'] - 10) <= tx_f <= (loc['x'] + sz['width'] + 10)
+                            and (loc['y'] - 10) <= ty_f <= (loc['y'] + sz['height'] + 10)
+                        )
+                        if not in_bounds:
+                            from appium.webdriver.common.appiumby import AppiumBy
+                            candidates = self._driver.find_elements(
+                                AppiumBy.XPATH,
+                                "//android.widget.EditText | //XCUIElementTypeTextField | //XCUIElementTypeSecureTextField"
+                            )
+                            matched_by_coords = None
+                            for cand in candidates:
+                                try:
+                                    cloc = cand.location
+                                    csz = cand.size
+                                    if (
+                                        (cloc['x'] - 10) <= tx_f <= (cloc['x'] + csz['width'] + 10)
+                                        and (cloc['y'] - 10) <= ty_f <= (cloc['y'] + csz['height'] + 10)
+                                    ):
+                                        matched_by_coords = cand
+                                        break
+                                except Exception:
+                                    continue
+                            if matched_by_coords is not None:
+                                logger.info(f"🎯 [Appium] Selector '{selector}' was out of bounds for ({tx_f}, {ty_f}); switched to exact input at coordinates.")
+                                el = matched_by_coords
+                    except Exception as bounds_err:
+                        logger.debug(f"Bounds verification skipped for '{selector}': {bounds_err}")
+
                 # If located element is a container (ViewGroup, View, etc.), search for inner editable EditText/TextField
                 try:
                     from appium.webdriver.common.appiumby import AppiumBy
@@ -824,6 +1064,16 @@ class AppiumExecutorService:
                     logger.info("🧹 [Appium] clear_first flag set: clearing field before typing...")
                     self._clear_element_text(el)
 
+                def is_password_or_masked(target_el, observed_text):
+                    try:
+                        if str(target_el.get_attribute('password') or '').lower() == 'true':
+                            return True
+                    except Exception:
+                        pass
+                    if observed_text and all(ch in ('•', '*', '●') for ch in observed_text):
+                        return True
+                    return False
+
                 def is_typed_successfully():
                     clean_val = value.strip()
                     if not clean_val:
@@ -837,6 +1087,13 @@ class AppiumExecutorService:
                                 act_text = (active_el.text or active_el.get_attribute('text') or active_el.get_attribute('value') or '').strip()
                         except Exception:
                             pass
+
+                        # Password / masked fields render bullets (•••) instead of plaintext;
+                        # verify by masked character count so we don't clear & retype 5 times.
+                        if is_password_or_masked(el, now_text) and len(now_text) >= len(clean_val):
+                            return True
+                        if act_text and is_password_or_masked(el, act_text) and len(act_text) >= len(clean_val):
+                            return True
 
                         # Strict match: clean_val must be contained in now_text or act_text (case-sensitive)
                         if clean_val in now_text or clean_val in act_text:
@@ -902,75 +1159,78 @@ class AppiumExecutorService:
                 time.sleep(0.2)
 
                 typed_success = False
-
-                # Strategy 1: Hardware Keycode Events (triggers React Native / Android onChangeText visual render)
                 try:
-                    type_hardware_keycodes(value)
-                    time.sleep(0.25)
-                    if is_typed_successfully():
-                        typed_success = True
-                        logger.info(f"⌨️ [Appium] Hardware Keycode typing verified for '{selector}'")
-                except Exception as ekc:
-                    logger.warning(f"⚠️ [Appium] Hardware Keycode typing failed on '{selector}': {ekc}")
+                    before_text = (el.text or el.get_attribute('text') or el.get_attribute('value') or '').strip()
+                except Exception:
+                    before_text = ''
 
-                # Strategy 2: Direct send_keys
-                if not typed_success:
-                    self._clear_element_text(el)
+                def _can_use_hardware_keycodes(val_str):
+                    return bool(val_str) and all(
+                        ch.isdigit() or ('a' <= ch <= 'z') or ('A' <= ch <= 'Z') or ch in (' ', '@', '.', '-')
+                        for ch in val_str
+                    )
+
+                def _did_text_change():
                     try:
-                        el.send_keys(value)
-                        time.sleep(0.25)
-                        if is_typed_successfully():
-                            typed_success = True
-                            logger.info(f"⌨️ [Appium] Direct send_keys verified for '{selector}'")
-                    except Exception as e1:
-                        logger.warning(f"⚠️ [Appium] Direct send_keys failed on '{selector}': {e1}")
+                        now_t = (el.text or el.get_attribute('text') or el.get_attribute('value') or '').strip()
+                        return bool(now_t) and now_t != before_text
+                    except Exception:
+                        return False
 
-                # Strategy 3: set_value / set_text
+                # Strategy 1 (Primary): Direct send_keys — fast, universal, no repeated clear/retype
+                try:
+                    el.send_keys(value)
+                    time.sleep(0.2)
+                    if is_typed_successfully() or _did_text_change():
+                        typed_success = True
+                        logger.info(f"⌨️ [Appium] Direct send_keys verified for '{selector}'")
+                    elif not before_text and _can_use_hardware_keycodes(value):
+                        # Some React Native / Flutter EditTexts ignore send_keys when empty; try hardware keycodes once without clearing
+                        type_hardware_keycodes(value)
+                        time.sleep(0.2)
+                        if is_typed_successfully() or _did_text_change():
+                            typed_success = True
+                            logger.info(f"⌨️ [Appium] Hardware Keycode fallback verified for '{selector}'")
+                except Exception as e1:
+                    logger.warning(f"⚠️ [Appium] Direct send_keys failed on '{selector}': {e1}")
+
+                # Strategy 2 (Fallback only if send_keys raised): set_value / set_text
                 if not typed_success:
-                    self._clear_element_text(el)
                     try:
                         if hasattr(el, 'set_value'):
                             el.set_value(value)
                         elif hasattr(self._driver, 'set_value'):
                             self._driver.set_value(el, value)
-                        time.sleep(0.25)
-                        if is_typed_successfully():
+                        time.sleep(0.2)
+                        if is_typed_successfully() or _did_text_change():
                             typed_success = True
                             logger.info(f"⌨️ [Appium] set_value verified for '{selector}'")
                     except Exception as e2:
                         logger.warning(f"⚠️ [Appium] set_value failed: {e2}")
 
-                # Strategy 4: Selenium ActionChains
+                # Strategy 3 (Fallback): Active element send_keys
                 if not typed_success:
-                    self._clear_element_text(el)
-                    try:
-                        from selenium.webdriver.common.action_chains import ActionChains
-                        actions = ActionChains(self._driver)
-                        actions.click(el)
-                        for char in value:
-                            actions.send_keys(char)
-                            actions.pause(0.02)
-                        actions.perform()
-                        time.sleep(0.25)
-                        if is_typed_successfully():
-                            typed_success = True
-                            logger.info(f"⌨️ [Appium] ActionChains character send_keys verified for '{selector}'")
-                    except Exception as e3:
-                        logger.warning(f"⚠️ [Appium] ActionChains failed: {e3}")
-
-                # Strategy 5: Active element send_keys
-                if not typed_success:
-                    self._clear_element_text(el)
                     try:
                         active_el = self._driver.switch_to.active_element
                         if active_el:
                             active_el.send_keys(value)
-                            time.sleep(0.25)
-                            if is_typed_successfully():
+                            time.sleep(0.2)
+                            if is_typed_successfully() or _did_text_change():
                                 typed_success = True
                                 logger.info(f"⌨️ [Appium] Active element send_keys verified for '{selector}'")
-                    except Exception as e4:
-                        logger.warning(f"⚠️ [Appium] Active element send_keys failed: {e4}")
+                    except Exception as e3:
+                        logger.warning(f"⚠️ [Appium] Active element send_keys failed: {e3}")
+
+                # Strategy 4 (Last resort): Hardware Keycodes
+                if not typed_success and _can_use_hardware_keycodes(value):
+                    try:
+                        type_hardware_keycodes(value)
+                        time.sleep(0.2)
+                        if is_typed_successfully() or _did_text_change():
+                            typed_success = True
+                            logger.info(f"⌨️ [Appium] Hardware Keycode last-resort verified for '{selector}'")
+                    except Exception as ekc:
+                        logger.warning(f"⚠️ [Appium] Hardware Keycode typing failed on '{selector}': {ekc}")
 
                 # Strategy 6: Mobile shell ADB input text (Android)
                 if not typed_success:
@@ -1327,6 +1587,49 @@ class AppiumExecutorService:
                     "duration": ms
                 }
 
+            elif step_type == 'getText':
+                selector = self._get_platform_selector(props, allow_value_fallback=False)
+                timeout = int(props.get('timeout', 5000))
+                el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
+                if not el:
+                    raise Exception(f"Element not found for getText: {selector}")
+                extracted = el.text or el.get_attribute("content-desc") or el.get_attribute("label") or ""
+                var_name = (props.get('variable') or props.get('value') or '').strip()
+                if var_name:
+                    if not hasattr(self, '_variables') or self._variables is None:
+                        self._variables = {}
+                    self._variables[var_name] = extracted
+                return {
+                    "status": 200,
+                    "reason": "OK",
+                    "text": f"Extracted text: {extracted}",
+                    "extracted_value": extracted,
+                    "healed_selector": getattr(self, '_last_healed_selector', None),
+                    "strategy_used": getattr(self, '_last_strategy_used', 'standard'),
+                }
+
+            elif step_type == 'getAttribute':
+                selector = self._get_platform_selector(props, allow_value_fallback=False)
+                attr_name = (props.get('attribute') or 'text').strip()
+                timeout = int(props.get('timeout', 5000))
+                el = self._find_element(selector, timeout_ms=timeout, step_data=step_data)
+                if not el:
+                    raise Exception(f"Element not found for getAttribute: {selector}")
+                extracted = el.get_attribute(attr_name) or ""
+                var_name = (props.get('variable') or props.get('value') or '').strip()
+                if var_name:
+                    if not hasattr(self, '_variables') or self._variables is None:
+                        self._variables = {}
+                    self._variables[var_name] = extracted
+                return {
+                    "status": 200,
+                    "reason": "OK",
+                    "text": f"Extracted {attr_name}: {extracted}",
+                    "extracted_value": extracted,
+                    "healed_selector": getattr(self, '_last_healed_selector', None),
+                    "strategy_used": getattr(self, '_last_strategy_used', 'standard'),
+                }
+
             else:
                 logger.warning(f"📱 Unsupported step type: {step_type}")
 
@@ -1354,6 +1657,7 @@ class AppiumExecutorService:
                 "text": text_res,
                 "warning": step_warning,
                 "screenshot_b64": screenshot_b64,
+                "healed_selector": getattr(self, '_last_healed_selector', None),
                 "strategy_used": getattr(self, '_last_strategy_used', 'standard'),
             }
 
@@ -1742,6 +2046,8 @@ class AppiumExecutorService:
                 try:
                     heal_loc = (AppiumBy.XPATH, healed_sel) if (healed_sel.startswith('/') or healed_sel.startswith('(')) else (AppiumBy.ACCESSIBILITY_ID, healed_sel)
                     el = WebDriverWait(self._driver, 1.5).until(EC.presence_of_element_located(heal_loc))
+                    self._last_healed_selector = f"{clean_selector}:::{healed_sel}"
+                    self._last_strategy_used = 'self_healing'
                     logger.info(f"🎉 [Self-Healing] Successfully found element with healed selector: {healed_sel}")
                     return el
                 except Exception:

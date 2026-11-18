@@ -30,6 +30,8 @@ class ExecutionRequest(BaseModel):
     virtual_users: Optional[int] = 2 # Reused for step retries
     ramp_up_seconds: Optional[int] = 0 # Reused for flow retries
     dataset: Optional[List[Dict[str, Any]]] = None
+    mobile_parallel_mode: Optional[str] = 'distribute' # 'distribute' | 'replicate'
+    mobile_device_ids: Optional[List[int]] = None
 
 from app.auth import get_current_user
 from app.models.user_models import UserDB
@@ -89,6 +91,23 @@ def trigger_execution(
     db.commit()
     db.refresh(new_schedule)
 
+    if req.flow_type == 'mobile' and (req.mobile_parallel_mode or req.mobile_device_ids):
+        try:
+            import json
+            import redis
+            from app.config import settings
+            r_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+            r_client.set(
+                f"mobile_exec_opts:{new_schedule.id}",
+                json.dumps({
+                    "mobile_parallel_mode": req.mobile_parallel_mode or "distribute",
+                    "mobile_device_ids": req.mobile_device_ids
+                }),
+                ex=3600
+            )
+        except Exception:
+            pass
+
     from app.tasks.execution_tasks import celery_execute_job
     from app.services.audit_service import AuditService
 
@@ -118,6 +137,54 @@ def trigger_execution(
         "status": "running"
     }
 
+
+@router.post("/{schedule_id}/stop")
+def stop_execution(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Requests cancellation of a running execution (schedule_id).
+    Sets a Redis cancellation flag checked by FlowExecutorService and marks the schedule as cancelled.
+    """
+    schedule = db.query(ScheduleModel).filter(
+        ScheduleModel.id == schedule_id,
+        ScheduleModel.company_id == current_user.company_id
+    ).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    try:
+        import redis
+        from app.config import settings
+        r_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        r_client.set(f"exec_cancel:{schedule_id}", "1", ex=3600)
+    except Exception:
+        pass
+
+    schedule.last_run_status = 'cancelled'
+    if not getattr(schedule, 'cron_expression', None):
+        schedule.status = 'cancelled'
+    db.commit()
+
+    AuditService.log_action(
+        db=db,
+        company_id=current_user.company_id,
+        user=current_user,
+        action="STOP_EXECUTION",
+        resource_type="execution",
+        resource_id=str(schedule.id),
+        resource_name=schedule.name,
+        details={"flow_type": getattr(schedule, 'flow_type', None)}
+    )
+
+    return {
+        "message": "Execution stop requested",
+        "schedule_id": schedule_id,
+        "status": "cancelled"
+    }
+
 @router.get("/{schedule_id}/pdf")
 def get_execution_pdf(
     schedule_id: int, 
@@ -141,13 +208,15 @@ def get_execution_pdf(
 @router.get("/{schedule_id}/e2e-pdf")
 def get_e2e_execution_pdf(
     schedule_id: int, 
+    batch_id: Optional[str] = None,
+    execution_type: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user)
 ):
     """
-    Generates and returns an E2E-specific PDF report for the given execution (schedule).
+    Generates and returns an E2E/Mobile-specific PDF report for the given execution (schedule or batch).
     """
-    pdf_bytes = PDFService.generate_e2e_report(db, schedule_id)
+    pdf_bytes = PDFService.generate_e2e_report(db, schedule_id, batch_id=batch_id, execution_type=execution_type)
     
     if not pdf_bytes:
         raise HTTPException(status_code=404, detail="E2E Execution not found or no data")

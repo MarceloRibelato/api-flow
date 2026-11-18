@@ -58,7 +58,47 @@ class FlowExecutorService:
         return _is_blocked_domain(url)
 
     @staticmethod
-    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
+    def _is_execution_cancelled(schedule_id: int = None) -> bool:
+        """Check Redis cancellation flag for a running schedule."""
+        if not schedule_id:
+            return False
+        try:
+            import redis as _redis
+            from app.config import settings as _settings
+            _rc = _redis.from_url(_settings.REDIS_URL, decode_responses=True)
+            return bool(_rc.get(f"exec_cancel:{schedule_id}"))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _resolve_mobile_device_targets(db: Session, product_id: int, max_concurrency: int = None, mobile_parallel_mode: str = 'distribute', mobile_device_ids: list = None) -> list:
+        """Resolve active mobile device IDs for parallel execution."""
+        if not product_id:
+            return []
+        try:
+            from app.models.product_models import ProductMobileDeviceDB
+            query = db.query(ProductMobileDeviceDB).filter(
+                ProductMobileDeviceDB.product_id == product_id,
+                ProductMobileDeviceDB.is_active == True
+            ).order_by(ProductMobileDeviceDB.id.asc())
+            devices = query.all()
+            if mobile_device_ids:
+                allowed = {int(d) for d in mobile_device_ids if str(d).isdigit()}
+                devices = [d for d in devices if d.id in allowed]
+            device_ids = [d.id for d in devices]
+            if not device_ids and not mobile_device_ids:
+                from app.services.mobile_device_pool_service import MobileDevicePoolService
+                adb_devs = MobileDevicePoolService.get_connected_adb_devices()
+                device_ids = [d["serial"] for d in adb_devs if d.get("state") == "device" and d.get("serial")]
+            if mobile_parallel_mode == 'distribute' and max_concurrency and max_concurrency > 0:
+                return device_ids[:max_concurrency]
+            return device_ids
+        except Exception as err:
+            logger.warning(f"Could not resolve mobile device targets: {err}")
+            return []
+
+    @staticmethod
+    def execute_flow_logic(db: Session, flow_meta: dict, product_id: int, env_id: int, company_id: int, variables_dict: dict, feature_name: str = "Unknown Feature", schedule_id: int = None, user_id: int = 1, capture_video: bool = False, capture_screenshot: bool = False, flow_type: str = 'api', visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None, device_id: int = None, mobile_parallel_mode: str = 'distribute', mobile_device_ids: list = None, max_concurrency: int = None, _only_path_numbers: set = None, _base_batch_id: str = None):
         # (imports now at top of file)
 
         # Resolve fallback env if none provided
@@ -133,7 +173,9 @@ class FlowExecutorService:
                         existing_batch_id = first_hist[0]
                         break
 
-        if existing_batch_id:
+        if _base_batch_id:
+            base_batch_id = _base_batch_id
+        elif existing_batch_id:
             base_prefix = re.sub(r'(_path|_retry).*$', '', existing_batch_id)
             base_batch_id = base_prefix
         else:
@@ -318,11 +360,57 @@ class FlowExecutorService:
                     logger.info(f"⚠️ [RETRY FILTER] No nodes in Flow matched failed node IDs {failed_node_ids}; skipping execution.")
                     return 0, 0
 
+            if _only_path_numbers is not None:
+                selected_path_entries = [(pn, pnodes) for pn, pnodes in selected_path_entries if pn in _only_path_numbers]
+
             logger.info(f"   Found {len(selected_path_entries)} unique path(s) to execute out of {len(path_entries)} total.")
+
+            if (
+                _only_path_numbers is None
+                and effective_flow_type == 'mobile'
+                and mobile_parallel_mode == 'distribute'
+                and device_id is None
+                and len(selected_path_entries) > 1
+            ):
+                target_devices = FlowExecutorService._resolve_mobile_device_targets(
+                    db, product_id, max_concurrency=max_concurrency,
+                    mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids
+                )
+                requested_workers = max_concurrency if (max_concurrency and max_concurrency > 0) else len(target_devices)
+                path_workers = min(len(selected_path_entries), requested_workers or 1, len(target_devices) if target_devices else 1)
+                if path_workers > 1:
+                    logger.info(f"📱 [MOBILE DISTRIBUTE] Splitting {len(selected_path_entries)} scenario path(s) across {path_workers} parallel device worker(s).")
+                    def _run_single_path(pn):
+                        thread_db = SessionLocal()
+                        try:
+                            return FlowExecutorService.execute_flow_logic(
+                                thread_db, flow_meta, product_id, env_id, company_id,
+                                copy.deepcopy(variables_dict), feature_name=feature_name,
+                                schedule_id=schedule_id, user_id=user_id,
+                                capture_video=capture_video, capture_screenshot=capture_screenshot,
+                                flow_type=flow_type, visible_execution=visible_execution,
+                                dataset_row=dataset_row, failed_item_ids=failed_item_ids,
+                                device_id=None, mobile_parallel_mode=mobile_parallel_mode,
+                                mobile_device_ids=mobile_device_ids, max_concurrency=max_concurrency,
+                                _only_path_numbers={pn},
+                                _base_batch_id=base_batch_id
+                            )
+                        finally:
+                            thread_db.close()
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=path_workers) as path_executor:
+                        path_results = list(path_executor.map(_run_single_path, [pn for pn, _ in selected_path_entries]))
+                    total_s = sum(r[0] for r in path_results)
+                    total_f = sum(r[1] for r in path_results)
+                    return total_s, total_f
+
             async def run_paths():
                 nonlocal flow_success_count, flow_fail_count, e2e_executor, final_variables, history_buffer
                 path_cache = {}
                 for path_number, path_nodes in selected_path_entries:
+                    if FlowExecutorService._is_execution_cancelled(schedule_id):
+                        logger.info(f"🛑 Execution {schedule_id} cancelled by user. Stopping before path {path_number}.")
+                        break
                     logger.info(f"🛣️ === Executing Scenario Path {path_number} === 🛣️")
                     
                     # Each path is a separate logical execution batch, preserving original path_number
@@ -377,7 +465,13 @@ class FlowExecutorService:
                             if effective_flow_type == 'mobile':
                                 from app.services.appium_executor_service import AppiumExecutorService
                                 e2e_executor = AppiumExecutorService()
-                                await e2e_executor.start(video_dir=video_dir if capture_video else None, db=db, product_id=product_id)
+                                await e2e_executor.start(
+                                    video_dir=video_dir if capture_video else None,
+                                    db=db,
+                                    product_id=product_id,
+                                    device_id=device_id,
+                                    allowed_device_ids=mobile_device_ids
+                                )
                             else:
                                 from app.services.playwright_executor_service import PlaywrightExecutorService
                                 e2e_executor = PlaywrightExecutorService(headless=not visible_execution)
@@ -392,6 +486,10 @@ class FlowExecutorService:
                                         logger.warning(f"Failed to navigate to cached URL: {e}")
 
                     for node_idx, current_id in enumerate(path_nodes[longest_prefix_len:], start=longest_prefix_len):
+                        if FlowExecutorService._is_execution_cancelled(schedule_id):
+                            logger.info(f"🛑 Execution {schedule_id} cancelled by user. Stopping at node {current_id}.")
+                            path_success = False
+                            break
                         if not path_success:
                             logger.warning(f"  🛑 Skipping node {current_id} because path previously failed.")
                             break
@@ -479,6 +577,10 @@ class FlowExecutorService:
                             # --- Execution Helpers ---
                             async def execute_step_internal(step_entry):
                                 nonlocal flow_success_count, flow_fail_count, e2e_executor, path_success
+                                if FlowExecutorService._is_execution_cancelled(schedule_id):
+                                    logger.info(f"🛑 Execution {schedule_id} cancelled by user. Skipping step.")
+                                    path_success = False
+                                    return
                                 step_data = step_entry['data']
                                 step_type = step_entry['type']
                                 
@@ -566,7 +668,9 @@ class FlowExecutorService:
                                                     await e2e_executor.start(
                                                         video_dir=video_dir if capture_video else None,
                                                         db=db,
-                                                        product_id=product_id
+                                                        product_id=product_id,
+                                                        device_id=device_id,
+                                                        allowed_device_ids=mobile_device_ids
                                                     )
                                                 else:
                                                     from app.services.playwright_executor_service import PlaywrightExecutorService
@@ -1100,6 +1204,19 @@ class FlowExecutorService:
                 HistoryService.save_batch(db, [empty_hist], user_id)
                 flow_fail_count = 1
 
+            # Remove superseded failed history rows when a retry execution succeeds
+            if failed_item_ids and flow_fail_count == 0 and flow_success_count > 0:
+                try:
+                    clean_retry_ids = [int(x) for x in failed_item_ids if str(x).isdigit()]
+                    if clean_retry_ids:
+                        for HM in (MobileExecutionHistory, WebExecutionHistory, ApiExecutionHistory):
+                            deleted = db.query(HM).filter(HM.id.in_(clean_retry_ids)).delete(synchronize_session=False)
+                            if deleted:
+                                logger.info(f"🧹 [RETRY CLEANUP] Removed {deleted} superseded failed row(s) from {HM.__tablename__}: {clean_retry_ids}")
+                        db.commit()
+                except Exception as cleanup_err:
+                    logger.warning(f"⚠️ [RETRY CLEANUP] Could not remove superseded failed rows: {cleanup_err}")
+
             return flow_success_count, flow_fail_count
 
         except Exception as e:
@@ -1232,7 +1349,7 @@ class FlowExecutorService:
         return variables
 
     @staticmethod
-    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
+    def execute_feature_group(db: Session, feature_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None, mobile_parallel_mode: str = 'distribute', mobile_device_ids: list = None):
         """
         Executes all flows within a specific feature.
         """
@@ -1280,19 +1397,21 @@ class FlowExecutorService:
                 logger.info(f"ℹ️  Selecting flow '{latest_flow.get('name')}' (ID: {latest_flow.get('id')}, Type: {latest_flow.get('flow_type')}) for execution.")
             
             # Worker function for parallel execution of the same feature
-            def process_feature_run(idx):
+            def process_feature_run(idx, target_device_id=None):
                 f_success = 0
                 f_fail = 0
                 thread_db = SessionLocal()
                 start_t = time.time()
                 try:
-                    logger.info(f"  📂 [PARALLEL] Feature Run {idx+1}/{max_workers} STARTED: {feature.name} (ID: {feature.id}) at t={start_t:.2f}")
+                    logger.info(f"  📂 [PARALLEL] Feature Run {idx+1}/{max_workers} STARTED: {feature.name} (ID: {feature.id}, device_id={target_device_id}) at t={start_t:.2f}")
                     s, f = FlowExecutorService.execute_flow_logic(
                         thread_db, latest_flow, feature.product_id, env_id, company_id, 
                         variables.copy(), feature_name=feature.name, schedule_id=schedule_id, 
                         user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, 
                         flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
-                        failed_item_ids=failed_item_ids
+                        failed_item_ids=failed_item_ids, device_id=target_device_id,
+                        mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids,
+                        max_concurrency=max_concurrency
                     )
                     f_success = s
                     f_fail = f
@@ -1306,18 +1425,57 @@ class FlowExecutorService:
                     logger.info(f"  ✅ [PARALLEL] Feature Run {idx+1}/{max_workers} DONE in {elapsed:.1f}s")
                 return f_success, f_fail
 
-            max_workers = 1 if flow_type == 'mobile' else (max_concurrency if max_concurrency else 1)
-            if max_workers > 1:
-                logger.info(f"🚀 [PARALLEL] Starting {max_workers} parallel runs for feature {feature.name}")
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    full_results = list(executor.map(process_feature_run, range(max_workers)))
-                for s, f in full_results:
+            if flow_type == 'mobile' and mobile_parallel_mode == 'replicate':
+                target_devices = FlowExecutorService._resolve_mobile_device_targets(
+                    db, feature.product_id, max_concurrency=max_concurrency,
+                    mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids
+                )
+                max_workers = max(1, len(target_devices))
+                if max_workers > 1:
+                    logger.info(f"📱 [MOBILE REPLICATE] Running feature {feature.name} on {max_workers} device(s): {target_devices}")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        full_results = list(executor.map(lambda i: process_feature_run(i, target_devices[i]), range(max_workers)))
+                    for s, f in full_results:
+                        success_count += s
+                        fail_count += f
+                else:
+                    s, f = FlowExecutorService.execute_flow_logic(
+                        db, latest_flow, feature.product_id, env_id, company_id, variables,
+                        feature_name=feature.name, schedule_id=schedule_id, user_id=user_id,
+                        capture_video=capture_video, capture_screenshot=capture_screenshot,
+                        flow_type=flow_type, visible_execution=visible_execution,
+                        dataset_row=dataset_row, failed_item_ids=failed_item_ids,
+                        device_id=target_devices[0] if target_devices else None,
+                        mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids,
+                        max_concurrency=max_concurrency
+                    )
                     success_count += s
                     fail_count += f
-            else:
-                s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row, failed_item_ids=failed_item_ids)
+            elif flow_type == 'mobile':
+                s, f = FlowExecutorService.execute_flow_logic(
+                    db, latest_flow, feature.product_id, env_id, company_id, variables,
+                    feature_name=feature.name, schedule_id=schedule_id, user_id=user_id,
+                    capture_video=capture_video, capture_screenshot=capture_screenshot,
+                    flow_type=flow_type, visible_execution=visible_execution,
+                    dataset_row=dataset_row, failed_item_ids=failed_item_ids,
+                    mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids,
+                    max_concurrency=max_concurrency
+                )
                 success_count += s
                 fail_count += f
+            else:
+                max_workers = max_concurrency if max_concurrency else 1
+                if max_workers > 1:
+                    logger.info(f"🚀 [PARALLEL] Starting {max_workers} parallel runs for feature {feature.name}")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        full_results = list(executor.map(process_feature_run, range(max_workers)))
+                    for s, f in full_results:
+                        success_count += s
+                        fail_count += f
+                else:
+                    s, f = FlowExecutorService.execute_flow_logic(db, latest_flow, feature.product_id, env_id, company_id, variables, feature_name=feature.name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row, failed_item_ids=failed_item_ids)
+                    success_count += s
+                    fail_count += f
         else:
             logger.warning(f"No flows found for feature {feature.id}")
         
@@ -1329,7 +1487,7 @@ class FlowExecutorService:
         return FlowExecutorService.execute_flow_by_id(db, flow_id, env_id, company_id, schedule_id, user_id, 1, flow_type, capture_video, capture_screenshot, visible_execution, dataset_row, failed_item_ids=failed_item_ids)
 
     @staticmethod
-    def execute_flow_by_id(db: Session, flow_id: str, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
+    def execute_flow_by_id(db: Session, flow_id: str, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None, mobile_parallel_mode: str = 'distribute', mobile_device_ids: list = None):
         flow_meta = None
         # 1. Try loading by FlowDB.id directly if numeric
         try:
@@ -1369,7 +1527,64 @@ class FlowExecutorService:
 
         variables = FlowExecutorService.get_merged_variables(db, product_id, env_id)
 
-        max_workers = 1 if flow_type == 'mobile' else (max_concurrency if max_concurrency else 1)
+        if flow_type == 'mobile' and mobile_parallel_mode == 'replicate':
+            target_devices = FlowExecutorService._resolve_mobile_device_targets(
+                db, product_id, max_concurrency=max_concurrency,
+                mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids
+            )
+            max_workers = max(1, len(target_devices))
+            if max_workers > 1:
+                logger.info(f"📱 [MOBILE REPLICATE] Running flow {flow_id} on {max_workers} device(s): {target_devices}")
+                shared_replicate_batch_id = f"sched_{uuid.uuid4().hex}"
+                success_count = 0
+                fail_count = 0
+                def process_mobile_replicate_run(idx):
+                    thread_db = SessionLocal()
+                    try:
+                        return FlowExecutorService.execute_flow_logic(
+                            thread_db, flow_meta, product_id, env_id, company_id,
+                            variables.copy(), feature_name=feature_name, schedule_id=schedule_id,
+                            user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot,
+                            flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
+                            failed_item_ids=failed_item_ids, device_id=target_devices[idx],
+                            mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids,
+                            max_concurrency=max_concurrency,
+                            _base_batch_id=f"{shared_replicate_batch_id}_path_dev{idx+1}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Mobile replicate flow run {idx+1} failed: {e}")
+                        return 0, 1
+                    finally:
+                        thread_db.close()
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    results = list(executor.map(process_mobile_replicate_run, range(max_workers)))
+                for s, f in results:
+                    success_count += s
+                    fail_count += f
+                return success_count, fail_count
+            return FlowExecutorService.execute_flow_logic(
+                db, flow_meta, product_id, env_id, company_id, variables,
+                feature_name=feature_name, schedule_id=schedule_id, user_id=user_id,
+                capture_video=capture_video, capture_screenshot=capture_screenshot,
+                flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
+                failed_item_ids=failed_item_ids,
+                device_id=target_devices[0] if target_devices else None,
+                mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids,
+                max_concurrency=max_concurrency
+            )
+        elif flow_type == 'mobile':
+            return FlowExecutorService.execute_flow_logic(
+                db, flow_meta, product_id, env_id, company_id, variables,
+                feature_name=feature_name, schedule_id=schedule_id, user_id=user_id,
+                capture_video=capture_video, capture_screenshot=capture_screenshot,
+                flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
+                failed_item_ids=failed_item_ids,
+                mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids,
+                max_concurrency=max_concurrency
+            )
+
+        max_workers = max_concurrency if max_concurrency else 1
         if max_workers > 1:
             success_count = 0
             fail_count = 0
@@ -1403,7 +1618,7 @@ class FlowExecutorService:
             return FlowExecutorService.execute_flow_logic(db, flow_meta, product_id, env_id, company_id, variables, feature_name=feature_name, schedule_id=schedule_id, user_id=user_id, capture_video=capture_video, capture_screenshot=capture_screenshot, flow_type=flow_type, visible_execution=visible_execution, dataset_row=dataset_row, failed_item_ids=failed_item_ids)
 
     @staticmethod
-    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None):
+    def execute_suite(db: Session, product_id: int, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None, mobile_parallel_mode: str = 'distribute', mobile_device_ids: list = None):
         """
         Executes all features within a product.
         """
@@ -1432,13 +1647,13 @@ class FlowExecutorService:
         logger.info(f"🚀 Executing Suite for Product {product_id} - {len(features)} Features")
 
         # Worker Function for Execution
-        def process_feature(feature):
+        def process_feature(feature, target_device_id=None):
             f_success = 0
             f_fail = 0
             thread_db = SessionLocal()
             start_t = time.time()
             try:
-                logger.info(f"  📂 Feature '{feature['name']}' (ID: {feature['id']}) STARTED at t={start_t:.2f}")
+                logger.info(f"  📂 Feature '{feature['name']}' (ID: {feature['id']}, device_id={target_device_id}) STARTED at t={start_t:.2f}")
                 flows = FlowService.list_by_project(thread_db, feature['id'], company_id)
                 
                 if flows:
@@ -1452,7 +1667,9 @@ class FlowExecutorService:
                         feature_name=feature['name'], schedule_id=schedule_id, user_id=user_id,
                         capture_video=capture_video, capture_screenshot=capture_screenshot,
                         flow_type=resolved_ft or flow_type, visible_execution=visible_execution, dataset_row=dataset_row,
-                        failed_item_ids=failed_item_ids
+                        failed_item_ids=failed_item_ids, device_id=target_device_id,
+                        mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids,
+                        max_concurrency=max_concurrency
                     )
                     f_success = s
                     f_fail = f
@@ -1466,16 +1683,45 @@ class FlowExecutorService:
                 logger.info(f"  ✅ Feature '{feature['name']}' DONE in {elapsed:.1f}s")
             return f_success, f_fail
 
-        # Mobile executions run sequentially (max_workers=1) to prevent Appium driver port collisions
-        max_workers = 1 if flow_type == 'mobile' else (max_concurrency if max_concurrency else settings.MAX_CONCURRENT_FEATURES)
-        
-        logger.info(f"🚀 Starting suite execution with {max_workers} worker(s)")
-        
-        if max_workers > 1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                full_results = list(executor.map(process_feature, features))
+        if flow_type == 'mobile' and mobile_parallel_mode == 'replicate':
+            target_devices = FlowExecutorService._resolve_mobile_device_targets(
+                db, product_id, max_concurrency=max_concurrency,
+                mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids
+            )
+            if not target_devices:
+                target_devices = [None]
+            logger.info(f"📱 [MOBILE REPLICATE SUITE] Running {len(features)} feature(s) across {len(target_devices)} device(s): {target_devices}")
+            def run_features_on_device(dev_id):
+                d_s, d_f = 0, 0
+                for feat in features:
+                    s, f = process_feature(feat, target_device_id=dev_id)
+                    d_s += s
+                    d_f += f
+                return d_s, d_f
+
+            if len(target_devices) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(target_devices)) as executor:
+                    full_results = list(executor.map(run_features_on_device, target_devices))
+            else:
+                full_results = [run_features_on_device(target_devices[0])]
         else:
-            full_results = [process_feature(f) for f in features]
+            if flow_type == 'mobile':
+                target_devices = FlowExecutorService._resolve_mobile_device_targets(
+                    db, product_id, max_concurrency=max_concurrency,
+                    mobile_parallel_mode=mobile_parallel_mode, mobile_device_ids=mobile_device_ids
+                )
+                requested_workers = max_concurrency if (max_concurrency and max_concurrency > 0) else len(target_devices)
+                max_workers = max(1, min(len(features) or 1, requested_workers or 1, len(target_devices) or 1))
+            else:
+                max_workers = max_concurrency if max_concurrency else settings.MAX_CONCURRENT_FEATURES
+            
+            logger.info(f"🚀 Starting suite execution with {max_workers} worker(s)")
+            
+            if max_workers > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    full_results = list(executor.map(process_feature, features))
+            else:
+                full_results = [process_feature(f) for f in features]
 
         # Aggregate Results
         for s, f in full_results:

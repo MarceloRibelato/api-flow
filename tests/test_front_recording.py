@@ -13,7 +13,7 @@ def test_save_front_recording(client, db_session):
     feat_id = f_resp.json()["id"]
 
     payload = {
-        "requests": [
+        "requests": [ n 8 N
             {"method": "GET", "url": "https://api.test/data"}
         ],
         "interactions": [

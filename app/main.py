@@ -437,7 +437,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+class MediaSafeGZipMiddleware(GZipMiddleware):
+    """Skip GZip compression for video/screenshot streams and HTTP Range requests."""
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path.startswith(("/videos/", "/api/videos/", "/screenshots/", "/api/screenshots/")):
+                await self.app(scope, receive, send)
+                return
+            for header_name, _ in scope.get("headers", ()):
+                if header_name == b"range":
+                    await self.app(scope, receive, send)
+                    return
+        await super().__call__(scope, receive, send)
+
+app.add_middleware(MediaSafeGZipMiddleware, minimum_size=1000)
 
 @app.middleware("http")
 async def log_exceptions_middleware(request: Request, call_next):
@@ -545,7 +559,7 @@ app.include_router(integration_router)
 from app.routes.landing_routes import router as landing_router
 app.include_router(landing_router, tags=["Landing Page"])
 
-# Mount Videos Static Directory
+# Mount Videos Static Directory (support both /videos and /api/videos for proxy flexibility)
 from fastapi.staticfiles import StaticFiles
 import os
 # Video storage path (Cross-platform)
@@ -553,11 +567,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VIDEO_DIR = os.path.join(BASE_DIR, "..", "data", "videos")
 os.makedirs(VIDEO_DIR, exist_ok=True)
 app.mount("/videos", StaticFiles(directory=VIDEO_DIR), name="videos")
+app.mount("/api/videos", StaticFiles(directory=VIDEO_DIR), name="api_videos")
 
-# Mount Screenshots directory
+# Mount Screenshots directory (support both /screenshots and /api/screenshots)
 SCREENSHOT_DIR = os.path.join(os.path.dirname(VIDEO_DIR), "screenshots")
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 app.mount("/screenshots", StaticFiles(directory=SCREENSHOT_DIR), name="screenshots")
+app.mount("/api/screenshots", StaticFiles(directory=SCREENSHOT_DIR), name="api_screenshots")
 
 # Middleware para log de requests
 SKIP_LOG_PATHS = {"/", "/status", "/favicon.ico"}
@@ -565,7 +581,7 @@ SKIP_LOG_PATHS = {"/", "/status", "/favicon.ico"}
 @app.middleware("http")
 async def log_requests(request, call_next):
     # Skip log for health check and static paths to reduce noise
-    if request.url.path in SKIP_LOG_PATHS or request.url.path.startswith(("/videos/", "/screenshots/")):
+    if request.url.path in SKIP_LOG_PATHS or request.url.path.startswith(("/videos/", "/screenshots/", "/api/videos/", "/api/screenshots/")):
         return await call_next(request)
 
     logger.debug(f"REQUEST: {request.method} {request.url}")
