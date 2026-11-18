@@ -257,8 +257,9 @@ class PDFService:
         body = item.response_body or ''
         if not isinstance(body, str):
             body = str(body)
-        # Strip screenshot markers
-        clean = re.sub(r'\[Screenshot:.*?\]', '', body).strip()
+        # Strip screenshot and device markers
+        clean = re.sub(r'\[Screenshot:.*?\]', '', body)
+        clean = re.sub(r'\[Device:.*?\]', '', clean).strip()
 
         # New format: Typed 'value' into selector
         m = re.search(r"Typed '([^']+)' into\s*(.+)", clean, re.IGNORECASE)
@@ -511,7 +512,9 @@ class PDFService:
         for item in history:
             b_id = str(getattr(item, 'batch_id', '') or '')
             p_match = re.search(r'_path_(\d+)', b_id)
-            path_prefix = f"Cenario {p_match.group(1)} | " if p_match else ""
+            dev_match = re.search(r'\[Device:\s*(.*?)\]', str(getattr(item, 'response_body', '') or ''))
+            dev_tag = f" [{dev_match.group(1).strip()}]" if dev_match else ""
+            path_prefix = f"Cenario {p_match.group(1)}{dev_tag} | " if p_match else (f"{dev_tag.strip()} | " if dev_tag else "")
             node_key = f"{path_prefix}{item.node_name or 'Fluxo Principal'}"
             if node_key not in node_groups:
                 node_groups[node_key] = []

@@ -981,6 +981,13 @@ class FlowExecutorService:
 
                                 try:
                                     resolved_retry = current_session_retry_count
+                                    if effective_flow_type == 'mobile' and e2e_executor and '[Device:' not in str(resp_text or ''):
+                                        _acq = getattr(e2e_executor, '_acquired_device_info', None) or {}
+                                        _dev_obj = _acq.get('device')
+                                        _dev_lbl = (getattr(_dev_obj, 'label', None) or _acq.get('device_name') or (getattr(e2e_executor, '_settings', {}) or {}).get('device_name') or '').strip()
+                                        if _dev_lbl:
+                                            resp_text = f"{resp_text or ''} [Device: {_dev_lbl}]".strip()
+
                                     hist = ExecutionHistoryCreate(
                                         batch_id=batch_id,
                                         api_id=str(step_data.get('id')),
