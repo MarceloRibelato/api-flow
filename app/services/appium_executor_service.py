@@ -2225,3 +2225,89 @@ class AppiumExecutorService:
             except Exception as pool_rel_err:
                 logger.debug(f"Device pool release notice: {pool_rel_err}")
             self._acquired_device_info = None
+
+    async def evaluate_condition(self, cond_cfg: dict) -> bool:
+        """Avalia uma condição na tela atual do dispositivo sem lançar exceção quando falso."""
+        return await asyncio.to_thread(self.evaluate_condition_sync, cond_cfg)
+
+    def evaluate_condition_sync(self, cond_cfg: dict) -> bool:
+        """Avaliação síncrona de condição no Appium sem lançar exceção quando falso."""
+        if not self._driver or not isinstance(cond_cfg, dict):
+            return False
+        cond_type = str(cond_cfg.get("conditionType") or "text_present").lower()
+        target = str(cond_cfg.get("target") or "").strip()
+        expected_value = str(cond_cfg.get("expectedValue") or "").strip()
+        timeout_ms = int(cond_cfg.get("timeoutMs") or 3000)
+        if not target:
+            return False
+
+        deadline = time.time() + max(0.3, timeout_ms / 1000.0)
+        while True:
+            try:
+                if cond_type in ("text_present", "text_not_present"):
+                    src = (self._driver.page_source or "").lower()
+                    found = target.lower() in src
+                    if cond_type == "text_present" and found:
+                        return True
+                    if cond_type == "text_not_present" and not found:
+                        return True
+                elif cond_type in ("selector_exists", "selector_not_exists"):
+                    el = None
+                    try:
+                        el = self._find_element(target, timeout_ms=700)
+                    except Exception:
+                        el = None
+                    if cond_type == "selector_exists" and el is not None:
+                        return True
+                    if cond_type == "selector_not_exists" and el is None:
+                        return True
+                elif cond_type in ("element_enabled", "element_disabled"):
+                    try:
+                        el = self._find_element(target, timeout_ms=800)
+                        if el is not None:
+                            is_enabled = el.is_enabled()
+                            if cond_type == "element_enabled" and is_enabled:
+                                return True
+                            if cond_type == "element_disabled" and not is_enabled:
+                                return True
+                    except Exception:
+                        pass
+                elif cond_type in ("element_checked", "element_not_checked"):
+                    try:
+                        el = self._find_element(target, timeout_ms=800)
+                        if el is not None:
+                            checked_attr = str(el.get_attribute("checked") or "").lower()
+                            selected_attr = str(el.get_attribute("selected") or "").lower()
+                            is_checked = checked_attr == "true" or selected_attr == "true"
+                            if cond_type == "element_checked" and is_checked:
+                                return True
+                            if cond_type == "element_not_checked" and not is_checked:
+                                return True
+                    except Exception:
+                        pass
+                elif cond_type in ("element_text_equals", "element_text_contains"):
+                    try:
+                        el = self._find_element(target, timeout_ms=800)
+                        if el is not None:
+                            actual_text = str(el.text or el.get_attribute("text") or el.get_attribute("content-desc") or "").strip()
+                            if cond_type == "element_text_equals" and actual_text == expected_value:
+                                return True
+                            if cond_type == "element_text_contains" and expected_value.lower() in actual_text.lower():
+                                return True
+                    except Exception:
+                        pass
+                elif cond_type in ("url_contains", "url_not_contains"):
+                    current_screen = f"{getattr(self._driver, 'current_package', '') or ''}/{getattr(self._driver, 'current_activity', '') or ''}"
+                    matched = target.lower() in current_screen.lower()
+                    if cond_type == "url_contains" and matched:
+                        return True
+                    if cond_type == "url_not_contains" and not matched:
+                        return True
+            except Exception as eval_err:
+                logger.debug(f"🔀 [Appium IF] Check attempt notice: {eval_err}")
+
+            if time.time() >= deadline:
+                break
+            time.sleep(0.35)
+
+        return False

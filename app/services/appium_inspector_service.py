@@ -52,7 +52,7 @@ class AppiumInspectorService:
             return None
 
     @classmethod
-    def start_session(cls, session_id: str, db, product_id: int, steps: List[Dict[str, Any]] = None) -> dict:
+    def start_session(cls, session_id: str, db, product_id: int, steps: List[Dict[str, Any]] = None, device_id=None) -> dict:
         """Starts a persistent driver session if one does not exist."""
         cls._cleanup_zombie_sessions()
         cls._touch_session(session_id)
@@ -74,7 +74,7 @@ class AppiumInspectorService:
         logger.info(f"🔍 [Inspector] Starting new session {session_id} for product {product_id}...")
         executor = AppiumExecutorService()
         try:
-            executor.start_sync(db=db, product_id=product_id)
+            executor.start_sync(db=db, product_id=product_id, device_id=device_id)
             _active_sessions[session_id] = executor
             
             # Salva metadados no Redis
@@ -149,9 +149,12 @@ class AppiumInspectorService:
                         break
             
             _session_progress[session_id] = {
-                "current_index": len(steps) if steps else 0,
+                "current_index": failed_step_index if failed_step_index is not None else (len(steps) if steps else 0),
                 "total_steps": len(steps) if steps else 0,
-                "status": "completed" if failed_step_index is None else "failed"
+                "status": "completed" if failed_step_index is None else "failed",
+                "failed_step_index": failed_step_index,
+                "failed_step_error": failed_step_error,
+                "error": failed_step_error
             }
                         
             snapshot = cls.get_snapshot(session_id)

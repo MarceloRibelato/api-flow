@@ -1614,6 +1614,100 @@ class PlaywrightExecutorService:
         
         return step_result
 
+    async def evaluate_condition(self, cond_cfg: dict) -> bool:
+        """Avalia uma condição na página atual sem falhar o fluxo."""
+        if not self._page or not isinstance(cond_cfg, dict):
+            return False
+        cond_type = str(cond_cfg.get("conditionType") or "text_present").lower()
+        target = str(cond_cfg.get("target") or "").strip()
+        expected_value = str(cond_cfg.get("expectedValue") or "").strip()
+        timeout_ms = int(cond_cfg.get("timeoutMs") or 3000)
+        if not target:
+            return False
+
+        def _pw_sel(t: str) -> str:
+            return f"xpath={t}" if t.startswith("//") or t.startswith("(") else t
+
+        deadline = asyncio.get_event_loop().time() + max(0.3, timeout_ms / 1000.0)
+        while True:
+            try:
+                if cond_type in ("text_present", "text_not_present"):
+                    found = False
+                    try:
+                        loc = self._page.get_by_text(target, exact=False).first
+                        found = await loc.is_visible()
+                    except Exception:
+                        found = False
+                    if not found:
+                        try:
+                            body_text = await self._page.inner_text("body")
+                            found = target.lower() in (body_text or "").lower()
+                        except Exception:
+                            pass
+                    if cond_type == "text_present" and found:
+                        return True
+                    if cond_type == "text_not_present" and not found:
+                        return True
+                elif cond_type in ("selector_exists", "selector_not_exists"):
+                    visible = False
+                    try:
+                        loc = self._page.locator(_pw_sel(target)).first
+                        visible = await loc.is_visible()
+                    except Exception:
+                        visible = False
+                    if cond_type == "selector_exists" and visible:
+                        return True
+                    if cond_type == "selector_not_exists" and not visible:
+                        return True
+                elif cond_type in ("element_enabled", "element_disabled"):
+                    try:
+                        loc = self._page.locator(_pw_sel(target)).first
+                        if await loc.count() > 0:
+                            is_enabled = await loc.is_enabled()
+                            if cond_type == "element_enabled" and is_enabled:
+                                return True
+                            if cond_type == "element_disabled" and not is_enabled:
+                                return True
+                    except Exception:
+                        pass
+                elif cond_type in ("element_checked", "element_not_checked"):
+                    try:
+                        loc = self._page.locator(_pw_sel(target)).first
+                        if await loc.count() > 0:
+                            is_checked = await loc.is_checked()
+                            if cond_type == "element_checked" and is_checked:
+                                return True
+                            if cond_type == "element_not_checked" and not is_checked:
+                                return True
+                    except Exception:
+                        pass
+                elif cond_type in ("element_text_equals", "element_text_contains"):
+                    try:
+                        loc = self._page.locator(_pw_sel(target)).first
+                        if await loc.count() > 0:
+                            actual_text = (await loc.inner_text() or "").strip()
+                            if cond_type == "element_text_equals" and actual_text == expected_value:
+                                return True
+                            if cond_type == "element_text_contains" and expected_value.lower() in actual_text.lower():
+                                return True
+                    except Exception:
+                        pass
+                elif cond_type in ("url_contains", "url_not_contains"):
+                    current_url = str(self._page.url or "")
+                    matched = target.lower() in current_url.lower()
+                    if cond_type == "url_contains" and matched:
+                        return True
+                    if cond_type == "url_not_contains" and not matched:
+                        return True
+            except Exception as eval_err:
+                logger.debug(f"🔀 [Playwright IF] Check attempt notice: {eval_err}")
+
+            if asyncio.get_event_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.3)
+
+        return False
+
     async def get_video_path(self):
         """Returns the path to the recorded video if recording was enabled."""
         if self._page and self._page.video:

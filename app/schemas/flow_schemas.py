@@ -71,6 +71,7 @@ class NodeDataBasic(BaseModel):
     isMainFlow: bool = Field(False, description="Indica se é o caminho principal (happy path)")
     dbQueries: Optional[List[Dict[str, Any]]] = []
     messageQueues: Optional[List[MessageQueueSchema]] = []
+    conditionConfig: Optional[Dict[str, Any]] = None
 
 class NodeDataFull(BaseModel):
     name: str = Field(..., description="Nome do nó")
@@ -84,6 +85,7 @@ class NodeDataFull(BaseModel):
     apiCalls: List[ApiCallSchema] = Field([], description="Passos de API do card")
     dbQueries: List[Dict[str, Any]] = Field([], description="Consultas de banco de dados do card")
     messageQueues: List[MessageQueueSchema] = Field([], description="Ações de mensageria")
+    conditionConfig: Optional[Dict[str, Any]] = None
 
 class NodeSchema(BaseModel):
     id: str = Field(..., description="ID único do nó (React Flow)")
@@ -102,6 +104,7 @@ class EdgeSchema(BaseModel):
     type: str = Field("buttonedge", description="Tipo visual da aresta")
     animated: bool = Field(True, description="Animação de fluxo")
     label: Optional[str] = Field(None, description="Rótulo (nome) da rota")
+    sourceHandle: Optional[str] = Field(None, description="Handle de origem (ex: true/false)")
 
 class EnvSpecificData(BaseModel):
     description: str = ""
@@ -120,6 +123,7 @@ class CardDataSchema(BaseModel):
     e2eSteps: List[Dict[str, Any]] = []
     dbQueries: List[Dict[str, Any]] = []
     messageQueues: List[MessageQueueSchema] = []
+    conditionConfig: Optional[Dict[str, Any]] = None
     envData: Dict[str, EnvSpecificData] = {}
 
 class FlowSaveSchema(BaseModel):

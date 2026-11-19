@@ -6,7 +6,7 @@ import asyncio
 import json
 import base64
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from jose import jwt, JWTError
 
 from app.database import get_db
@@ -21,17 +21,20 @@ router = APIRouter()
 class SessionStartPayload(BaseModel):
     session_id: Optional[str] = None
     steps: Optional[List[Dict[str, Any]]] = None
+    device_id: Optional[Union[int, str]] = None
 
 @router.post("/session/start")
-def start_inspector_session(product_id: int, payload: SessionStartPayload = None, session_id: Optional[str] = None, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+def start_inspector_session(product_id: int, payload: SessionStartPayload = None, session_id: Optional[str] = None, device_id: Optional[str] = None, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
     """
     Start an interactive Appium Inspector session.
     Returns: { "session_id": "...", "image_b64": "...", "tree": [...] }
     """
     sid = session_id or (payload.session_id if payload else None) or str(uuid.uuid4())
+    raw_dev_id = device_id if device_id is not None else (payload.device_id if payload else None)
+    resolved_dev_id = int(raw_dev_id) if (raw_dev_id is not None and str(raw_dev_id).isdigit()) else (str(raw_dev_id).strip() if raw_dev_id else None)
     try:
         steps = payload.steps if payload else None
-        snapshot = AppiumInspectorService.start_session(sid, db, product_id, steps=steps)
+        snapshot = AppiumInspectorService.start_session(sid, db, product_id, steps=steps, device_id=resolved_dev_id)
         return {"session_id": sid, **snapshot}
     except Exception as e:
         logger.error(f"Failed to start inspector session: {e}", exc_info=True)

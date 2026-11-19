@@ -254,8 +254,12 @@ class FlowService:
             env_data_dict = {}
             if hasattr(c, 'envData') and c.envData:
                 for env_name, env_val in c.envData.items():
+                    if env_name == '__conditionConfig':
+                        continue
                     if hasattr(env_val, 'model_dump'): env_data_dict[env_name] = env_val.model_dump()
                     else: env_data_dict[env_name] = env_val
+            if getattr(c, 'conditionConfig', None):
+                env_data_dict['__conditionConfig'] = c.conditionConfig
 
             card_db = FlowCardDataDB(
                 flow_id=flow.id,
@@ -397,6 +401,9 @@ class FlowService:
                 elif c.message_queues: node_type = "queue"
                 else: node_type = "api"
 
+            node_data_obj = next((n.data for n in flow.flow_nodes if n.client_id == c.node_id and isinstance(n.data, dict)), {})
+            cond_cfg = node_data_obj.get("conditionConfig") or (c.env_data.get("__conditionConfig") if isinstance(c.env_data, dict) else None)
+
             cardData[c.node_id] = {
                 "name": c.name,
                 "color": c.color,
@@ -407,6 +414,7 @@ class FlowService:
                 "dbQueries": c.db_queries or [],
                 "messageQueues": c.message_queues or [],
                 "e2eSteps": steps,
+                "conditionConfig": cond_cfg,
                 "envData": c.env_data or {}
             }
 

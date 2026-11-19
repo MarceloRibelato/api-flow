@@ -515,6 +515,93 @@ def test_pdf_service_generate_e2e_report_supports_mobile_and_web_tables():
     assert bytes(pdf_bytes).startswith(b"%PDF")
 
 
+def test_flow_executor_conditional_if_else_runs_only_matching_branch():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from app.services.flow_executor_service import FlowExecutorService
+
+    flow_data = {
+        "id": 1,
+        "nodes": [
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {}},
+            {
+                "id": "cond_1",
+                "type": "custom",
+                "position": {"x": 100, "y": 0},
+                "data": {
+                    "name": "Check Message A",
+                    "nodeType": "condition",
+                    "conditionConfig": {"conditionType": "text_present", "target": "Mensagem A", "timeoutMs": 1000},
+                },
+            },
+            {"id": "node_true", "type": "custom", "position": {"x": 200, "y": 0}, "data": {"name": "Fluxo True", "nodeType": "e2e"}},
+            {"id": "node_false", "type": "custom", "position": {"x": 200, "y": 100}, "data": {"name": "Fluxo False", "nodeType": "e2e"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "start", "target": "cond_1"},
+            {"id": "e2", "source": "cond_1", "target": "node_true", "sourceHandle": "true", "label": "TRUE"},
+            {"id": "e3", "source": "cond_1", "target": "node_false", "sourceHandle": "false", "label": "FALSE"},
+        ],
+        "cardData": {
+            "cond_1": {"name": "Check Message A", "nodeType": "condition"},
+            "node_true": {
+                "name": "Fluxo True",
+                "nodeType": "e2e",
+                "e2eSteps": [{"id": "s_true", "type": "click", "name": "Click True", "properties": {"selector": "#true"}}],
+            },
+            "node_false": {
+                "name": "Fluxo False",
+                "nodeType": "e2e",
+                "e2eSteps": [{"id": "s_false", "type": "click", "name": "Click False", "properties": {"selector": "#false"}}],
+            },
+        },
+    }
+
+    def run_with_condition(cond_return: bool):
+        executed_steps = []
+
+        class FakePlaywright:
+            def __init__(self, headless=True):
+                self.schedule_id = None
+                self.project_id = None
+
+            async def start(self, video_dir=None):
+                return None
+
+            async def evaluate_condition(self, cond_cfg):
+                assert cond_cfg["target"] == "Mensagem A"
+                return cond_return
+
+            async def execute_step(self, step, **kwargs):
+                executed_steps.append(step["id"])
+                return {"status": 200, "duration": 10, "screenshot": None, "error": None}
+
+            async def stop(self):
+                return None
+
+        db = MagicMock()
+        with patch("app.services.history_service.HistoryService.save_batch", return_value=[]), \
+             patch("app.services.playwright_executor_service.PlaywrightExecutorService", FakePlaywright), \
+             patch.object(FlowExecutorService, "_is_execution_cancelled", return_value=False):
+            FlowExecutorService.execute_flow_logic(
+                db=db,
+                flow_meta=flow_data,
+                product_id=1,
+                env_id=1,
+                company_id=1,
+                variables_dict={},
+                feature_name="Test Feature",
+                schedule_id=None,
+                flow_type="e2e",
+                capture_video=False,
+            )
+        return executed_steps
+
+    assert run_with_condition(True) == ["s_true"]
+    assert run_with_condition(False) == ["s_false"]
+
+
+
 
 
 
