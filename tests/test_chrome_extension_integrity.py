@@ -75,3 +75,12 @@ def test_content_js_idempotency_and_safe_token():
     assert "__FLOW_RECORDER_CONTENT_ACTIVE__" in content_js, "content.js must have idempotency guard"
     assert "window.location.hostname.includes('flow')" not in content_js, "content.js must not use insecure hostname.includes"
     assert "document.title.toLowerCase().includes('flow')" not in content_js, "content.js must not use title.includes for token detection"
+
+def test_background_js_masks_passwords_in_form_capture():
+    background_js = (EXTENSION_DIR / "background.js").read_text(encoding="utf-8")
+    assert "requestBody.formData" in background_js
+    assert "password" in background_js.lower()
+    assert "senha" in background_js.lower()
+    assert "***MASKED***" in background_js
+    assert "isSensitiveFieldName" in background_js
+    assert "maskRawPayload" in background_js

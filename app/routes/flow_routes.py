@@ -75,7 +75,18 @@ def save_flow(
         raise ValidationError(detail="projectId deve ser um número positivo")
 
     try:
-        res = FlowService.save(db, data, company_id=current_user.company_id, user_id=current_user.id)
+        user_name = (
+            getattr(current_user, "full_name", None)
+            or getattr(current_user, "username", None)
+            or getattr(current_user, "email", None)
+        )
+        res = FlowService.save(
+            db,
+            data,
+            company_id=current_user.company_id,
+            user_id=current_user.id,
+            user_name=user_name,
+        )
         deleted_nodes = res.get("deleted_nodes", []) if isinstance(res, dict) else []
         added_nodes = res.get("added_nodes", []) if isinstance(res, dict) else []
 
@@ -189,8 +200,11 @@ def save_flow(
         raise ValidationError(detail=str(e))
     except Exception as e:
         import traceback
-        with open("save_error.log", "w") as f:
-            f.write(traceback.format_exc())
+        try:
+            with open("save_error.log", "w") as f:
+                f.write(traceback.format_exc())
+        except Exception:
+            pass
         raise
 
 
@@ -297,3 +311,123 @@ def heal_flow_step(
         return {"status": "success", "message": "Healing applied successfully", "flow": updated_flow}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/versions/{project_id}")
+def list_flow_versions(
+    project_id: int,
+    flow_id: int = None,
+    flow_type: str = None,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
+):
+    """Lista o histórico de versões salvas de um fluxo"""
+    from app.exceptions import ValidationError
+    try:
+        return FlowService.list_versions(
+            db,
+            project_id=project_id,
+            company_id=current_user.company_id,
+            flow_id=flow_id,
+            flow_type=flow_type,
+        )
+    except ValueError as e:
+        raise ValidationError(detail=str(e))
+
+
+@router.post("/versions/{version_id}/restore")
+def restore_flow_version(
+    version_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
+):
+    """Restaura o fluxo para uma versão anterior preservando uma nova revisão no histórico"""
+    from app.exceptions import InsufficientPermissionsError, ValidationError
+    from app.services.audit_service import AuditService
+
+    if current_user.role == 'viewer':
+        raise InsufficientPermissionsError()
+
+    user_name = (
+        getattr(current_user, "full_name", None)
+        or getattr(current_user, "username", None)
+        or getattr(current_user, "email", None)
+    )
+    try:
+        res = FlowService.restore_version(
+            db,
+            version_id=version_id,
+            company_id=current_user.company_id,
+            user_id=current_user.id,
+            user_name=user_name,
+        )
+        AuditService.log_action(
+            db=db,
+            company_id=current_user.company_id,
+            user=current_user,
+            action="RESTORE_FLOW_VERSION",
+            resource_type="flow",
+            resource_id=str(res.get("flow_id") or res.get("project_id")),
+            resource_name=f"Versão v{res.get('restored_from_version_number')} (Projeto #{res.get('project_id')})",
+            details={
+                "project_id": res.get("project_id"),
+                "flow_id": res.get("flow_id"),
+                "restored_from_version_id": version_id,
+                "restored_from_version_number": res.get("restored_from_version_number"),
+                "new_version_id": res.get("new_version_id"),
+                "new_version_number": res.get("new_version_number"),
+            },
+        )
+        return res
+    except ValueError as e:
+        raise ValidationError(detail=str(e))
+
+
+@router.post("/versions/{project_id}/discard-draft")
+def discard_flow_draft(
+    project_id: int,
+    flow_id: int = None,
+    flow_type: str = None,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
+):
+    """Descarta as alterações em rascunho ainda não definitivas e reverte para a última versão definitiva"""
+    from app.exceptions import InsufficientPermissionsError, ValidationError
+    from app.services.audit_service import AuditService
+
+    if current_user.role == 'viewer':
+        raise InsufficientPermissionsError()
+
+    user_name = (
+        getattr(current_user, "full_name", None)
+        or getattr(current_user, "username", None)
+        or getattr(current_user, "email", None)
+    )
+    try:
+        res = FlowService.discard_draft(
+            db,
+            project_id=project_id,
+            company_id=current_user.company_id,
+            user_id=current_user.id,
+            flow_id=flow_id,
+            flow_type=flow_type,
+            user_name=user_name,
+        )
+        AuditService.log_action(
+            db=db,
+            company_id=current_user.company_id,
+            user=current_user,
+            action="DISCARD_FLOW_DRAFT",
+            resource_type="flow",
+            resource_id=str(res.get("flow_id") or project_id),
+            resource_name=f"Descarte de Rascunho (Projeto #{project_id})",
+            details={
+                "project_id": project_id,
+                "flow_id": res.get("flow_id"),
+                "flow_type": res.get("flow_type"),
+                "restored_to_version_number": res.get("restored_to_version_number"),
+            },
+        )
+        return res
+    except ValueError as e:
+        raise ValidationError(detail=str(e))

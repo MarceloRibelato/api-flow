@@ -9,6 +9,10 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+.env.*
+*.env
+*private_key*.pem
+private_key.pem
 .pytest_cache
 .ruff_cache
 .idea

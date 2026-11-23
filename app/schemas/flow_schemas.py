@@ -72,6 +72,8 @@ class NodeDataBasic(BaseModel):
     dbQueries: Optional[List[Dict[str, Any]]] = []
     messageQueues: Optional[List[MessageQueueSchema]] = []
     conditionConfig: Optional[Dict[str, Any]] = None
+    loopConfig: Optional[Dict[str, Any]] = None
+    tryCatchConfig: Optional[Dict[str, Any]] = None
 
 class NodeDataFull(BaseModel):
     name: str = Field(..., description="Nome do nó")
@@ -86,6 +88,8 @@ class NodeDataFull(BaseModel):
     dbQueries: List[Dict[str, Any]] = Field([], description="Consultas de banco de dados do card")
     messageQueues: List[MessageQueueSchema] = Field([], description="Ações de mensageria")
     conditionConfig: Optional[Dict[str, Any]] = None
+    loopConfig: Optional[Dict[str, Any]] = None
+    tryCatchConfig: Optional[Dict[str, Any]] = None
 
 class NodeSchema(BaseModel):
     id: str = Field(..., description="ID único do nó (React Flow)")
@@ -124,6 +128,8 @@ class CardDataSchema(BaseModel):
     dbQueries: List[Dict[str, Any]] = []
     messageQueues: List[MessageQueueSchema] = []
     conditionConfig: Optional[Dict[str, Any]] = None
+    loopConfig: Optional[Dict[str, Any]] = None
+    tryCatchConfig: Optional[Dict[str, Any]] = None
     envData: Dict[str, EnvSpecificData] = {}
 
 class FlowSaveSchema(BaseModel):
@@ -134,6 +140,7 @@ class FlowSaveSchema(BaseModel):
     nodes: List[NodeSchema]
     edges: List[EdgeSchema]
     cardData: Dict[str, CardDataSchema] = {}
+    is_definitive: bool = Field(False, description="Indica se o salvamento deve consolidar uma versão definitiva para rollback")
     
     @field_validator('flow_type', mode='before')
     @classmethod

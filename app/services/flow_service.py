@@ -1,12 +1,342 @@
+import hashlib
 import json
 from datetime import datetime, timezone
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, joinedload
 
-from app.models.flow_models import FlowDB, FlowNodeDB, FlowEdgeDB, FlowCardDataDB, FlowE2EStepDB
+from app.models.flow_models import FlowDB, FlowNodeDB, FlowEdgeDB, FlowCardDataDB, FlowE2EStepDB, FlowVersionDB
 from app.schemas.flow_schemas import FlowSaveSchema
 from app.models.feature_models import FeatureModel
 
 class FlowService:
+    MAX_VERSIONS_PER_FLOW = 30
+
+    @staticmethod
+    def _ensure_version_table(db: Session):
+        conn = db.connection()
+        if conn.dialect.name == "postgresql":
+            cols = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'public' AND table_name = 'flow_versions'"
+                    )
+                ).fetchall()
+            }
+            if not cols:
+                FlowVersionDB.__table__.create(bind=conn, checkfirst=True)
+                return
+            if "is_definitive" not in cols:
+                conn.execute(text("ALTER TABLE flow_versions ADD COLUMN IF NOT EXISTS is_definitive BOOLEAN NOT NULL DEFAULT TRUE"))
+            return
+
+        FlowVersionDB.__table__.create(bind=conn, checkfirst=True)
+        cols = {col["name"] for col in inspect(conn).get_columns("flow_versions")}
+        if "is_definitive" not in cols:
+            conn.execute(text("ALTER TABLE flow_versions ADD COLUMN is_definitive BOOLEAN NOT NULL DEFAULT TRUE"))
+
+    @staticmethod
+    def _compute_snapshot_hash(snapshot: dict) -> str:
+        payload = {
+            "name": snapshot.get("name"),
+            "flow_type": snapshot.get("flow_type"),
+            "nodes": snapshot.get("nodes") or [],
+            "edges": snapshot.get("edges") or [],
+            "cardData": snapshot.get("cardData") or {},
+        }
+        serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _build_current_snapshot(db: Session, flow: FlowDB) -> dict:
+        node_rows = db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == flow.id).all()
+        edge_rows = db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == flow.id).all()
+        card_rows = (
+            db.query(FlowCardDataDB)
+            .options(joinedload(FlowCardDataDB.e2e_steps_rel))
+            .filter(FlowCardDataDB.flow_id == flow.id)
+            .all()
+        )
+        if not node_rows and not card_rows:
+            return {}
+
+        card_by_node_id = {c.node_id: c for c in card_rows}
+        node_data_map = {}
+        nodes = []
+        for n in node_rows:
+            ndata = dict(n.data) if isinstance(n.data, dict) else {}
+            if not ndata.get("name"):
+                card_match = card_by_node_id.get(n.client_id)
+                ndata["name"] = (card_match.name if card_match and card_match.name else n.client_id)
+            node_data_map[n.client_id] = ndata
+            nodes.append({
+                "id": n.client_id,
+                "type": n.type or "custom",
+                "position": {"x": float(n.position_x or 0), "y": float(n.position_y or 0)},
+                "width": n.width,
+                "height": n.height,
+                "hidden": bool(ndata.get("hidden", False)),
+                "parentNode": n.parent_node_id,
+                "data": ndata,
+            })
+
+        edges = []
+        for e in edge_rows:
+            edge_obj = {
+                "id": e.client_id,
+                "source": e.source,
+                "target": e.target,
+                "type": e.type or "buttonedge",
+                "animated": bool(e.animated) if e.animated is not None else True,
+                "label": e.label,
+            }
+            if hasattr(e, "source_handle") and getattr(e, "source_handle", None):
+                edge_obj["sourceHandle"] = e.source_handle
+            edges.append(edge_obj)
+
+        card_data = {}
+        for c in card_rows:
+            if c.e2e_steps_rel:
+                steps = [{
+                    "id": s.client_id,
+                    "type": s.type,
+                    "name": s.name,
+                    "properties": s.properties or {},
+                } for s in sorted(c.e2e_steps_rel, key=lambda x: x.order)]
+            else:
+                steps = list(c.e2e_steps or [])
+
+            ndata = node_data_map.get(c.node_id, {})
+            raw_env = c.env_data if isinstance(c.env_data, dict) else {}
+            clean_env = {
+                k: v for k, v in raw_env.items()
+                if not str(k).startswith("__") and isinstance(v, dict)
+            }
+            node_type = ndata.get("nodeType")
+            if not node_type:
+                if flow.flow_type == "mobile":
+                    node_type = "mobile"
+                elif flow.flow_type in ("web", "e2e", "frontend"):
+                    node_type = "e2e"
+                elif c.db_queries:
+                    node_type = "database"
+                elif c.message_queues:
+                    node_type = "queue"
+                else:
+                    node_type = "api"
+
+            card_data[c.node_id] = {
+                "name": c.name or ndata.get("name") or c.node_id,
+                "color": c.color or ndata.get("color") or "#10b981",
+                "nodeType": node_type,
+                "description": c.description or "",
+                "isMainFlow": bool(ndata.get("isMainFlow", False)),
+                "bddScenarios": c.bdd_scenarios or [],
+                "apiCalls": c.api_calls or [],
+                "e2eSteps": steps,
+                "dbQueries": c.db_queries or [],
+                "messageQueues": c.message_queues or [],
+                "conditionConfig": ndata.get("conditionConfig") or raw_env.get("__conditionConfig"),
+                "loopConfig": ndata.get("loopConfig") or raw_env.get("__loopConfig"),
+                "tryCatchConfig": ndata.get("tryCatchConfig") or raw_env.get("__tryCatchConfig"),
+                "envData": clean_env,
+            }
+
+        return {
+            "projectId": flow.project_id,
+            "flowId": flow.id,
+            "name": flow.name,
+            "flow_type": flow.flow_type or "api",
+            "nodes": nodes,
+            "edges": edges,
+            "cardData": card_data,
+        }
+
+    @staticmethod
+    def _build_save_snapshot(data: FlowSaveSchema, flow: FlowDB) -> dict:
+        snapshot = data.model_dump(mode="json")
+        snapshot.pop("is_definitive", None)
+        snapshot["projectId"] = flow.project_id
+        snapshot["flowId"] = flow.id
+        snapshot["name"] = flow.name
+        snapshot["flow_type"] = flow.flow_type or "api"
+        return snapshot
+
+    @staticmethod
+    def _compute_diff_against_snapshot(base_snapshot: dict, current_snapshot: dict):
+        """Calcula diferenças acumuladas (adicionados, modificados, removidos) contra uma versão base."""
+        def extract_map(snap: dict):
+            card_map = snap.get("cardData") if isinstance(snap.get("cardData"), dict) else {}
+            names = {}
+            sigs = {}
+            for n in (snap.get("nodes") or []):
+                if not isinstance(n, dict):
+                    continue
+                cid = str(n.get("id") or "")
+                if not cid or cid in ("start", "startNode", "node_start"):
+                    continue
+                ndata = n.get("data") if isinstance(n.get("data"), dict) else {}
+                cobj = card_map.get(cid) if isinstance(card_map.get(cid), dict) else {}
+                label = cobj.get("name") or ndata.get("name") or f"Card #{cid}"
+                names[cid] = str(label)
+                sigs[cid] = json.dumps(
+                    {
+                        "name": label,
+                        "nodeData": ndata,
+                        "card": cobj,
+                    },
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    default=str,
+                )
+            return names, sigs
+
+        base_names, base_sigs = extract_map(base_snapshot or {})
+        cur_names, cur_sigs = extract_map(current_snapshot or {})
+
+        added = [cur_names[nid] for nid in cur_names if nid not in base_names]
+        deleted = [base_names[nid] for nid in base_names if nid not in cur_names]
+        modified = []
+        for nid in cur_names:
+            if nid in base_names and cur_sigs[nid] != base_sigs[nid]:
+                if cur_names[nid] != base_names[nid]:
+                    modified.append(f"{base_names[nid]} → {cur_names[nid]}")
+                else:
+                    modified.append(cur_names[nid])
+        return added, modified, deleted
+
+    @staticmethod
+    def _build_version_summary(added_nodes: list, modified_nodes: list, deleted_nodes: list, is_initial: bool = False) -> str:
+        parts = []
+        if added_nodes:
+            names = ", ".join(added_nodes[:2]) + (f" (+{len(added_nodes) - 2})" if len(added_nodes) > 2 else "")
+            parts.append(f"+{len(added_nodes)} novo(s): {names}")
+        if modified_nodes:
+            names = ", ".join(modified_nodes[:2]) + (f" (+{len(modified_nodes) - 2})" if len(modified_nodes) > 2 else "")
+            parts.append(f"{len(modified_nodes)} editado(s): {names}")
+        if deleted_nodes:
+            names = ", ".join(deleted_nodes[:2]) + (f" (+{len(deleted_nodes) - 2})" if len(deleted_nodes) > 2 else "")
+            parts.append(f"-{len(deleted_nodes)} removido(s): {names}")
+        if not parts:
+            return "Versão inicial salva" if is_initial else "Layout ou conexões atualizadas"
+        return " • ".join(parts)[:480]
+
+    @staticmethod
+    def _record_version_snapshot(
+        db: Session,
+        flow: FlowDB,
+        snapshot: dict,
+        summary: str,
+        user_id: int = None,
+        user_name: str = None,
+        is_definitive: bool = False,
+        force: bool = False,
+        ensure_table: bool = True,
+    ):
+        if ensure_table:
+            FlowService._ensure_version_table(db)
+        snap_hash = FlowService._compute_snapshot_hash(snapshot)
+        latest = (
+            db.query(FlowVersionDB)
+            .filter(FlowVersionDB.flow_id == flow.id)
+            .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+            .first()
+        )
+        latest_definitive = (
+            db.query(FlowVersionDB)
+            .filter(
+                FlowVersionDB.flow_id == flow.id,
+                FlowVersionDB.is_definitive.is_(True),
+            )
+            .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+            .first()
+        )
+
+        # If there is an open non-definitive draft version, consolidate edits into it
+        if latest and not latest.is_definitive:
+            if (
+                is_definitive
+                and latest_definitive
+                and latest_definitive.snapshot_hash == snap_hash
+                and not force
+            ):
+                # Reverted manually back to the last definitive snapshot: remove redundant draft
+                db.delete(latest)
+                db.flush()
+                return latest_definitive
+
+            latest.snapshot = snapshot
+            latest.snapshot_hash = snap_hash
+            latest.nodes_count = len(snapshot.get("nodes") or [])
+            latest.edges_count = len(snapshot.get("edges") or [])
+            latest.summary = (summary or "")[:500]
+            latest.created_by = user_id
+            latest.created_by_name = user_name
+            latest.created_at = datetime.now(timezone.utc)
+            if is_definitive:
+                latest.is_definitive = True
+            db.flush()
+            return latest
+
+        # Otherwise latest is None or already definitive
+        if latest and not force and latest.snapshot_hash == snap_hash:
+            return latest if is_definitive else None
+
+        next_version_number = (latest.version_number + 1) if latest else 1
+        version = FlowVersionDB(
+            flow_id=flow.id,
+            project_id=flow.project_id,
+            company_id=flow.company_id,
+            version_number=next_version_number,
+            is_definitive=bool(is_definitive),
+            summary=(summary or "")[:500],
+            snapshot=snapshot,
+            snapshot_hash=snap_hash,
+            nodes_count=len(snapshot.get("nodes") or []),
+            edges_count=len(snapshot.get("edges") or []),
+            created_by=user_id,
+            created_by_name=user_name,
+        )
+        db.add(version)
+        db.flush()
+
+        stale_rows = (
+            db.query(FlowVersionDB.id)
+            .filter(FlowVersionDB.flow_id == flow.id)
+            .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+            .offset(FlowService.MAX_VERSIONS_PER_FLOW)
+            .all()
+        )
+        stale_ids = [r[0] for r in stale_rows]
+        if stale_ids:
+            db.query(FlowVersionDB).filter(FlowVersionDB.id.in_(stale_ids)).delete(synchronize_session=False)
+
+        return version
+    @staticmethod
+    def is_definitive_only_schedule(db: Session, schedule_or_id) -> bool:
+        """Retorna True para agendamentos e pipelines CI/CD (executam apenas versão definitiva)."""
+        if schedule_or_id is None:
+            return False
+        from app.models.schedule_models import ScheduleModel
+
+        schedule = schedule_or_id
+        if isinstance(schedule_or_id, int):
+            if db is None:
+                return False
+            schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_or_id).first()
+
+        if schedule is None or not isinstance(schedule, ScheduleModel):
+            return False
+        if not bool(schedule.is_manual):
+            return True
+        if schedule.cron_expression:
+            return True
+        sched_name = str(schedule.name or "").strip().upper()
+        if sched_name.startswith("[PIPELINE]") or sched_name.startswith("CI/CD"):
+            return True
+        return False
+
     @staticmethod
     def _verify_project_ownership(db: Session, project_id: int, company_id: int) -> bool:
         from app.models.product_models import ProductModel
@@ -17,13 +347,71 @@ class FlowService:
         return feature is not None
 
     @staticmethod
-    def list_by_project(db: Session, project_id: int, company_id: int):
+    def list_by_project(db: Session, project_id: int, company_id: int, definitive_only: bool = False):
         if not FlowService._verify_project_ownership(db, project_id, company_id):
             return []
-        
+
+        if definitive_only:
+            FlowService._ensure_version_table(db)
+
         flows = db.query(FlowDB).filter(FlowDB.project_id == project_id).order_by(FlowDB.updated_at.desc()).all()
         result = []
         for f in flows:
+            if definitive_only:
+                latest_def = (
+                    db.query(FlowVersionDB)
+                    .filter(
+                        FlowVersionDB.flow_id == f.id,
+                        FlowVersionDB.is_definitive.is_(True),
+                    )
+                    .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+                    .first()
+                )
+                if latest_def:
+                    snap = latest_def.snapshot if isinstance(latest_def.snapshot, dict) else {}
+                    snap_cards = snap.get("cardData") if isinstance(snap.get("cardData"), dict) else {}
+                    steps_count = 0
+                    for cid, cdict in snap_cards.items():
+                        if str(cid) in ("start", "startNode", "node_start") or not isinstance(cdict, dict):
+                            continue
+                        e2e_cnt = len(cdict.get("e2eSteps") or [])
+                        api_cnt = len(cdict.get("apiCalls") or [])
+                        db_cnt = len(cdict.get("dbQueries") or [])
+                        mq_cnt = len(cdict.get("messageQueues") or [])
+                        if f.flow_type in ("e2e", "web", "mobile"):
+                            steps_count += e2e_cnt + db_cnt + mq_cnt
+                        else:
+                            steps_count += api_cnt + db_cnt + mq_cnt + e2e_cnt
+                    result.append({
+                        "id": f.id,
+                        "project_id": f.project_id,
+                        "name": snap.get("name") or f.name,
+                        "flow_type": snap.get("flow_type") or f.flow_type,
+                        "created_at": f.created_at,
+                        "updated_at": latest_def.created_at or f.updated_at,
+                        "nodes_count": len(snap.get("nodes") or []),
+                        "edges_count": len(snap.get("edges") or []),
+                        "steps_count": steps_count,
+                        "is_definitive": True,
+                    })
+                    continue
+
+                has_any_ver = db.query(FlowVersionDB.id).filter(FlowVersionDB.flow_id == f.id).first() is not None
+                if has_any_ver:
+                    result.append({
+                        "id": f.id,
+                        "project_id": f.project_id,
+                        "name": f.name,
+                        "flow_type": f.flow_type,
+                        "created_at": f.created_at,
+                        "updated_at": f.updated_at,
+                        "nodes_count": 0,
+                        "edges_count": 0,
+                        "steps_count": 0,
+                        "is_definitive": False,
+                    })
+                    continue
+
             steps_count = 0
             for c in (f.flow_card_data or []):
                 if str(c.node_id) in ("start", "startNode", "node_start"):
@@ -45,7 +433,8 @@ class FlowService:
                 "updated_at": f.updated_at,
                 "nodes_count": len(f.flow_nodes),
                 "edges_count": len(f.flow_edges),
-                "steps_count": steps_count
+                "steps_count": steps_count,
+                **({"is_definitive": True} if definitive_only else {}),
             })
         return result
 
@@ -72,9 +461,10 @@ class FlowService:
         }
 
     @staticmethod
-    def save(db: Session, data: FlowSaveSchema, company_id: int, user_id: int):
+    def save(db: Session, data: FlowSaveSchema, company_id: int, user_id: int, custom_summary: str = None, user_name: str = None, force_version: bool = False, record_version: bool = True):
         if not FlowService._verify_project_ownership(db, data.projectId, company_id):
              raise ValueError("Projeto não pertence à sua empresa")
+        FlowService._ensure_version_table(db)
 
         # 1. Get or Create Flow (with lock to prevent concurrent save deadlocks)
         flow = db.query(FlowDB).filter(
@@ -189,6 +579,24 @@ class FlowService:
                     display_label = f"{old_name} → {new_name}" if (old_name and new_name and str(old_name) != str(new_name)) else str(new_name or old_name)
                     modified_node_names.append(display_label)
 
+        # Snapshot baseline v1 (definitive) if this pre-existing flow had no recorded versions before overwrite
+        if record_version:
+            had_versions = db.query(FlowVersionDB.id).filter(FlowVersionDB.flow_id == flow.id).first() is not None
+            if not had_versions:
+                pre_snapshot = FlowService._build_current_snapshot(db, flow)
+                if pre_snapshot:
+                    FlowService._record_version_snapshot(
+                        db,
+                        flow=flow,
+                        snapshot=pre_snapshot,
+                        summary="Versão inicial (antes da alteração)",
+                        user_id=user_id,
+                        user_name=user_name,
+                        is_definitive=True,
+                        force=True,
+                        ensure_table=False,
+                    )
+
         # We delete all children (steps) first, then parents (cards, nodes, edges)
         card_db_ids = [c.db_id for c in existing_cards]
         if card_db_ids:
@@ -254,12 +662,16 @@ class FlowService:
             env_data_dict = {}
             if hasattr(c, 'envData') and c.envData:
                 for env_name, env_val in c.envData.items():
-                    if env_name == '__conditionConfig':
+                    if env_name in ('__conditionConfig', '__loopConfig', '__tryCatchConfig'):
                         continue
                     if hasattr(env_val, 'model_dump'): env_data_dict[env_name] = env_val.model_dump()
                     else: env_data_dict[env_name] = env_val
             if getattr(c, 'conditionConfig', None):
                 env_data_dict['__conditionConfig'] = c.conditionConfig
+            if getattr(c, 'loopConfig', None):
+                env_data_dict['__loopConfig'] = c.loopConfig
+            if getattr(c, 'tryCatchConfig', None):
+                env_data_dict['__tryCatchConfig'] = c.tryCatchConfig
 
             card_db = FlowCardDataDB(
                 flow_id=flow.id,
@@ -322,6 +734,64 @@ class FlowService:
             name = c_name or n_data.get("name") or n_data.get("label") or f"Card #{nid_str}"
             current_node_names.append(str(name))
 
+        is_definitive_save = bool(getattr(data, "is_definitive", False))
+        recorded_version = None
+        if record_version:
+            new_snapshot = FlowService._build_save_snapshot(data, flow)
+            has_any_version = db.query(FlowVersionDB.id).filter(FlowVersionDB.flow_id == flow.id).first() is not None
+            latest_definitive = (
+                db.query(FlowVersionDB)
+                .filter(
+                    FlowVersionDB.flow_id == flow.id,
+                    FlowVersionDB.is_definitive.is_(True),
+                )
+                .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+                .first()
+            )
+            if custom_summary:
+                version_summary = custom_summary
+            elif latest_definitive and isinstance(latest_definitive.snapshot, dict):
+                cum_added, cum_modified, cum_deleted = FlowService._compute_diff_against_snapshot(
+                    latest_definitive.snapshot,
+                    new_snapshot,
+                )
+                version_summary = FlowService._build_version_summary(
+                    cum_added,
+                    cum_modified,
+                    cum_deleted,
+                    is_initial=False,
+                )
+            else:
+                version_summary = FlowService._build_version_summary(
+                    added_node_names,
+                    modified_node_names,
+                    deleted_node_names,
+                    is_initial=not has_any_version,
+                )
+
+            recorded_version = FlowService._record_version_snapshot(
+                db,
+                flow=flow,
+                snapshot=new_snapshot,
+                summary=version_summary,
+                user_id=user_id,
+                user_name=user_name,
+                is_definitive=is_definitive_save,
+                force=force_version,
+                ensure_table=False,
+            )
+
+        if recorded_version is not None:
+            has_uncommitted_draft = not bool(recorded_version.is_definitive)
+        else:
+            latest_ver = (
+                db.query(FlowVersionDB)
+                .filter(FlowVersionDB.flow_id == flow.id)
+                .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+                .first()
+            )
+            has_uncommitted_draft = bool(latest_ver and not getattr(latest_ver, "is_definitive", True))
+
         flow.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(flow)
@@ -334,11 +804,284 @@ class FlowService:
             "modified_nodes": modified_node_names,
             "current_nodes": current_node_names,
             "previous_nodes_count": len(real_existing_node_ids),
-            "current_nodes_count": len(current_node_names)
+            "current_nodes_count": len(current_node_names),
+            "version_id": recorded_version.id if recorded_version else None,
+            "version_number": recorded_version.version_number if recorded_version else None,
+            "is_definitive": bool(recorded_version.is_definitive) if recorded_version else is_definitive_save,
+            "has_uncommitted_draft": has_uncommitted_draft,
         }
 
     @staticmethod
-    def load(db: Session, project_id: int = None, company_id: int = None, flow_id: int = None, flow_type: str = None):
+    def list_versions(
+        db: Session,
+        project_id: int,
+        company_id: int,
+        flow_id: int = None,
+        flow_type: str = None,
+    ):
+        if not FlowService._verify_project_ownership(db, project_id, company_id):
+            raise ValueError("Projeto não pertence à sua empresa")
+
+        FlowService._ensure_version_table(db)
+
+        query = db.query(FlowDB).filter(
+            FlowDB.project_id == project_id,
+            FlowDB.company_id == company_id,
+        )
+        if flow_id:
+            query = query.filter(FlowDB.id == flow_id)
+        elif flow_type:
+            query = query.filter(FlowDB.flow_type == flow_type)
+        flow = query.order_by(FlowDB.updated_at.desc()).first()
+
+        if not flow:
+            return {"flow_id": None, "flow_name": None, "flow_type": flow_type, "has_uncommitted_draft": False, "versions": []}
+
+        versions = (
+            db.query(FlowVersionDB)
+            .filter(FlowVersionDB.flow_id == flow.id)
+            .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+            .all()
+        )
+
+        # Backfill current state as v1 definitive if the flow already exists without recorded history yet
+        if not versions:
+            baseline_snap = FlowService._build_current_snapshot(db, flow)
+            if baseline_snap:
+                baseline = FlowService._record_version_snapshot(
+                    db,
+                    flow=flow,
+                    snapshot=baseline_snap,
+                    summary="Versão inicial salva",
+                    user_id=flow.user_id,
+                    is_definitive=True,
+                    force=True,
+                )
+                if baseline:
+                    db.commit()
+                    db.refresh(baseline)
+                    versions = [baseline]
+
+        items = []
+        for idx, v in enumerate(versions):
+            snap = v.snapshot if isinstance(v.snapshot, dict) else {}
+            card_data_map = snap.get("cardData") if isinstance(snap.get("cardData"), dict) else {}
+            node_names = []
+            for n in (snap.get("nodes") or []):
+                if not isinstance(n, dict):
+                    continue
+                cid = n.get("id")
+                if cid in ("start", "startNode", "node_start"):
+                    continue
+                ndata = n.get("data") if isinstance(n.get("data"), dict) else {}
+                cname = (card_data_map.get(cid) or {}).get("name") if isinstance(card_data_map.get(cid), dict) else None
+                label = cname or ndata.get("name")
+                if label:
+                    node_names.append(str(label))
+            items.append({
+                "id": v.id,
+                "flow_id": v.flow_id,
+                "project_id": v.project_id,
+                "version_number": v.version_number,
+                "is_definitive": bool(getattr(v, "is_definitive", True)),
+                "summary": v.summary,
+                "nodes_count": v.nodes_count,
+                "edges_count": v.edges_count,
+                "node_names": node_names[:8],
+                "total_named_nodes": len(node_names),
+                "created_by": v.created_by,
+                "created_by_name": v.created_by_name,
+                "created_at": v.created_at,
+                "is_current": idx == 0,
+            })
+
+        return {
+            "flow_id": flow.id,
+            "flow_name": flow.name,
+            "flow_type": flow.flow_type,
+            "has_uncommitted_draft": any(not item["is_definitive"] for item in items),
+            "versions": items,
+        }
+
+    @staticmethod
+    def restore_version(
+        db: Session,
+        version_id: int,
+        company_id: int,
+        user_id: int,
+        user_name: str = None,
+    ):
+        FlowService._ensure_version_table(db)
+        version = db.query(FlowVersionDB).filter(FlowVersionDB.id == version_id).first()
+        if not version:
+            raise ValueError("Versão não encontrada")
+
+        if version.company_id != company_id or not FlowService._verify_project_ownership(db, version.project_id, company_id):
+            raise ValueError("Versão não pertence à sua empresa")
+
+        if not getattr(version, "is_definitive", True):
+            raise ValueError("O rollback só é permitido para versões definitivas")
+
+        flow = db.query(FlowDB).filter(FlowDB.id == version.flow_id).first()
+        if not flow:
+            raise ValueError("Fluxo associado não encontrado")
+
+        payload = dict(version.snapshot or {})
+        payload["projectId"] = flow.project_id
+        payload["flowId"] = flow.id
+        payload["name"] = payload.get("name") or flow.name
+        payload["flow_type"] = payload.get("flow_type") or flow.flow_type or "api"
+        payload["is_definitive"] = False
+        payload.setdefault("nodes", [])
+        payload.setdefault("edges", [])
+        payload.setdefault("cardData", {})
+
+        restore_schema = FlowSaveSchema(**payload)
+        save_res = FlowService.save(
+            db,
+            restore_schema,
+            company_id=company_id,
+            user_id=user_id,
+            custom_summary=f"Restaurada para validação a partir da v{version.version_number} (salve definitivo para confirmar)",
+            user_name=user_name,
+            force_version=True,
+        )
+
+        return {
+            "status": "restored",
+            "restored_from_version_id": version.id,
+            "restored_from_version_number": version.version_number,
+            "flow_id": flow.id,
+            "project_id": flow.project_id,
+            "flow_type": flow.flow_type,
+            "new_version_id": save_res.get("version_id") or version.id,
+            "new_version_number": save_res.get("version_number") or version.version_number,
+            "is_definitive": False,
+            "has_uncommitted_draft": True,
+            "flow": FlowService.load(
+                db,
+                project_id=flow.project_id,
+                company_id=company_id,
+                flow_id=flow.id,
+                flow_type=flow.flow_type,
+            ),
+        }
+
+    @staticmethod
+    def discard_draft(
+        db: Session,
+        project_id: int,
+        company_id: int,
+        user_id: int,
+        flow_id: int = None,
+        flow_type: str = None,
+        user_name: str = None,
+    ):
+        if not FlowService._verify_project_ownership(db, project_id, company_id):
+            raise ValueError("Projeto não pertence à sua empresa")
+
+        FlowService._ensure_version_table(db)
+
+        query = db.query(FlowDB).filter(
+            FlowDB.project_id == project_id,
+            FlowDB.company_id == company_id,
+        )
+        if flow_id:
+            query = query.filter(FlowDB.id == flow_id)
+        elif flow_type:
+            query = query.filter(FlowDB.flow_type == flow_type)
+        flow = query.order_by(FlowDB.updated_at.desc()).first()
+
+        if not flow:
+            return {
+                "status": "discarded",
+                "flow_id": None,
+                "project_id": project_id,
+                "flow_type": flow_type or "api",
+                "restored_to_version_number": None,
+                "has_uncommitted_draft": False,
+                "flow": {
+                    "project_id": project_id,
+                    "nodes": [],
+                    "edges": [],
+                    "cardData": {},
+                    "flow_type": flow_type or "api",
+                    "has_uncommitted_draft": False,
+                },
+            }
+
+        latest_definitive = (
+            db.query(FlowVersionDB)
+            .filter(
+                FlowVersionDB.flow_id == flow.id,
+                FlowVersionDB.is_definitive.is_(True),
+            )
+            .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+            .first()
+        )
+
+        # Remove any uncommitted draft snapshots before reverting active flow state
+        db.query(FlowVersionDB).filter(
+            FlowVersionDB.flow_id == flow.id,
+            FlowVersionDB.is_definitive.is_(False),
+        ).delete(synchronize_session=False)
+        db.flush()
+
+        if latest_definitive and isinstance(latest_definitive.snapshot, dict):
+            payload = dict(latest_definitive.snapshot)
+            if payload.get("name"):
+                flow.name = payload["name"]
+        else:
+            payload = {
+                "nodes": [],
+                "edges": [],
+                "cardData": {},
+            }
+
+        payload["projectId"] = flow.project_id
+        payload["flowId"] = flow.id
+        payload["name"] = payload.get("name") or flow.name
+        payload["flow_type"] = payload.get("flow_type") or flow.flow_type or "api"
+        payload["is_definitive"] = False
+        payload.setdefault("nodes", [])
+        payload.setdefault("edges", [])
+        payload.setdefault("cardData", {})
+
+        restore_schema = FlowSaveSchema(**payload)
+        FlowService.save(
+            db,
+            restore_schema,
+            company_id=company_id,
+            user_id=user_id,
+            user_name=user_name,
+            record_version=False,
+        )
+
+        return {
+            "status": "discarded",
+            "flow_id": flow.id,
+            "project_id": flow.project_id,
+            "flow_type": flow.flow_type,
+            "restored_to_version_number": latest_definitive.version_number if latest_definitive else None,
+            "has_uncommitted_draft": False,
+            "flow": FlowService.load(
+                db,
+                project_id=flow.project_id,
+                company_id=company_id,
+                flow_id=flow.id,
+                flow_type=flow.flow_type,
+            ),
+        }
+
+    @staticmethod
+    def load(
+        db: Session,
+        project_id: int = None,
+        company_id: int = None,
+        flow_id: int = None,
+        flow_type: str = None,
+        definitive_only: bool = False,
+    ):
         query = db.query(FlowDB)
         if flow_id:
             query = query.filter(FlowDB.id == flow_id)
@@ -363,6 +1106,45 @@ class FlowService:
 
         if not flow:
             return {"project_id": project_id, "nodes": [], "edges": [], "cardData": {}, "flow_type": flow_type or "api"}
+
+        if definitive_only:
+            FlowService._ensure_version_table(db)
+            latest_def = (
+                db.query(FlowVersionDB)
+                .filter(
+                    FlowVersionDB.flow_id == flow.id,
+                    FlowVersionDB.is_definitive.is_(True),
+                )
+                .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+                .first()
+            )
+            if latest_def:
+                snap = dict(latest_def.snapshot or {})
+                return {
+                    "id": flow.id,
+                    "project_id": flow.project_id,
+                    "name": snap.get("name") or flow.name,
+                    "flow_type": snap.get("flow_type") or flow.flow_type,
+                    "nodes": snap.get("nodes") or [],
+                    "edges": snap.get("edges") or [],
+                    "cardData": snap.get("cardData") or {},
+                    "updated_at": latest_def.created_at or flow.updated_at,
+                    "version_number": latest_def.version_number,
+                    "is_definitive": True,
+                }
+            has_any_ver = db.query(FlowVersionDB.id).filter(FlowVersionDB.flow_id == flow.id).first() is not None
+            if has_any_ver:
+                return {
+                    "id": flow.id,
+                    "project_id": flow.project_id,
+                    "name": flow.name,
+                    "flow_type": flow.flow_type,
+                    "nodes": [],
+                    "edges": [],
+                    "cardData": {},
+                    "updated_at": flow.updated_at,
+                    "is_definitive": False,
+                }
 
         # Reconstruct JSON
         node_type_map = {n.client_id: (n.data.get('nodeType') if isinstance(n.data, dict) else None) for n in flow.flow_nodes}
@@ -403,6 +1185,8 @@ class FlowService:
 
             node_data_obj = next((n.data for n in flow.flow_nodes if n.client_id == c.node_id and isinstance(n.data, dict)), {})
             cond_cfg = node_data_obj.get("conditionConfig") or (c.env_data.get("__conditionConfig") if isinstance(c.env_data, dict) else None)
+            loop_cfg = node_data_obj.get("loopConfig") or (c.env_data.get("__loopConfig") if isinstance(c.env_data, dict) else None)
+            try_catch_cfg = node_data_obj.get("tryCatchConfig") or (c.env_data.get("__tryCatchConfig") if isinstance(c.env_data, dict) else None)
 
             cardData[c.node_id] = {
                 "name": c.name,
@@ -415,8 +1199,21 @@ class FlowService:
                 "messageQueues": c.message_queues or [],
                 "e2eSteps": steps,
                 "conditionConfig": cond_cfg,
+                "loopConfig": loop_cfg,
+                "tryCatchConfig": try_catch_cfg,
                 "envData": c.env_data or {}
             }
+
+        has_uncommitted_draft = False
+        if not definitive_only and isinstance(flow, FlowDB):
+            FlowService._ensure_version_table(db)
+            latest_ver = (
+                db.query(FlowVersionDB)
+                .filter(FlowVersionDB.flow_id == flow.id)
+                .order_by(FlowVersionDB.version_number.desc(), FlowVersionDB.id.desc())
+                .first()
+            )
+            has_uncommitted_draft = bool(latest_ver and not getattr(latest_ver, "is_definitive", True))
 
         return {
             "id": flow.id,
@@ -426,7 +1223,9 @@ class FlowService:
             "nodes": nodes,
             "edges": edges,
             "cardData": cardData,
-            "updated_at": flow.updated_at
+            "updated_at": flow.updated_at,
+            "has_uncommitted_draft": has_uncommitted_draft,
+            **({"is_definitive": True} if definitive_only else {}),
         }
 
     @staticmethod
@@ -467,7 +1266,9 @@ class FlowService:
                 )
             ).delete(synchronize_session=False)
             
-            # 2. Delete cards, nodes, edges
+            # 2. Delete cards, nodes, edges, versions
+            FlowService._ensure_version_table(db)
+            db.query(FlowVersionDB).filter(FlowVersionDB.flow_id == f.id).delete(synchronize_session=False)
             db.query(FlowCardDataDB).filter(FlowCardDataDB.flow_id == f.id).delete(synchronize_session=False)
             db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == f.id).delete(synchronize_session=False)
             db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == f.id).delete(synchronize_session=False)

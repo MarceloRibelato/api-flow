@@ -24,6 +24,7 @@ class FlowDB(Base):
     flow_nodes = relationship("FlowNodeDB", back_populates="flow", cascade="all, delete-orphan")
     flow_edges = relationship("FlowEdgeDB", back_populates="flow", cascade="all, delete-orphan")
     flow_card_data = relationship("FlowCardDataDB", back_populates="flow", cascade="all, delete-orphan")
+    flow_versions = relationship("FlowVersionDB", back_populates="flow", cascade="all, delete-orphan")
 
 
 class FlowNodeDB(Base):
@@ -101,3 +102,23 @@ class FlowE2EStepDB(Base):
     order = Column(Integer, default=0)
 
     card_data = relationship("FlowCardDataDB", back_populates="e2e_steps_rel")
+
+
+class FlowVersionDB(Base):
+    __tablename__ = "flow_versions"
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    flow_id = Column(Integer, ForeignKey("flow_data.id", ondelete="CASCADE"), index=True)
+    project_id = Column(Integer, ForeignKey("features.id", ondelete="CASCADE"), index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
+    version_number = Column(Integer, nullable=False, default=1)
+    is_definitive = Column(Boolean, default=True, nullable=False, index=True)
+    summary = Column(String(500), nullable=True)
+    snapshot = Column(JSON, nullable=False, default=dict)
+    snapshot_hash = Column(String(64), nullable=True, index=True)
+    nodes_count = Column(Integer, default=0)
+    edges_count = Column(Integer, default=0)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by_name = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    flow = relationship("FlowDB", back_populates="flow_versions")

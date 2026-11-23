@@ -192,11 +192,12 @@ class FlowExecutorService:
             f_id = flow_meta.get('id')
             
             # If flow_meta already contains the nodes/edges, we can skip redundant loading
-            # but usually flow_meta only contains summary info from list_by_project.
-            if 'nodes' in flow_meta and flow_meta['nodes']:
+            # unless definitive_only is required and flow_meta was not explicitly loaded as definitive.
+            definitive_only = FlowService.is_definitive_only_schedule(db, schedule_id)
+            if 'nodes' in flow_meta and flow_meta['nodes'] and (not definitive_only or flow_meta.get('is_definitive')):
                 flow_data = flow_meta
             else:
-                flow_data = FlowService.load(db, p_id, company_id, f_id)
+                flow_data = FlowService.load(db, p_id, company_id, f_id, definitive_only=definitive_only)
             
             cards = flow_data.get('cardData', {})
             nodes = flow_data.get('nodes', [])
@@ -233,22 +234,32 @@ class FlowExecutorService:
 
             node_map = {n['id']: n for n in nodes}
             condition_nodes = set()
+            loop_nodes = set()
+            try_catch_nodes = set()
             for nid in node_ids:
                 c_obj = cards.get(nid) if cards else None
                 n_data = (node_map.get(nid) or {}).get('data') or {}
-                if (c_obj and c_obj.get('nodeType') == 'condition') or n_data.get('nodeType') == 'condition':
+                ntype = (c_obj.get('nodeType') if c_obj else None) or n_data.get('nodeType')
+                if ntype == 'condition':
                     condition_nodes.add(nid)
+                elif ntype == 'loop':
+                    loop_nodes.add(nid)
+                elif ntype == 'try_catch':
+                    try_catch_nodes.add(nid)
 
+            control_flow_nodes = condition_nodes | loop_nodes | try_catch_nodes
             condition_branches = {nid: {'true': [], 'false': []} for nid in condition_nodes}
+            loop_branches = {nid: {'loop': [], 'done': []} for nid in loop_nodes}
+            try_catch_branches = {nid: {'try': [], 'catch': []} for nid in try_catch_nodes}
 
             for edge in valid_edges:
                 src, tgt = edge['source'], edge['target']
                 if tgt not in adj[src]:
                     adj[src].append(tgt)
                 in_degree[tgt] += 1
+                s_handle = str(edge.get('sourceHandle') or '').lower()
+                e_label = str(edge.get('label') or '').strip().upper()
                 if src in condition_branches:
-                    s_handle = str(edge.get('sourceHandle') or '').lower()
-                    e_label = str(edge.get('label') or '').strip().upper()
                     if s_handle == 'true' or e_label.startswith('TRUE'):
                         condition_branches[src]['true'].append(tgt)
                     elif s_handle == 'false' or e_label.startswith('FALSE'):
@@ -257,6 +268,24 @@ class FlowExecutorService:
                         condition_branches[src]['true'].append(tgt)
                     else:
                         condition_branches[src]['false'].append(tgt)
+                elif src in loop_branches:
+                    if s_handle == 'loop' or e_label.startswith('LOOP') or e_label == 'L':
+                        loop_branches[src]['loop'].append(tgt)
+                    elif s_handle == 'done' or e_label.startswith('DONE') or e_label == 'D':
+                        loop_branches[src]['done'].append(tgt)
+                    elif not loop_branches[src]['loop']:
+                        loop_branches[src]['loop'].append(tgt)
+                    else:
+                        loop_branches[src]['done'].append(tgt)
+                elif src in try_catch_branches:
+                    if s_handle == 'try' or e_label.startswith('TRY') or e_label == 'T':
+                        try_catch_branches[src]['try'].append(tgt)
+                    elif s_handle == 'catch' or e_label.startswith('CATCH') or e_label.startswith('ERR') or e_label == 'E':
+                        try_catch_branches[src]['catch'].append(tgt)
+                    elif not try_catch_branches[src]['try']:
+                        try_catch_branches[src]['try'].append(tgt)
+                    else:
+                        try_catch_branches[src]['catch'].append(tgt)
                 logger.debug(f"   Edge: {src} -> {tgt}")
 
             # FIND ALL PATHS (Scenarios) to run from START to END independently
@@ -269,7 +298,7 @@ class FlowExecutorService:
 
             all_paths = []
             def dfs_paths(current_id, current_path):
-                if current_id in condition_branches:
+                if current_id in control_flow_nodes:
                     all_paths.append(current_path)
                     return
                 neighbors = adj.get(current_id, [])
@@ -429,7 +458,7 @@ class FlowExecutorService:
                     return total_s, total_f
 
             async def run_paths():
-                nonlocal flow_success_count, flow_fail_count, e2e_executor, final_variables, history_buffer
+                nonlocal flow_success_count, flow_fail_count, flow_failed, e2e_executor, final_variables, history_buffer
                 path_cache = {}
                 for path_number, path_nodes in selected_path_entries:
                     if FlowExecutorService._is_execution_cancelled(schedule_id):
@@ -509,8 +538,150 @@ class FlowExecutorService:
                                     except Exception as e:
                                         logger.warning(f"Failed to navigate to cached URL: {e}")
 
+                    def _collect_branch_nodes(start_ids, visited_seed):
+                        branch_queue = list(start_ids)
+                        visited_branch = set(visited_seed)
+                        branch_ordered = []
+                        while branch_queue:
+                            nxt_id = branch_queue.pop(0)
+                            if nxt_id in visited_branch:
+                                continue
+                            visited_branch.add(nxt_id)
+                            branch_ordered.append(nxt_id)
+                            if nxt_id not in control_flow_nodes:
+                                for child_id in adj.get(nxt_id, []):
+                                    if child_id not in visited_branch:
+                                        branch_queue.append(child_id)
+                        return branch_ordered
+
+                    def _set_path_var(k_name, v_val):
+                        if not k_name:
+                            return
+                        current_path_vars[str(k_name)] = v_val
+                        current_path_vars[str(k_name).upper()] = v_val
+
+                    def _get_path_var(k_name, default=None):
+                        if k_name in current_path_vars:
+                            return current_path_vars[k_name]
+                        up = str(k_name).upper()
+                        if up in current_path_vars:
+                            return current_path_vars[up]
+                        for existing_k, existing_v in current_path_vars.items():
+                            if str(existing_k).upper() == up:
+                                return existing_v
+                        return default
+
+                    async def _eval_runtime_condition(cond_cfg):
+                        nonlocal e2e_executor
+                        cond_type = str(cond_cfg.get('conditionType') or 'text_present').lower()
+                        raw_target = str(cond_cfg.get('target') or '')
+                        raw_expected = str(cond_cfg.get('expectedValue') or '')
+                        resolved_target = FlowExecutorService.replace_vars(raw_target, current_path_vars)
+                        resolved_expected = FlowExecutorService.replace_vars(raw_expected, current_path_vars)
+                        resolved_cfg = {**cond_cfg, 'target': resolved_target, 'expectedValue': resolved_expected}
+                        is_e2e_flow = effective_flow_type in ['e2e', 'mobile', 'web']
+                        if cond_type in ('var_equals', 'var_not_equals', 'var_contains', 'var_is_empty', 'var_is_not_empty'):
+                            var_key = raw_target.strip()
+                            if var_key.startswith('{{') and var_key.endswith('}}'):
+                                var_key = var_key[2:-2].strip()
+                            found_val = _get_path_var(var_key, None)
+                            actual_val = str(found_val if found_val is not None else resolved_target)
+                            if cond_type == 'var_equals':
+                                return (actual_val == resolved_expected), resolved_target
+                            if cond_type == 'var_not_equals':
+                                return (actual_val != resolved_expected), resolved_target
+                            if cond_type == 'var_contains':
+                                return (resolved_expected.lower() in actual_val.lower()), resolved_target
+                            if cond_type == 'var_is_empty':
+                                return (not actual_val.strip()), resolved_target
+                            return bool(actual_val.strip()), resolved_target
+
+                        if is_e2e_flow and e2e_executor is None:
+                            if effective_flow_type == 'mobile':
+                                from app.services.appium_executor_service import AppiumExecutorService
+                                e2e_executor = AppiumExecutorService()
+                                await e2e_executor.start(
+                                    video_dir=video_dir if capture_video else None,
+                                    db=db,
+                                    product_id=product_id,
+                                    device_id=device_id,
+                                    allowed_device_ids=mobile_device_ids
+                                )
+                            else:
+                                from app.services.playwright_executor_service import PlaywrightExecutorService
+                                e2e_executor = PlaywrightExecutorService(headless=not visible_execution)
+                                e2e_executor.schedule_id = schedule_id
+                                e2e_executor.project_id = product_id
+                                await e2e_executor.start(video_dir=video_dir if capture_video else None)
+
+                        cond_res = await e2e_executor.evaluate_condition(resolved_cfg) if (e2e_executor and hasattr(e2e_executor, 'evaluate_condition')) else False
+                        return cond_res, resolved_target
+
+                    def _save_control_history(node_id_ref, node_name_lbl, api_name_lbl, status_txt, resp_txt, dur_ms, status_code_val=200, err_msg=None):
+                        nonlocal flow_success_count
+                        actual_exec_type = "mobile" if effective_flow_type == 'mobile' else ("web" if effective_flow_type in ['e2e', 'web'] else "api")
+                        if effective_flow_type == 'mobile' and e2e_executor:
+                            _acq = getattr(e2e_executor, '_acquired_device_info', None) or {}
+                            _dev_obj = _acq.get('device')
+                            _dev_lbl = (getattr(_dev_obj, 'label', None) or _acq.get('device_name') or (getattr(e2e_executor, '_settings', {}) or {}).get('device_name') or '').strip()
+                            if _dev_lbl:
+                                resp_txt = f"{resp_txt} [Device: {_dev_lbl}]"
+                        hist_entry = ExecutionHistoryCreate(
+                            batch_id=f"{base_batch_id}_path_{path_number}",
+                            api_id=str(node_id_ref),
+                            api_name=api_name_lbl,
+                            project_id=p_id or product_id,
+                            flow_id=flow_meta.get('id'),
+                            node_id=str(node_id_ref),
+                            schedule_id=schedule_id,
+                            feature_name=feature_name,
+                            node_name=node_name_lbl,
+                            method=actual_exec_type.upper(),
+                            url="",
+                            status_code=status_code_val,
+                            status_text=status_txt,
+                            response_body=resp_txt,
+                            error_message=err_msg,
+                            response_time=dur_ms,
+                            environment_id=env_id,
+                            execution_type=actual_exec_type,
+                            retry_count=current_session_retry_count
+                        )
+                        HistoryService.save_batch(db, [hist_entry], user_id)
+                        if status_code_val < 400:
+                            flow_success_count += 1
+
+                    def _enter_catch_for_try(tc_id_val, fail_count_start_val):
+                        nonlocal path_success
+                        tc_card = cards.get(tc_id_val) or {}
+                        tc_meta = (node_map.get(tc_id_val) or {}).get('data') or {}
+                        tc_cfg = (
+                            tc_meta.get('tryCatchConfig')
+                            or tc_card.get('tryCatchConfig')
+                            or (tc_card.get('envData') or {}).get('__tryCatchConfig')
+                            or {}
+                        )
+                        continue_on_error = bool(tc_cfg.get('continueOnError', True))
+                        err_var = str(tc_cfg.get('errorVar') or 'last_error').strip() or 'last_error'
+                        _set_path_var(err_var, f"Error in node {last_executed_node_id}")
+                        _set_path_var('failed_node', str(last_executed_node_id or ''))
+                        _save_control_history(
+                            tc_id_val,
+                            tc_card.get('name') or 'Tratamento de Erro (TRY / CATCH)',
+                            f"TRY/CATCH: Error caught ({last_executed_node_id}) -> CATCH",
+                            "Catch Triggered",
+                            f"Caught error from node '{last_executed_node_id}' -> Running CATCH branch",
+                            0,
+                        )
+                        path_success = True
+                        catch_nodes = _collect_branch_nodes(try_catch_branches[tc_id_val].get('catch', []), set())
+                        caught_fail_delta = max(0, flow_fail_count - fail_count_start_val)
+                        dynamic_nodes[node_idx:node_idx] = catch_nodes + [("__CATCH_FINALIZE__", tc_id_val, continue_on_error, caught_fail_delta)]
+
                     dynamic_nodes = list(path_nodes)
                     node_idx = longest_prefix_len
+                    loop_runtime_state = {}
+                    last_executed_node_id = None
                     while node_idx < len(dynamic_nodes):
                         current_id = dynamic_nodes[node_idx]
                         node_idx += 1
@@ -518,7 +689,42 @@ class FlowExecutorService:
                             logger.info(f"🛑 Execution {schedule_id} cancelled by user. Stopping at node {current_id}.")
                             path_success = False
                             break
+
+                        # Handle Tuple Sentinels BEFORE normal fail-fast check
+                        if isinstance(current_id, tuple):
+                            sentinel_type = current_id[0]
+                            if sentinel_type == "__TRY_CATCH_END__":
+                                _, tc_id_val, fail_count_start_val = current_id
+                                if path_success:
+                                    continue
+                                _enter_catch_for_try(tc_id_val, fail_count_start_val)
+                                continue
+                            if sentinel_type == "__CATCH_FINALIZE__":
+                                _, tc_id_val, continue_on_error, caught_fail_delta = current_id
+                                if path_success:
+                                    if continue_on_error:
+                                        flow_fail_count = max(0, flow_fail_count - caught_fail_delta)
+                                        flow_failed = (flow_fail_count > 0)
+                                    else:
+                                        path_success = False
+                                continue
+                            if sentinel_type == "__LOOP_STEP__":
+                                if path_success:
+                                    current_id = current_id[1]
+                                else:
+                                    pass
+
                         if not path_success:
+                            tc_match_idx = None
+                            for rel_i, item in enumerate(dynamic_nodes[node_idx:]):
+                                if isinstance(item, tuple) and item[0] == "__TRY_CATCH_END__":
+                                    tc_match_idx = node_idx + rel_i
+                                    break
+                            if tc_match_idx is not None:
+                                _, tc_id_val, fail_count_start_val = dynamic_nodes[tc_match_idx]
+                                node_idx = tc_match_idx + 1
+                                _enter_catch_for_try(tc_id_val, fail_count_start_val)
+                                continue
                             logger.warning(f"  🛑 Skipping node {current_id} because path previously failed.")
                             break
 
@@ -532,103 +738,139 @@ class FlowExecutorService:
                                 or (cond_card.get('envData') or {}).get('__conditionConfig')
                                 or {}
                             )
-                            cond_type = str(cond_cfg.get('conditionType') or 'text_present').lower()
-                            raw_target = str(cond_cfg.get('target') or '')
-                            raw_expected = str(cond_cfg.get('expectedValue') or '')
-                            resolved_target = FlowExecutorService.replace_vars(raw_target, current_path_vars)
-                            resolved_expected = FlowExecutorService.replace_vars(raw_expected, current_path_vars)
-                            resolved_cfg = {**cond_cfg, 'target': resolved_target, 'expectedValue': resolved_expected}
-                            is_e2e_flow = effective_flow_type in ['e2e', 'mobile', 'web']
-                            actual_exec_type = "mobile" if effective_flow_type == 'mobile' else ("web" if effective_flow_type in ['e2e', 'web'] else "api")
-
                             cond_start_t = time.time()
-                            if cond_type in ('var_equals', 'var_not_equals', 'var_contains', 'var_is_empty', 'var_is_not_empty'):
-                                var_key = raw_target.strip()
-                                if var_key.startswith('{{') and var_key.endswith('}}'):
-                                    var_key = var_key[2:-2].strip()
-                                actual_val = str(current_path_vars.get(var_key, '') if var_key in current_path_vars else resolved_target)
-                                if cond_type == 'var_equals':
-                                    cond_result = actual_val == resolved_expected
-                                elif cond_type == 'var_not_equals':
-                                    cond_result = actual_val != resolved_expected
-                                elif cond_type == 'var_contains':
-                                    cond_result = resolved_expected.lower() in actual_val.lower()
-                                elif cond_type == 'var_is_empty':
-                                    cond_result = not actual_val.strip()
-                                else:
-                                    cond_result = bool(actual_val.strip())
-                            else:
-                                if is_e2e_flow and e2e_executor is None:
-                                    if effective_flow_type == 'mobile':
-                                        from app.services.appium_executor_service import AppiumExecutorService
-                                        e2e_executor = AppiumExecutorService()
-                                        await e2e_executor.start(
-                                            video_dir=video_dir if capture_video else None,
-                                            db=db,
-                                            product_id=product_id,
-                                            device_id=device_id,
-                                            allowed_device_ids=mobile_device_ids
-                                        )
-                                    else:
-                                        from app.services.playwright_executor_service import PlaywrightExecutorService
-                                        e2e_executor = PlaywrightExecutorService(headless=not visible_execution)
-                                        e2e_executor.schedule_id = schedule_id
-                                        e2e_executor.project_id = product_id
-                                        await e2e_executor.start(video_dir=video_dir if capture_video else None)
-
-                                cond_result = await e2e_executor.evaluate_condition(resolved_cfg) if (e2e_executor and hasattr(e2e_executor, 'evaluate_condition')) else False
+                            cond_result, resolved_target = await _eval_runtime_condition(cond_cfg)
                             cond_dur = int((time.time() - cond_start_t) * 1000)
                             branch_key = 'true' if cond_result else 'false'
                             logger.info(f"🔀 [IF/ELSE] '{cond_card.get('name', 'Condicional')}' ({resolved_target}) -> {branch_key.upper()}")
-
-                            cond_resp_text = f"IF '{resolved_target}' -> {branch_key.upper()}"
-                            if effective_flow_type == 'mobile' and e2e_executor:
-                                _acq = getattr(e2e_executor, '_acquired_device_info', None) or {}
-                                _dev_obj = _acq.get('device')
-                                _dev_lbl = (getattr(_dev_obj, 'label', None) or _acq.get('device_name') or (getattr(e2e_executor, '_settings', {}) or {}).get('device_name') or '').strip()
-                                if _dev_lbl:
-                                    cond_resp_text = f"{cond_resp_text} [Device: {_dev_lbl}]"
-
-                            cond_hist = ExecutionHistoryCreate(
-                                batch_id=f"{base_batch_id}_path_{path_number}",
-                                api_id=str(current_id),
-                                api_name=f"IF: {resolved_target or cond_card.get('name', 'Condição')} -> {branch_key.upper()}",
-                                project_id=p_id or product_id,
-                                flow_id=flow_meta.get('id'),
-                                node_id=current_id,
-                                schedule_id=schedule_id,
-                                feature_name=feature_name,
-                                node_name=cond_card.get('name') or 'Condicional (IF / ELSE)',
-                                method=actual_exec_type.upper(),
-                                url="",
-                                status_code=200,
-                                status_text=f"Branch {branch_key.upper()}",
-                                response_body=cond_resp_text,
-                                response_time=cond_dur,
-                                environment_id=env_id,
-                                execution_type=actual_exec_type,
-                                retry_count=current_session_retry_count
+                            _save_control_history(
+                                current_id,
+                                cond_card.get('name') or 'Condicional (IF / ELSE)',
+                                f"IF: {resolved_target or cond_card.get('name', 'Condição')} -> {branch_key.upper()}",
+                                f"Branch {branch_key.upper()}",
+                                f"IF '{resolved_target}' -> {branch_key.upper()}",
+                                cond_dur,
                             )
-                            HistoryService.save_batch(db, [cond_hist], user_id)
-                            flow_success_count += 1
-
-                            # Queue chosen branch downstream nodes (stopping at nested condition nodes)
-                            branch_queue = list(condition_branches[current_id].get(branch_key, []))
-                            visited_branch = set(dynamic_nodes[:node_idx])
-                            branch_ordered = []
-                            while branch_queue:
-                                nxt_id = branch_queue.pop(0)
-                                if nxt_id in visited_branch:
-                                    continue
-                                visited_branch.add(nxt_id)
-                                branch_ordered.append(nxt_id)
-                                if nxt_id not in condition_branches:
-                                    for child_id in adj.get(nxt_id, []):
-                                        if child_id not in visited_branch:
-                                            branch_queue.append(child_id)
+                            branch_ordered = _collect_branch_nodes(
+                                condition_branches[current_id].get(branch_key, []),
+                                [x for x in dynamic_nodes[:node_idx] if not isinstance(x, tuple)],
+                            )
                             if branch_ordered:
                                 dynamic_nodes[node_idx:node_idx] = branch_ordered
                             continue
+
+                        # Runtime LOOP (REPEAT / FOR EACH / WHILE)
+                        if current_id in loop_branches:
+                            loop_card = cards.get(current_id) or {}
+                            loop_meta = (node_map.get(current_id) or {}).get('data') or {}
+                            loop_cfg = (
+                                loop_meta.get('loopConfig')
+                                or loop_card.get('loopConfig')
+                                or (loop_card.get('envData') or {}).get('__loopConfig')
+                                or {}
+                            )
+                            loop_type = str(loop_cfg.get('loopType') or 'repeat_count').lower()
+                            state = loop_runtime_state.setdefault(current_id, {'iter': 0, 'items': None})
+                            loop_start_t = time.time()
+                            should_continue = False
+
+                            if loop_type == 'repeat_count':
+                                try:
+                                    raw_cnt = FlowExecutorService.replace_vars(str(loop_cfg.get('count') or 3), current_path_vars)
+                                    max_count = min(max(int(float(raw_cnt or 0)), 0), 50)
+                                except Exception:
+                                    max_count = 3
+                                should_continue = state['iter'] < max_count
+                            elif loop_type == 'for_each':
+                                if state['items'] is None:
+                                    raw_var = str(loop_cfg.get('itemsVar') or '').strip()
+                                    var_name = raw_var[2:-2].strip() if (raw_var.startswith('{{') and raw_var.endswith('}}')) else raw_var
+                                    raw_val = _get_path_var(var_name, None)
+                                    if raw_val is None:
+                                        raw_val = FlowExecutorService.replace_vars(raw_var, current_path_vars)
+                                    parsed_items = []
+                                    if isinstance(raw_val, list):
+                                        parsed_items = raw_val
+                                    else:
+                                        raw_str = str(raw_val or '').strip()
+                                        if raw_str.startswith('['):
+                                            try:
+                                                loaded_arr = json.loads(raw_str)
+                                                if isinstance(loaded_arr, list):
+                                                    parsed_items = loaded_arr
+                                            except Exception:
+                                                parsed_items = []
+                                        elif raw_str:
+                                            parsed_items = [x.strip() for x in raw_str.split(',') if x.strip()]
+                                    state['items'] = parsed_items[:50]
+                                items_list = state['items'] or []
+                                should_continue = state['iter'] < len(items_list)
+                                if should_continue:
+                                    cur_item = items_list[state['iter']]
+                                    item_var = str(loop_cfg.get('itemVar') or 'loop_item').strip() or 'loop_item'
+                                    if isinstance(cur_item, dict):
+                                        _set_path_var(item_var, json.dumps(cur_item, ensure_ascii=False))
+                                        for k_item, v_item in cur_item.items():
+                                            _set_path_var(f"{item_var}.{k_item}", str(v_item))
+                                    else:
+                                        _set_path_var(item_var, str(cur_item))
+                            else:
+                                try:
+                                    max_iter = min(max(int(loop_cfg.get('maxIterations') or 5), 1), 50)
+                                except Exception:
+                                    max_iter = 5
+                                if state['iter'] < max_iter:
+                                    should_continue, _ = await _eval_runtime_condition(loop_cfg)
+
+                            loop_dur = int((time.time() - loop_start_t) * 1000)
+                            if should_continue:
+                                cur_idx = state['iter']
+                                state['iter'] += 1
+                                _set_path_var('loop_index', str(cur_idx))
+                                _set_path_var('loop_iteration', str(cur_idx + 1))
+                                logger.info(f"🔁 [LOOP] '{loop_card.get('name', 'Loop')}' Iteration #{cur_idx + 1}")
+                                _save_control_history(
+                                    current_id,
+                                    loop_card.get('name') or 'Laço de Repetição (LOOP)',
+                                    f"LOOP #{cur_idx + 1} ({loop_type})",
+                                    f"Iteration {cur_idx + 1}",
+                                    f"Executing LOOP body (iteration {cur_idx + 1})",
+                                    loop_dur,
+                                )
+                                body_nodes = _collect_branch_nodes(loop_branches[current_id].get('loop', []), set())
+                                dynamic_nodes[node_idx:node_idx] = body_nodes + [("__LOOP_STEP__", current_id)]
+                            else:
+                                logger.info(f"✅ [LOOP] '{loop_card.get('name', 'Loop')}' Finished after {state['iter']} iterations -> DONE")
+                                _save_control_history(
+                                    current_id,
+                                    loop_card.get('name') or 'Laço de Repetição (LOOP)',
+                                    f"LOOP DONE ({state['iter']} iterations)",
+                                    "Loop Done",
+                                    f"LOOP finished after {state['iter']} iterations -> DONE",
+                                    loop_dur,
+                                )
+                                done_nodes = _collect_branch_nodes(loop_branches[current_id].get('done', []), set())
+                                if done_nodes:
+                                    dynamic_nodes[node_idx:node_idx] = done_nodes
+                            continue
+
+                        # Runtime TRY / CATCH Block
+                        if current_id in try_catch_branches:
+                            tc_card = cards.get(current_id) or {}
+                            logger.info(f"🛡️ [TRY/CATCH] Entering TRY block for '{tc_card.get('name', 'Try/Catch')}'")
+                            _save_control_history(
+                                current_id,
+                                tc_card.get('name') or 'Tratamento de Erro (TRY / CATCH)',
+                                "TRY/CATCH: Entering TRY block",
+                                "Try Started",
+                                "Entering protected TRY flow",
+                                0,
+                            )
+                            try_nodes = _collect_branch_nodes(try_catch_branches[current_id].get('try', []), set())
+                            dynamic_nodes[node_idx:node_idx] = try_nodes + [("__TRY_CATCH_END__", current_id, flow_fail_count)]
+                            continue
+
+                        last_executed_node_id = current_id
 
                         is_target_failed = False
                         if failed_node_ids:
@@ -1513,7 +1755,8 @@ class FlowExecutorService:
                 logger.info(f"    ⚠️ No Environment selected for Feature. Fallback to First Env: {fallback_env.name} (ID: {fallback_env.id})")
 
         # list_by_project actually returns flows for a "feature" (project in old naming)
-        flows = FlowService.list_by_project(db, feature.id, company_id)
+        definitive_only = FlowService.is_definitive_only_schedule(db, schedule_id)
+        flows = FlowService.list_by_project(db, feature.id, company_id, definitive_only=definitive_only)
         variables = FlowExecutorService.get_merged_variables(db, feature.product_id, env_id)
 
         success_count = 0
@@ -1631,11 +1874,12 @@ class FlowExecutorService:
 
     @staticmethod
     def execute_flow_by_id(db: Session, flow_id: str, env_id: int, company_id: int, schedule_id: int = None, user_id: int = 1, max_concurrency: int = None, flow_type: str = 'api', capture_video: bool = False, capture_screenshot: bool = False, visible_execution: bool = False, dataset_row: dict = None, failed_item_ids: list = None, mobile_parallel_mode: str = 'distribute', mobile_device_ids: list = None):
+        definitive_only = FlowService.is_definitive_only_schedule(db, schedule_id)
         flow_meta = None
         # 1. Try loading by FlowDB.id directly if numeric
         try:
             numeric_id = int(flow_id)
-            flow_meta = FlowService.load(db, flow_id=numeric_id, company_id=company_id)
+            flow_meta = FlowService.load(db, flow_id=numeric_id, company_id=company_id, definitive_only=definitive_only)
         except (ValueError, TypeError):
             pass
 
@@ -1643,7 +1887,7 @@ class FlowExecutorService:
         if not flow_meta or not flow_meta.get('nodes'):
             try:
                 numeric_proj_id = int(flow_id)
-                flow_meta = FlowService.load(db, project_id=numeric_proj_id, company_id=company_id, flow_type=flow_type)
+                flow_meta = FlowService.load(db, project_id=numeric_proj_id, company_id=company_id, flow_type=flow_type, definitive_only=definitive_only)
             except (ValueError, TypeError):
                 pass
 
@@ -1797,7 +2041,8 @@ class FlowExecutorService:
             start_t = time.time()
             try:
                 logger.info(f"  📂 Feature '{feature['name']}' (ID: {feature['id']}, device_id={target_device_id}) STARTED at t={start_t:.2f}")
-                flows = FlowService.list_by_project(thread_db, feature['id'], company_id)
+                definitive_only = FlowService.is_definitive_only_schedule(thread_db, schedule_id)
+                flows = FlowService.list_by_project(thread_db, feature['id'], company_id, definitive_only=definitive_only)
                 
                 if flows:
                     latest_flow, resolved_ft = FlowExecutorService._select_executable_flow(flows, flow_type)

@@ -574,7 +574,7 @@ def test_flow_executor_conditional_if_else_runs_only_matching_branch():
 
             async def execute_step(self, step, **kwargs):
                 executed_steps.append(step["id"])
-                return {"status": 200, "duration": 10, "screenshot": None, "error": None}
+                return {"status": 200, "reason": "OK", "text": "OK", "duration": 10, "screenshot": None, "error": None}
 
             async def stop(self):
                 return None
@@ -599,6 +599,691 @@ def test_flow_executor_conditional_if_else_runs_only_matching_branch():
 
     assert run_with_condition(True) == ["s_true"]
     assert run_with_condition(False) == ["s_false"]
+
+
+def test_flow_executor_loop_repeat_count_runs_body_n_times_then_done():
+    from unittest.mock import patch
+    from app.services.flow_executor_service import FlowExecutorService
+
+    flow_data = {
+        "id": 2,
+        "nodes": [
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {}},
+            {
+                "id": "loop_1",
+                "type": "custom",
+                "position": {"x": 100, "y": 0},
+                "data": {
+                    "name": "Repeat 3x",
+                    "nodeType": "loop",
+                    "loopConfig": {"loopType": "repeat_count", "count": 3},
+                },
+            },
+            {"id": "node_body", "type": "custom", "position": {"x": 200, "y": 0}, "data": {"name": "Body", "nodeType": "e2e"}},
+            {"id": "node_done", "type": "custom", "position": {"x": 200, "y": 100}, "data": {"name": "Done", "nodeType": "e2e"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "start", "target": "loop_1"},
+            {"id": "e2", "source": "loop_1", "target": "node_body", "sourceHandle": "loop", "label": "LOOP"},
+            {"id": "e3", "source": "loop_1", "target": "node_done", "sourceHandle": "done", "label": "DONE"},
+        ],
+        "cardData": {
+            "loop_1": {"name": "Repeat 3x", "nodeType": "loop"},
+            "node_body": {
+                "name": "Body",
+                "nodeType": "e2e",
+                "e2eSteps": [{"id": "s_body", "type": "click", "name": "Iter {{loop_iteration}}", "properties": {"selector": "#item-{{loop_index}}"}}],
+            },
+            "node_done": {
+                "name": "Done",
+                "nodeType": "e2e",
+                "e2eSteps": [{"id": "s_done", "type": "click", "name": "Done", "properties": {"selector": "#done"}}],
+            },
+        },
+    }
+
+    executed = []
+
+    class FakePlaywright:
+        def __init__(self, headless=True):
+            self.schedule_id = None
+            self.project_id = None
+
+        async def start(self, video_dir=None):
+            return None
+
+        async def execute_step(self, step, **kwargs):
+            executed.append((step["id"], step.get("properties", {}).get("selector")))
+            return {"status": 200, "reason": "OK", "text": "OK", "duration": 5, "screenshot": None, "error": None}
+
+        def pop_captured_requests(self):
+            return []
+
+        async def stop(self):
+            return None
+
+    db = MagicMock()
+    with patch("app.services.history_service.HistoryService.save_batch", return_value=[]), \
+         patch("app.services.playwright_executor_service.PlaywrightExecutorService", FakePlaywright), \
+         patch.object(FlowExecutorService, "_is_execution_cancelled", return_value=False):
+        s_cnt, f_cnt = FlowExecutorService.execute_flow_logic(
+            db=db,
+            flow_meta=flow_data,
+            product_id=1,
+            env_id=1,
+            company_id=1,
+            variables_dict={},
+            feature_name="Loop Test",
+            schedule_id=None,
+            flow_type="e2e",
+            capture_video=False,
+        )
+
+    assert f_cnt == 0
+    assert executed == [
+        ("s_body", "#item-0"),
+        ("s_body", "#item-1"),
+        ("s_body", "#item-2"),
+        ("s_done", "#done"),
+    ]
+
+
+def test_flow_executor_try_catch_runs_catch_branch_on_error_and_recovers():
+    from unittest.mock import patch
+    from app.services.flow_executor_service import FlowExecutorService
+
+    flow_data = {
+        "id": 3,
+        "nodes": [
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {}},
+            {
+                "id": "tc_1",
+                "type": "custom",
+                "position": {"x": 100, "y": 0},
+                "data": {
+                    "name": "Try Protected",
+                    "nodeType": "try_catch",
+                    "tryCatchConfig": {"continueOnError": True, "errorVar": "last_error"},
+                },
+            },
+            {"id": "node_try", "type": "custom", "position": {"x": 200, "y": 0}, "data": {"name": "Try Fail Step", "nodeType": "e2e"}},
+            {"id": "node_catch", "type": "custom", "position": {"x": 200, "y": 100}, "data": {"name": "Cleanup Catch", "nodeType": "e2e"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "start", "target": "tc_1"},
+            {"id": "e2", "source": "tc_1", "target": "node_try", "sourceHandle": "try", "label": "TRY"},
+            {"id": "e3", "source": "tc_1", "target": "node_catch", "sourceHandle": "catch", "label": "CATCH"},
+        ],
+        "cardData": {
+            "tc_1": {"name": "Try Protected", "nodeType": "try_catch"},
+            "node_try": {
+                "name": "Try Fail Step",
+                "nodeType": "e2e",
+                "e2eSteps": [{"id": "s_try_fail", "type": "click", "name": "Fail", "properties": {"selector": "#missing"}}],
+            },
+            "node_catch": {
+                "name": "Cleanup Catch",
+                "nodeType": "e2e",
+                "e2eSteps": [{"id": "s_catch_ok", "type": "click", "name": "Cleanup", "properties": {"selector": "#cleanup", "failedNode": "{{failed_node}}"}}],
+            },
+        },
+    }
+
+    executed = []
+
+    class FakePlaywright:
+        def __init__(self, headless=True):
+            self.schedule_id = None
+            self.project_id = None
+
+        async def start(self, video_dir=None):
+            return None
+
+        async def execute_step(self, step, **kwargs):
+            executed.append((step["id"], step.get("properties", {}).get("failedNode")))
+            if step["id"] == "s_try_fail":
+                return {"status": 500, "reason": "Not Found", "text": "Element not found", "duration": 5, "screenshot": None, "error": "Element not found"}
+            return {"status": 200, "reason": "OK", "text": "OK", "duration": 5, "screenshot": None, "error": None}
+
+        def pop_captured_requests(self):
+            return []
+
+        async def stop(self):
+            return None
+
+    db = MagicMock()
+    with patch("app.services.history_service.HistoryService.save_batch", return_value=[]), \
+         patch("app.services.playwright_executor_service.PlaywrightExecutorService", FakePlaywright), \
+         patch.object(FlowExecutorService, "_is_execution_cancelled", return_value=False):
+        s_cnt, f_cnt = FlowExecutorService.execute_flow_logic(
+            db=db,
+            flow_meta=flow_data,
+            product_id=1,
+            env_id=1,
+            company_id=1,
+            variables_dict={},
+            feature_name="TryCatch Test",
+            schedule_id=None,
+            flow_type="e2e",
+            capture_video=False,
+        )
+
+    assert f_cnt == 0
+    assert executed == [
+        ("s_try_fail", None),
+        ("s_catch_ok", "node_try"),
+    ]
+
+
+def test_flow_service_version_control_records_and_restores_previous_version(db_session):
+    from app.models.company_models import CompanyDB
+    from app.models.product_models import ProductModel
+    from app.models.feature_models import FeatureModel
+    from app.models.user_models import UserDB
+    from app.schemas.flow_schemas import FlowSaveSchema
+    from app.services.flow_service import FlowService
+
+    company = CompanyDB(name="Version Test Co")
+    db_session.add(company)
+    db_session.flush()
+
+    user = UserDB(
+        username="version_tester",
+        email="version_tester@example.com",
+        hashed_password="secret",
+        full_name="Version Tester",
+        company_id=company.id,
+    )
+    db_session.add(user)
+    db_session.flush()
+
+    product = ProductModel(name="Flow Product", company_id=company.id)
+    db_session.add(product)
+    db_session.flush()
+
+    feature = FeatureModel(name="Login Feature", product_id=product.id)
+    db_session.add(feature)
+    db_session.commit()
+
+    payload_draft_1a = FlowSaveSchema(
+        projectId=feature.id,
+        name="Fluxo Mobile",
+        flow_type="mobile",
+        nodes=[
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {"name": "Start"}},
+            {"id": "card_1", "type": "custom", "position": {"x": 200, "y": 0}, "data": {"name": "Abrir App", "nodeType": "mobile"}},
+        ],
+        edges=[{"id": "e1", "source": "start", "target": "card_1"}],
+        cardData={
+            "card_1": {
+                "name": "Abrir App",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s1", "type": "click", "name": "Tap Login", "properties": {"selector": "id=login"}}],
+            }
+        },
+        is_definitive=False,
+    )
+
+    # 1) Multiple small adjustments consolidate into ONE single draft version (v1, is_definitive=False)
+    res1a = FlowService.save(db_session, payload_draft_1a, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert res1a["version_number"] == 1
+    assert res1a["is_definitive"] is False
+    assert res1a["has_uncommitted_draft"] is True
+    assert FlowService.load(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile")["has_uncommitted_draft"] is True
+
+    payload_draft_1b = FlowSaveSchema(
+        projectId=feature.id,
+        name="Fluxo Mobile",
+        flow_type="mobile",
+        nodes=[
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {"name": "Start"}},
+            {"id": "card_1", "type": "custom", "position": {"x": 240, "y": 20}, "data": {"name": "Abrir App Editado", "nodeType": "mobile"}},
+        ],
+        edges=[{"id": "e1", "source": "start", "target": "card_1"}],
+        cardData={
+            "card_1": {
+                "name": "Abrir App Editado",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s1", "type": "click", "name": "Tap Login", "properties": {"selector": "id=login"}}],
+            }
+        },
+        is_definitive=False,
+    )
+    res1b = FlowService.save(db_session, payload_draft_1b, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert res1b["version_number"] == 1
+    assert res1b["is_definitive"] is False
+
+    listing_draft_only = FlowService.list_versions(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile")
+    assert len(listing_draft_only["versions"]) == 1
+    assert listing_draft_only["has_uncommitted_draft"] is True
+
+    # Rollback on non-definitive draft must be rejected
+    try:
+        FlowService.restore_version(db_session, version_id=listing_draft_only["versions"][0]["id"], company_id=company.id, user_id=user.id)
+        assert False, "Expected ValueError when restoring non-definitive draft"
+    except ValueError:
+        pass
+
+    # 2) Definitive Save seals v1 (still version_number=1)
+    payload_v1_def = FlowSaveSchema(**{**payload_draft_1b.model_dump(), "is_definitive": True})
+    res1_def = FlowService.save(db_session, payload_v1_def, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert res1_def["version_number"] == 1
+    assert res1_def["is_definitive"] is True
+
+    # Duplicate auto-save without changes does not create draft
+    res_dup = FlowService.save(db_session, payload_draft_1b, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert res_dup["version_id"] is None
+
+    # 3) Make two small adjustments on top of v1 -> accumulates into v2 draft (is_definitive=False)
+    payload_draft_2a = FlowSaveSchema(
+        projectId=feature.id,
+        name="Fluxo Mobile",
+        flow_type="mobile",
+        nodes=[
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {"name": "Start"}},
+            {"id": "card_1", "type": "custom", "position": {"x": 240, "y": 20}, "data": {"name": "Abrir App Editado", "nodeType": "mobile"}},
+            {"id": "card_2", "type": "custom", "position": {"x": 450, "y": 0}, "data": {"name": "Card Temporário", "nodeType": "mobile"}},
+        ],
+        edges=[
+            {"id": "e1", "source": "start", "target": "card_1"},
+            {"id": "e2", "source": "card_1", "target": "card_2"},
+        ],
+        cardData={
+            **payload_draft_1b.model_dump()["cardData"],
+            "card_2": {
+                "name": "Card Temporário",
+                "nodeType": "mobile",
+                "e2eSteps": [],
+            },
+        },
+        is_definitive=False,
+    )
+    res2a = FlowService.save(db_session, payload_draft_2a, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert res2a["version_number"] == 2
+    assert res2a["is_definitive"] is False
+
+    payload_draft_2b = FlowSaveSchema(
+        projectId=feature.id,
+        name="Fluxo Mobile",
+        flow_type="mobile",
+        nodes=[
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {"name": "Start"}},
+            {"id": "card_1", "type": "custom", "position": {"x": 240, "y": 20}, "data": {"name": "Abrir App Editado", "nodeType": "mobile"}},
+            {"id": "card_2", "type": "custom", "position": {"x": 450, "y": 0}, "data": {"name": "Confirmar Home", "nodeType": "mobile"}},
+        ],
+        edges=[
+            {"id": "e1", "source": "start", "target": "card_1"},
+            {"id": "e2", "source": "card_1", "target": "card_2"},
+        ],
+        cardData={
+            **payload_draft_1b.model_dump()["cardData"],
+            "card_2": {
+                "name": "Confirmar Home",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s2", "type": "assertText", "name": "Check Home", "properties": {"text": "Bem-vindo"}}],
+            },
+        },
+        is_definitive=False,
+    )
+    res2b = FlowService.save(db_session, payload_draft_2b, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert res2b["version_number"] == 2
+    assert res2b["is_definitive"] is False
+
+    listing = FlowService.list_versions(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile")
+    versions = listing["versions"]
+    assert [v["version_number"] for v in versions] == [2, 1]
+    assert versions[0]["is_definitive"] is False
+    assert versions[0]["is_current"] is True
+    assert versions[1]["is_definitive"] is True
+    assert versions[1]["is_current"] is False
+    assert listing["has_uncommitted_draft"] is True
+
+    # Cannot rollback to draft v2
+    try:
+        FlowService.restore_version(db_session, version_id=versions[0]["id"], company_id=company.id, user_id=user.id)
+        assert False, "Expected ValueError for non-definitive version"
+    except ValueError:
+        pass
+
+    # Cross-company restore must also be rejected
+    try:
+        FlowService.restore_version(db_session, version_id=versions[1]["id"], company_id=company.id + 999, user_id=user.id)
+        assert False, "Expected ValueError for foreign company"
+    except ValueError:
+        pass
+
+    # Rolling back to v1 while in draft v2 loads v1 in temporary validation mode (not definitive yet)
+    discarded_res = FlowService.restore_version(
+        db_session,
+        version_id=versions[1]["id"],
+        company_id=company.id,
+        user_id=user.id,
+        user_name=user.full_name,
+    )
+    assert discarded_res["is_definitive"] is False
+    assert discarded_res["has_uncommitted_draft"] is True
+    assert {n["id"] for n in discarded_res["flow"]["nodes"]} == {"start", "card_1"}
+    # Confirming with Definitive Save deduplicates back cleanly to v1
+    confirmed_v1 = FlowService.save(db_session, payload_v1_def, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert confirmed_v1["has_uncommitted_draft"] is False
+    after_discard = FlowService.list_versions(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile")
+    assert [v["version_number"] for v in after_discard["versions"]] == [1]
+    assert after_discard["has_uncommitted_draft"] is False
+
+    # 4) Commit a new definitive v2, then restore definitive v1 -> stages v3 as TEMPORARY draft for validation/execution
+    payload_v2_def = FlowSaveSchema(**{**payload_draft_2b.model_dump(), "is_definitive": True})
+    res2_def = FlowService.save(db_session, payload_v2_def, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert res2_def["version_number"] == 2
+    assert res2_def["is_definitive"] is True
+
+    listing_two_def = FlowService.list_versions(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile")
+    assert [v["version_number"] for v in listing_two_def["versions"]] == [2, 1]
+    assert all(v["is_definitive"] is True for v in listing_two_def["versions"])
+
+    restored = FlowService.restore_version(
+        db_session,
+        version_id=listing_two_def["versions"][1]["id"],
+        company_id=company.id,
+        user_id=user.id,
+        user_name=user.full_name,
+    )
+    assert restored["status"] == "restored"
+    assert restored["restored_from_version_number"] == 1
+    assert restored["new_version_number"] == 3
+    assert restored["is_definitive"] is False
+    assert restored["has_uncommitted_draft"] is True
+    assert {n["id"] for n in restored["flow"]["nodes"]} == {"start", "card_1"}
+    assert list(restored["flow"]["cardData"].keys()) == ["card_1"]
+
+    # On screen / Play execution sees temporary restored v1, while Schedules/Pipelines still execute definitive v2
+    screen_flow = FlowService.load(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile", definitive_only=False)
+    assert list(screen_flow["cardData"].keys()) == ["card_1"]
+    assert screen_flow["has_uncommitted_draft"] is True
+    sched_flow = FlowService.load(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile", definitive_only=True)
+    assert set(sched_flow["cardData"].keys()) == {"card_1", "card_2"}
+    assert sched_flow["version_number"] == 2
+
+    listing_pending = FlowService.list_versions(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile")
+    assert [v["version_number"] for v in listing_pending["versions"]] == [3, 2, 1]
+    assert listing_pending["versions"][0]["is_current"] is True
+    assert listing_pending["versions"][0]["is_definitive"] is False
+    assert listing_pending["has_uncommitted_draft"] is True
+    assert "v1" in (listing_pending["versions"][0]["summary"] or "")
+
+    # 5) Once user validates on screen and clicks Definitive Save, v3 is sealed definitively
+    sealed_v3 = FlowService.save(db_session, payload_v1_def, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert sealed_v3["version_number"] == 3
+    assert sealed_v3["is_definitive"] is True
+    assert sealed_v3["has_uncommitted_draft"] is False
+    sched_after_confirm = FlowService.load(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile", definitive_only=True)
+    assert list(sched_after_confirm["cardData"].keys()) == ["card_1"]
+    assert sched_after_confirm["version_number"] == 3
+
+
+def test_schedules_and_pipelines_load_only_definitive_version(db_session):
+    from app.models.company_models import CompanyDB
+    from app.models.product_models import ProductModel
+    from app.models.feature_models import FeatureModel
+    from app.models.schedule_models import ScheduleModel
+    from app.models.user_models import UserDB
+    from app.schemas.flow_schemas import FlowSaveSchema
+    from app.services.flow_service import FlowService
+
+    company = CompanyDB(name="Schedule Def Co")
+    db_session.add(company)
+    db_session.flush()
+
+    user = UserDB(
+        username="sched_tester",
+        email="sched_tester@example.com",
+        hashed_password="secret",
+        full_name="Schedule Tester",
+        company_id=company.id,
+    )
+    db_session.add(user)
+    db_session.flush()
+
+    product = ProductModel(name="Schedule Product", company_id=company.id)
+    db_session.add(product)
+    db_session.flush()
+
+    feature = FeatureModel(name="Checkout Feature", product_id=product.id)
+    db_session.add(feature)
+    db_session.commit()
+
+    # Draft-only flow (never saved definitively) -> definitive_only returns empty
+    payload_draft_only = FlowSaveSchema(
+        projectId=feature.id,
+        name="Fluxo Checkout",
+        flow_type="mobile",
+        nodes=[
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {"name": "Start"}},
+            {"id": "card_1", "type": "custom", "position": {"x": 200, "y": 0}, "data": {"name": "Passo Rascunho", "nodeType": "mobile"}},
+        ],
+        edges=[{"id": "e1", "source": "start", "target": "card_1"}],
+        cardData={
+            "card_1": {
+                "name": "Passo Rascunho",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s1", "type": "click", "name": "Tap", "properties": {"selector": "id=a"}}],
+            }
+        },
+        is_definitive=False,
+    )
+    FlowService.save(db_session, payload_draft_only, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert FlowService.load(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile", definitive_only=False)["cardData"].keys() == {"card_1"}
+    assert FlowService.load(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile", definitive_only=True)["nodes"] == []
+
+    # Commit v1 definitively
+    FlowService.save(
+        db_session,
+        FlowSaveSchema(**{**payload_draft_only.model_dump(), "is_definitive": True}),
+        company_id=company.id,
+        user_id=user.id,
+        user_name=user.full_name,
+    )
+
+    # Add uncommitted draft v2 with extra card_2
+    payload_v2_draft = FlowSaveSchema(
+        projectId=feature.id,
+        name="Fluxo Checkout",
+        flow_type="mobile",
+        nodes=[
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {"name": "Start"}},
+            {"id": "card_1", "type": "custom", "position": {"x": 200, "y": 0}, "data": {"name": "Passo Rascunho", "nodeType": "mobile"}},
+            {"id": "card_2", "type": "custom", "position": {"x": 400, "y": 0}, "data": {"name": "Passo Novo Em Teste", "nodeType": "mobile"}},
+        ],
+        edges=[
+            {"id": "e1", "source": "start", "target": "card_1"},
+            {"id": "e2", "source": "card_1", "target": "card_2"},
+        ],
+        cardData={
+            "card_1": {
+                "name": "Passo Rascunho",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s1", "type": "click", "name": "Tap", "properties": {"selector": "id=a"}}],
+            },
+            "card_2": {
+                "name": "Passo Novo Em Teste",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s2", "type": "click", "name": "Tap 2", "properties": {"selector": "id=b"}}],
+            },
+        },
+        is_definitive=False,
+    )
+    FlowService.save(db_session, payload_v2_draft, company_id=company.id, user_id=user.id, user_name=user.full_name)
+
+    # Interactive Play loads draft (card_1 + card_2)
+    live_flow = FlowService.load(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile", definitive_only=False)
+    assert set(live_flow["cardData"].keys()) == {"card_1", "card_2"}
+
+    # Schedules / Pipelines load ONLY definitive v1 (card_1)
+    def_flow = FlowService.load(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile", definitive_only=True)
+    assert set(def_flow["cardData"].keys()) == {"card_1"}
+    assert def_flow["version_number"] == 1
+    assert def_flow["is_definitive"] is True
+
+    def_list = FlowService.list_by_project(db_session, project_id=feature.id, company_id=company.id, definitive_only=True)
+    assert len(def_list) == 1
+    assert def_list[0]["steps_count"] == 1
+
+    # Verify schedule classification (manual Play vs Scheduled Agendamento vs CI/CD Pipeline)
+    manual_sched = ScheduleModel(name="MOBILE – Checkout", type="feature", target_id=feature.id, is_manual=True, cron_expression=None, company_id=company.id, user_id=user.id)
+    cron_sched = ScheduleModel(name="Nightly Regression", type="feature", target_id=feature.id, is_manual=False, cron_expression="0 3 * * *", company_id=company.id, user_id=user.id)
+    pipeline_sched = ScheduleModel(name="CI/CD: Schedule Product", type="suite", target_id=product.id, is_manual=True, cron_expression=None, company_id=company.id, user_id=user.id)
+    pipeline_tag_sched = ScheduleModel(name="[PIPELINE] Release", type="suite", target_id=product.id, is_manual=True, cron_expression=None, company_id=company.id, user_id=user.id)
+    db_session.add_all([manual_sched, cron_sched, pipeline_sched, pipeline_tag_sched])
+    db_session.commit()
+
+    assert FlowService.is_definitive_only_schedule(db_session, manual_sched.id) is False
+    assert FlowService.is_definitive_only_schedule(db_session, cron_sched.id) is True
+    assert FlowService.is_definitive_only_schedule(db_session, pipeline_sched.id) is True
+    assert FlowService.is_definitive_only_schedule(db_session, pipeline_tag_sched.id) is True
+    assert FlowService.is_definitive_only_schedule(db_session, None) is False
+
+
+def test_flow_service_discard_draft_reverts_to_last_definitive_version(db_session):
+    from app.models.company_models import CompanyDB
+    from app.models.product_models import ProductModel
+    from app.models.feature_models import FeatureModel
+    from app.models.user_models import UserDB
+    from app.schemas.flow_schemas import FlowSaveSchema
+    from app.services.flow_service import FlowService
+
+    company = CompanyDB(name="Discard Test Co")
+    db_session.add(company)
+    db_session.flush()
+
+    user = UserDB(
+        username="discard_tester",
+        email="discard_tester@example.com",
+        hashed_password="secret",
+        full_name="Discard Tester",
+        company_id=company.id,
+    )
+    db_session.add(user)
+    db_session.flush()
+
+    product = ProductModel(name="Discard Product", company_id=company.id)
+    db_session.add(product)
+    db_session.flush()
+
+    feature = FeatureModel(name="Discard Feature", product_id=product.id)
+    db_session.add(feature)
+    db_session.commit()
+
+    # 1. Save an initial draft before any definitive version exists, then discard it -> reverts to empty
+    draft_only = FlowSaveSchema(
+        projectId=feature.id,
+        name="Fluxo Rascunho Inicial",
+        flow_type="mobile",
+        nodes=[
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {"name": "Start"}},
+            {"id": "tmp_1", "type": "custom", "position": {"x": 150, "y": 0}, "data": {"name": "Card Temporário", "nodeType": "mobile"}},
+        ],
+        edges=[{"id": "e0", "source": "start", "target": "tmp_1"}],
+        cardData={
+            "tmp_1": {
+                "name": "Card Temporário",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s0", "type": "click", "name": "Tap", "properties": {"selector": "id=tmp"}}],
+            }
+        },
+        is_definitive=False,
+    )
+    save_initial_draft = FlowService.save(db_session, draft_only, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert save_initial_draft["has_uncommitted_draft"] is True
+
+    discard_empty_res = FlowService.discard_draft(
+        db_session,
+        project_id=feature.id,
+        company_id=company.id,
+        user_id=user.id,
+        flow_type="mobile",
+        user_name=user.full_name,
+    )
+    assert discard_empty_res["has_uncommitted_draft"] is False
+    assert discard_empty_res["restored_to_version_number"] is None
+    assert discard_empty_res["flow"]["nodes"] == []
+    assert discard_empty_res["flow"]["cardData"] == {}
+
+    # 2. Save definitive v1
+    v1_payload = FlowSaveSchema(
+        projectId=feature.id,
+        name="Fluxo Definitivo",
+        flow_type="mobile",
+        nodes=[
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {"name": "Start"}},
+            {"id": "card_1", "type": "custom", "position": {"x": 200, "y": 0}, "data": {"name": "Login", "nodeType": "mobile"}},
+        ],
+        edges=[{"id": "e1", "source": "start", "target": "card_1"}],
+        cardData={
+            "card_1": {
+                "name": "Login",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s1", "type": "click", "name": "Entrar", "properties": {"selector": "id=btn_login"}}],
+            }
+        },
+        is_definitive=True,
+    )
+    v1_save = FlowService.save(db_session, v1_payload, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert v1_save["has_uncommitted_draft"] is False
+    assert v1_save["is_definitive"] is True
+
+    # 3. Make uncommitted draft modifications (add card_2 + rename card_1)
+    draft_v2_payload = FlowSaveSchema(
+        projectId=feature.id,
+        name="Fluxo Definitivo",
+        flow_type="mobile",
+        nodes=[
+            {"id": "start", "type": "startNode", "position": {"x": 0, "y": 0}, "data": {"name": "Start"}},
+            {"id": "card_1", "type": "custom", "position": {"x": 200, "y": 0}, "data": {"name": "Login Alterado", "nodeType": "mobile"}},
+            {"id": "card_2", "type": "custom", "position": {"x": 400, "y": 0}, "data": {"name": "Teste Indesejado", "nodeType": "mobile"}},
+        ],
+        edges=[
+            {"id": "e1", "source": "start", "target": "card_1"},
+            {"id": "e2", "source": "card_1", "target": "card_2"},
+        ],
+        cardData={
+            "card_1": {
+                "name": "Login Alterado",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s1", "type": "click", "name": "Entrar", "properties": {"selector": "id=btn_login"}}],
+            },
+            "card_2": {
+                "name": "Teste Indesejado",
+                "nodeType": "mobile",
+                "e2eSteps": [{"id": "s2", "type": "click", "name": "Temp", "properties": {"selector": "id=tmp"}}],
+            },
+        },
+        is_definitive=False,
+    )
+    draft_res = FlowService.save(db_session, draft_v2_payload, company_id=company.id, user_id=user.id, user_name=user.full_name)
+    assert draft_res["has_uncommitted_draft"] is True
+    assert len(FlowService.list_versions(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile")["versions"]) == 2
+
+    # 4. Discard draft -> reverts completely to v1 definitive, deletes draft version row
+    discard_res = FlowService.discard_draft(
+        db_session,
+        project_id=feature.id,
+        company_id=company.id,
+        user_id=user.id,
+        flow_type="mobile",
+        user_name=user.full_name,
+    )
+    assert discard_res["has_uncommitted_draft"] is False
+    assert discard_res["restored_to_version_number"] == v1_save["version_number"]
+    assert set(discard_res["flow"]["cardData"].keys()) == {"card_1"}
+    assert discard_res["flow"]["cardData"]["card_1"]["name"] == "Login"
+
+    # Version history now only has the definitive v1
+    versions_after = FlowService.list_versions(db_session, project_id=feature.id, company_id=company.id, flow_type="mobile")
+    assert versions_after["has_uncommitted_draft"] is False
+    assert len(versions_after["versions"]) == 1
+    assert versions_after["versions"][0]["is_definitive"] is True
+
+
+
 
 
 

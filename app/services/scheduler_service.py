@@ -278,9 +278,11 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
             
             job_id = f"perf_{uuid.uuid4().hex}"
             
+            definitive_only = FlowService.is_definitive_only_schedule(db, schedule)
+
             # Helper to extract API list from a flow
             def extract_apis_from_flow(flow_id, proj_id):
-                flow_data = FlowService.load(db, proj_id, schedule.company_id, flow_id)
+                flow_data = FlowService.load(db, proj_id, schedule.company_id, flow_id, definitive_only=definitive_only)
                 cards = flow_data.get('cardData', {})
                 nodes = flow_data.get('nodes', [])
                 
@@ -306,7 +308,7 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
                     final_api_list = extract_apis_from_flow(f_db.id, f_db.project_id)
             elif schedule.type == 'feature':
                 # Get the first API flow of the feature to load test
-                flows = FlowService.list_by_project(db, schedule.target_id, schedule.company_id)
+                flows = FlowService.list_by_project(db, schedule.target_id, schedule.company_id, definitive_only=definitive_only)
                 api_flows = [f for f in flows if f.get('flow_type') == 'api']
                 if api_flows:
                     final_api_list = extract_apis_from_flow(api_flows[0]['id'], schedule.target_id)
@@ -315,7 +317,7 @@ def execute_job_logic(schedule_id: int, failed_item_ids: list = None):
                 from app.models.feature_models import FeatureModel
                 features = db.query(FeatureModel).filter(FeatureModel.product_id == schedule.target_id).all()
                 for feat in features:
-                    flows = FlowService.list_by_project(db, feat.id, schedule.company_id)
+                    flows = FlowService.list_by_project(db, feat.id, schedule.company_id, definitive_only=definitive_only)
                     for flow_obj in flows:
                         if flow_obj.get('flow_type') == 'api':
                             final_api_list.extend(extract_apis_from_flow(flow_obj['id'], feat.id))
