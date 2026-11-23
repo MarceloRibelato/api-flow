@@ -4,6 +4,7 @@ Extracted from flow_executor_service.py for modularity and testability.
 """
 import re
 import logging
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,20 @@ BLOCKED_DOMAINS = [
     "doubleclick.net", "google-analytics.com", "criteo.com",
     "pubmatic.com", "adnxs.com", "rubiconproject.com", "openx.net"
 ]
+
+# Internal Flow infrastructure hosts and cloud metadata endpoints (Anti-SSRF protection)
+INTERNAL_PROTECTED_HOSTS = {
+    "db",
+    "flow-db",
+    "redis",
+    "flow-redis",
+    "pgbouncer",
+    "flow-pgbouncer",
+    "license-manager",
+    "flow-license-manager",
+    "169.254.169.254",
+    "metadata.google.internal",
+}
 
 
 def sanitize_url_for_docker(url: str) -> str:
@@ -45,8 +60,25 @@ def sanitize_url_for_docker(url: str) -> str:
     return url
 
 
+def is_internal_protected_url(url: str) -> bool:
+    """Checks if a URL targets internal Flow infrastructure containers or cloud metadata endpoints (SSRF protection)."""
+    if not url:
+        return False
+    try:
+        candidate = url if "://" in url else f"http://{url}"
+        parsed = urlparse(candidate)
+        hostname = (parsed.hostname or "").strip().lower()
+        return hostname in INTERNAL_PROTECTED_HOSTS
+    except Exception:
+        return False
+
+
 def is_blocked_domain(url: str) -> bool:
-    """Checks if a URL belongs to a blocked domain (ads, tracking, etc.)."""
+    """Checks if a URL belongs to a blocked domain (ads, tracking, or internal protected SSRF targets)."""
+    if not url:
+        return False
+    if is_internal_protected_url(url):
+        return True
     return any(domain in url for domain in BLOCKED_DOMAINS)
 
 

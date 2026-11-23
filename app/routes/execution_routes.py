@@ -416,3 +416,178 @@ def retry_execution(
     }
 
 
+def _collect_schedule_history(db: Session, schedule: ScheduleModel):
+    """Collects execution history records for a schedule across history tables."""
+    flow_type = (schedule.flow_type or 'api').lower()
+    if flow_type == 'mobile':
+        models_order = [MobileExecutionHistory, WebExecutionHistory, ApiExecutionHistory]
+    elif flow_type in ('e2e', 'web'):
+        models_order = [WebExecutionHistory, MobileExecutionHistory, ApiExecutionHistory]
+    else:
+        models_order = [ApiExecutionHistory, WebExecutionHistory, MobileExecutionHistory]
+
+    records = []
+    for model_cls in models_order:
+        rows = (
+            db.query(model_cls)
+            .filter(model_cls.schedule_id == schedule.id)
+            .order_by(model_cls.id.asc())
+            .all()
+        )
+        if rows:
+            records.extend(rows)
+            break
+    return records
+
+
+def _is_record_failed(record) -> bool:
+    if getattr(record, "error_message", None):
+        return True
+    code = getattr(record, "status_code", None)
+    if code is not None and (code >= 400 or code == 0):
+        return True
+    return False
+
+
+@router.get("/{schedule_id}/status")
+def get_execution_status(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Returns consolidated execution status and step metrics for CI/CD pipelines.
+    Supports authentication via JWT or Service Token (X-API-Key: flw_...).
+    """
+    schedule = db.query(ScheduleModel).filter(
+        ScheduleModel.id == schedule_id,
+        ScheduleModel.company_id == current_user.company_id
+    ).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    records = _collect_schedule_history(db, schedule)
+    total_steps = len(records)
+    failed_steps = sum(1 for r in records if _is_record_failed(r))
+    passed_steps = max(0, total_steps - failed_steps)
+    duration_ms = sum(int(getattr(r, "response_time", 0) or 0) for r in records)
+
+    raw_status = (schedule.last_run_status or schedule.status or "running").lower()
+    if raw_status == "cancelled" or (schedule.status or "").lower() == "cancelled":
+        normalized_status = "cancelled"
+    elif raw_status in ("running", "pending", "queued"):
+        normalized_status = "running"
+    elif raw_status in ("failed", "error", "failure") or (total_steps > 0 and failed_steps > 0):
+        normalized_status = "failed"
+    elif raw_status in ("success", "passed", "completed") or (total_steps > 0 and failed_steps == 0 and raw_status != "active"):
+        normalized_status = "passed"
+    else:
+        normalized_status = "running"
+
+    return {
+        "schedule_id": schedule.id,
+        "name": schedule.name,
+        "flow_type": schedule.flow_type or "api",
+        "status": normalized_status,
+        "raw_status": schedule.last_run_status or schedule.status,
+        "total_steps": total_steps,
+        "passed_steps": passed_steps,
+        "failed_steps": failed_steps,
+        "duration_ms": duration_ms,
+        "last_run": schedule.last_run,
+    }
+
+
+@router.get("/{schedule_id}/junit.xml")
+def get_execution_junit_xml(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Generates a standard JUnit XML report for CI/CD test runners (GitHub Actions, GitLab CI, Jenkins, Azure DevOps).
+    """
+    import xml.etree.ElementTree as ET
+
+    schedule = db.query(ScheduleModel).filter(
+        ScheduleModel.id == schedule_id,
+        ScheduleModel.company_id == current_user.company_id
+    ).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    records = _collect_schedule_history(db, schedule)
+    total_steps = len(records)
+    failed_steps = sum(1 for r in records if _is_record_failed(r))
+    total_time_sec = sum(float(getattr(r, "response_time", 0) or 0) for r in records) / 1000.0
+
+    suite_name = schedule.name or f"Flow Execution #{schedule.id}"
+    testsuites = ET.Element(
+        "testsuites",
+        attrib={
+            "name": suite_name,
+            "tests": str(total_steps),
+            "failures": str(failed_steps),
+            "time": f"{total_time_sec:.3f}",
+        },
+    )
+
+    timestamp_iso = (
+        schedule.last_run.isoformat()
+        if getattr(schedule, "last_run", None)
+        else datetime.now(timezone.utc).isoformat()
+    )
+    testsuite = ET.SubElement(
+        testsuites,
+        "testsuite",
+        attrib={
+            "id": str(schedule.id),
+            "name": suite_name,
+            "tests": str(total_steps),
+            "failures": str(failed_steps),
+            "time": f"{total_time_sec:.3f}",
+            "timestamp": timestamp_iso,
+        },
+    )
+
+    for idx, rec in enumerate(records, start=1):
+        feat = getattr(rec, "feature_name", None) or suite_name
+        node = getattr(rec, "node_name", None) or f"Node_{getattr(rec, 'node_id', idx)}"
+        step_name = getattr(rec, "api_name", None) or getattr(rec, "url", None) or f"Step #{idx}"
+        step_time_sec = float(getattr(rec, "response_time", 0) or 0) / 1000.0
+
+        testcase = ET.SubElement(
+            testsuite,
+            "testcase",
+            attrib={
+                "classname": f"{feat}.{node}",
+                "name": str(step_name),
+                "time": f"{step_time_sec:.3f}",
+            },
+        )
+
+        if _is_record_failed(rec):
+            err_msg = getattr(rec, "error_message", None) or getattr(rec, "status_text", None) or "Step Failed"
+            status_code = getattr(rec, "status_code", None)
+            method = getattr(rec, "method", "")
+            url = getattr(rec, "url", "")
+            failure_el = ET.SubElement(
+                testcase,
+                "failure",
+                attrib={
+                    "message": str(err_msg)[:250],
+                    "type": f"HTTP_{status_code}" if status_code else "ExecutionError",
+                },
+            )
+            failure_el.text = f"Step: {step_name}\nMethod: {method}\nURL/Target: {url}\nStatus Code: {status_code}\nError: {err_msg}"
+
+    xml_declaration = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    xml_body = ET.tostring(testsuites, encoding="unicode")
+    return Response(
+        content=(xml_declaration + xml_body).encode("utf-8"),
+        media_type="application/xml",
+        headers={"Content-Disposition": f"attachment; filename=junit_report_{schedule_id}.xml"},
+    )
+
+
+

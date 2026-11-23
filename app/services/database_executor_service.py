@@ -2,10 +2,37 @@ import json
 import logging
 import time
 from typing import Dict, Any, Tuple, List
+from urllib.parse import urlparse
 from sqlalchemy import create_engine, text
 from app.services.variable_resolver import replace_vars as _replace_vars
 
 logger = logging.getLogger(__name__)
+
+INTERNAL_DB_HOSTS = {"db", "flow-db", "pgbouncer", "flow-pgbouncer", "localhost", "127.0.0.1"}
+
+
+def _is_internal_flow_database(conn_str: str) -> bool:
+    """Prevents user DB test nodes from querying the Flow platform's own internal database."""
+    if not conn_str:
+        return False
+    try:
+        parsed_target = urlparse(conn_str if "://" in conn_str else f"postgresql://{conn_str}")
+        target_host = (parsed_target.hostname or "").strip().lower()
+        target_db = (parsed_target.path or "").lstrip("/").strip().lower()
+
+        if target_host in {"db", "flow-db", "pgbouncer", "flow-pgbouncer"}:
+            return True
+
+        from app.config import settings
+        parsed_internal = urlparse(settings.DATABASE_URL)
+        internal_host = (parsed_internal.hostname or "").strip().lower()
+        internal_db = (parsed_internal.path or "").lstrip("/").strip().lower()
+
+        if target_db and internal_db and target_db == internal_db and target_host in (INTERNAL_DB_HOSTS | {internal_host}):
+            return True
+    except Exception:
+        pass
+    return False
 
 class DatabaseExecutorService:
     @staticmethod
@@ -65,6 +92,18 @@ class DatabaseExecutorService:
         # Fix connection string driver format for SQLite or PostgreSQL if short format used
         if conn_str.startswith("postgres://"):
             conn_str = conn_str.replace("postgres://", "postgresql://", 1)
+
+        if _is_internal_flow_database(conn_str):
+            return {
+                'status': 403,
+                'reason': 'Forbidden Target Database',
+                'text': 'Acesso bloqueado por segurança: não é permitido consultar o banco de dados interno da plataforma Flow.',
+                'duration': 0,
+                'error': 'Forbidden Target Database',
+                'extracted': {},
+                'assertions': [],
+                'assertions_passed': False
+            }
 
         engine = None
         try:

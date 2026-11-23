@@ -19,14 +19,15 @@ from app.models.feature_models import FeatureModel
 from app.models.flow_models import FlowDB
 from app.schemas.history_schemas import ExecutionHistoryCreate
 from app.schemas.variable_schemas import VariableCreate
-import importlib as _importlib
-import sys as _sys
-for _submod in ('app.services.url_utils', 'app.services.history_service', 'app.services.feature_service', 'app.services.flow_service', 'app.services.audit_service'):
-    if _submod in _sys.modules:
-        try:
-            _importlib.reload(_sys.modules[_submod])
-        except Exception:
-            pass
+if os.getenv("FLOW_HOT_RELOAD_SERVICES", "false").lower() == "true":
+    import importlib as _importlib
+    import sys as _sys
+    for _submod in ('app.services.url_utils', 'app.services.history_service', 'app.services.feature_service', 'app.services.flow_service', 'app.services.audit_service'):
+        if _submod in _sys.modules:
+            try:
+                _importlib.reload(_sys.modules[_submod])
+            except Exception:
+                pass
 
 from app.services.flow_service import FlowService
 from app.services.history_service import HistoryService
@@ -1072,10 +1073,13 @@ class FlowExecutorService:
                                                 step_data.setdefault('properties', {})['ramp_up'] = global_retry_test
 
                                             # Sanitize E2E URL for Docker (e.g. localhost -> flow-frontend)
-                                            if step_data.get('type') == 'browser' and step_data.get('properties', {}).get('value'):
+                                            if step_data.get('type') in ('browser', 'open_url', 'url', 'goto', 'navigate') and step_data.get('properties', {}).get('value'):
                                                 val = step_data['properties']['value'].strip()
                                                 if val and not val.startswith(('http://', 'https://')):
                                                     val = f"http://{val}"
+                                                from app.services.url_utils import is_internal_protected_url
+                                                if is_internal_protected_url(val):
+                                                    raise PermissionError(f"Blocked internal infrastructure URL: {val}")
                                                 step_data['properties']['value'] = FlowExecutorService.sanitize_url_for_docker(val)
                                                 logger.info(f"      🔗 Sanitize E2E URL: {val} -> {step_data['properties']['value']}")
 
