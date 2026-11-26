@@ -230,6 +230,38 @@ def list_skills(
         ]
     return skills
 
+def _fetch_recent_flow_failures(db: Session, flow_id: int, flow_type: str, limit: int = 5) -> list:
+    """Fetches recent failed steps for this flow so Healer, UI Inspector, and Specialist skills have real execution error context."""
+    try:
+        from app.models.api_test_history_models import ApiExecutionHistory, WebExecutionHistory, MobileExecutionHistory
+        ft = (flow_type or "api").lower()
+        model_cls = MobileExecutionHistory if ft == "mobile" else (WebExecutionHistory if ft in ("e2e", "web") else ApiExecutionHistory)
+        rows = (
+            db.query(model_cls)
+            .filter(
+                model_cls.flow_id == str(flow_id),
+                (model_cls.error_message.isnot(None)) | (model_cls.status_code >= 400) | (model_cls.status_code == 0),
+            )
+            .order_by(model_cls.id.desc())
+            .limit(limit)
+            .all()
+        )
+        failures = []
+        for r in rows:
+            failures.append({
+                "node_id": getattr(r, "node_id", None),
+                "node_name": getattr(r, "node_name", None),
+                "step_name": getattr(r, "api_name", None),
+                "method": getattr(r, "method", None),
+                "target_or_url": getattr(r, "url", None),
+                "status_code": getattr(r, "status_code", None),
+                "error_message": getattr(r, "error_message", None) or getattr(r, "status_text", None),
+            })
+        return failures
+    except Exception:
+        return []
+
+
 @router.post("/flow/{flow_id}/execute/{skill_id}")
 def execute_skill(
     flow_id: int,
@@ -256,15 +288,29 @@ def execute_skill(
 
         nodes = pruned_data.get("nodes", [])
         cardData = pruned_data.get("cardData", {})
-        mapping_payload = {"nodes": nodes, "cardData": cardData, "flow_type": flow_type}
+        edges = pruned_data.get("edges", [])
+        recent_failures = _fetch_recent_flow_failures(db, flow_id, flow_type)
+        mapping_payload = {
+            "nodes": nodes,
+            "edges": edges,
+            "cardData": cardData,
+            "flow_type": flow_type,
+            "recent_failures": recent_failures,
+        }
 
+        first_failure = recent_failures[0] if recent_failures else {}
         generation_context = {
             "blueprint": json.dumps(blueprint, ensure_ascii=False),
             "nodes": nodes,
+            "edges": edges,
             "cardData": cardData,
             "mapping_context": json.dumps(mapping_payload, ensure_ascii=False),
             "flow_type": flow_type,
-            "project_id": flow_db.project_id
+            "project_id": flow_db.project_id,
+            "last_execution_failures": json.dumps(recent_failures, ensure_ascii=False) if recent_failures else "Nenhuma falha recente registrada",
+            "error_message": first_failure.get("error_message") or "Analisar possíveis fragilidades de seletores/passos nos nós do fluxo",
+            "failed_selector": first_failure.get("target_or_url") or "Inspecionar seletores definidos em cardData",
+            "action_type": first_failure.get("method") or flow_type,
         }
         
         # Analytical skills run in isolated one-shot mode (flow_id=None) to prevent conversation memory pollution
@@ -463,15 +509,29 @@ def execute_skill_async(
 
     nodes = pruned_data.get("nodes", [])
     cardData = pruned_data.get("cardData", {})
-    mapping_payload = {"nodes": nodes, "cardData": cardData, "flow_type": flow_type}
+    edges = pruned_data.get("edges", [])
+    recent_failures = _fetch_recent_flow_failures(db, flow_id, flow_type)
+    mapping_payload = {
+        "nodes": nodes,
+        "edges": edges,
+        "cardData": cardData,
+        "flow_type": flow_type,
+        "recent_failures": recent_failures,
+    }
 
+    first_failure = recent_failures[0] if recent_failures else {}
     generation_context = {
         "blueprint": json.dumps(blueprint, ensure_ascii=False),
         "nodes": nodes,
+        "edges": edges,
         "cardData": cardData,
         "mapping_context": json.dumps(mapping_payload, ensure_ascii=False),
         "flow_type": flow_type,
-        "project_id": flow_db.project_id
+        "project_id": flow_db.project_id,
+        "last_execution_failures": json.dumps(recent_failures, ensure_ascii=False) if recent_failures else "Nenhuma falha recente registrada",
+        "error_message": first_failure.get("error_message") or "Analisar possíveis fragilidades de seletores/passos nos nós do fluxo",
+        "failed_selector": first_failure.get("target_or_url") or "Inspecionar seletores definidos em cardData",
+        "action_type": first_failure.get("method") or flow_type,
     }
 
     def _worker(db_session, u_id, sk_id, ctx, f_id):
@@ -658,30 +718,50 @@ def _normalize_card_data(card_data: dict):
                             if "source" not in ext: ext["source"] = "body"
                             if "variable" not in ext: ext["variable"] = "VAR"
 
-def _find_best_matching_orig_node(gen_n: dict, gen_card_data: dict, orig_custom_nodes: list, scenario_name: str = "") -> dict:
-    """Matches an AI-generated node to the most relevant original custom node."""
+def _find_best_matching_orig_node(gen_n: dict, gen_card_data: dict, orig_custom_nodes: list, scenario_name: str = "", orig_card_data: dict = None) -> dict:
+    """Matches an AI-generated node to the most relevant original custom node by explicit target ID, node ID, selectors, or semantic name."""
     if not orig_custom_nodes:
         return None
     gen_id = str(gen_n.get("id"))
+    gen_data = gen_n.get("data") if isinstance(gen_n.get("data"), dict) else {}
+    explicit_target = gen_data.get("target_orig_node_id") or gen_n.get("target_orig_node_id")
+    if explicit_target:
+        for o_node in orig_custom_nodes:
+            if str(o_node.get("id")) == str(explicit_target):
+                return o_node
+
     for o_node in orig_custom_nodes:
         if str(o_node.get("id")) == gen_id:
             return o_node
-            
-    gen_data = gen_n.get("data") if isinstance(gen_n.get("data"), dict) else {}
+
     node_name = gen_data.get("name") or ""
     card_name = ""
-    if isinstance(gen_card_data, dict) and gen_id in gen_card_data and isinstance(gen_card_data[gen_id], dict):
-        card_name = gen_card_data[gen_id].get("name") or ""
-        
+    ai_steps = []
+    if isinstance(gen_card_data, dict):
+        ai_card = gen_card_data.get(gen_id) or next(iter(gen_card_data.values()), {})
+        if isinstance(ai_card, dict):
+            card_name = ai_card.get("name") or ""
+            ai_steps = ai_card.get("e2eSteps") or ai_card.get("steps") or []
+
+    ai_selectors = set()
+    for st in (ai_steps if isinstance(ai_steps, list) else []):
+        if isinstance(st, dict):
+            pr = st.get("properties") if isinstance(st.get("properties"), dict) else {}
+            for sk in ("android_selector", "selector", "ios_selector"):
+                sval = pr.get(sk) or st.get(sk)
+                if sval and not str(sval).startswith("<"):
+                    ai_selectors.add(str(sval).strip())
+
     combined_name = f"{scenario_name} {node_name} {card_name}".lower()
-    
+
     best_score = 0
     best_match = None
-    
+
     for o_node in orig_custom_nodes:
+        o_id = str(o_node.get("id"))
         o_data = o_node.get("data") if isinstance(o_node.get("data"), dict) else {}
-        o_name = (o_data.get("name") or str(o_node.get("id"))).lower()
-        
+        o_name = (o_data.get("name") or o_id).lower()
+
         o_tokens = [t for t in re.split(r'\W+', o_name) if len(t) > 2]
         score = 0
         for token in o_tokens:
@@ -689,14 +769,391 @@ def _find_best_matching_orig_node(gen_n: dict, gen_card_data: dict, orig_custom_
                 score += len(token) * 2
             elif len(token) >= 4 and token[:5] in combined_name:
                 score += len(token)
-                
+
+        if isinstance(orig_card_data, dict) and o_id in orig_card_data and isinstance(orig_card_data[o_id], dict):
+            o_card = orig_card_data[o_id]
+            for ost in (o_card.get("e2eSteps") or o_card.get("steps") or []):
+                if isinstance(ost, dict):
+                    opr = ost.get("properties") if isinstance(ost.get("properties"), dict) else {}
+                    for sk in ("android_selector", "selector", "ios_selector"):
+                        osel = opr.get(sk) or ost.get(sk)
+                        if osel and str(osel).strip() in ai_selectors:
+                            score += 25
+                    ost_name = (ost.get("name") or "").lower()
+                    for st_tok in [t for t in re.split(r'\W+', ost_name) if len(t) > 3]:
+                        if st_tok in combined_name:
+                            score += 3
+
         if score > best_score:
             best_score = score
             best_match = o_node
-            
+
     if best_match:
         return best_match
-    return orig_custom_nodes[0]
+    return orig_custom_nodes[-1] if orig_custom_nodes else None
+
+
+_PLACEHOLDER_SELECTORS = {
+    "~input_field", "~input_codigo", "~btn_confirmar", "~alert_error", "~alert_title",
+    "~search_input_accessibility_id", "~item_title", "~input_acessibilidade", "~titulo_sucesso",
+    "[data-testid='email-input']", "[data-testid='btn-submit']", "[data-testid='input-campo']",
+    "[data-testid='msg-sucesso']", ".error-message", ".success-message", ".dashboard-header",
+}
+
+
+def _extract_step_selector(step: dict) -> str:
+    if not isinstance(step, dict):
+        return ""
+    props = step.get("properties") if isinstance(step.get("properties"), dict) else {}
+    return str(props.get("android_selector") or props.get("selector") or props.get("ios_selector") or step.get("android_selector") or step.get("selector") or "").strip()
+
+
+def _is_placeholder_selector(sel: str, real_selectors: set) -> bool:
+    if not sel:
+        return True
+    s = sel.strip()
+    if s in real_selectors:
+        return False
+    if s.startswith("<") or s.endswith(">"):
+        return True
+    if s in _PLACEHOLDER_SELECTORS:
+        return True
+    return False
+
+
+def _copy_selectors_from_orig(target_step: dict, orig_step: dict, flow_type: str):
+    if not isinstance(target_step, dict) or not isinstance(orig_step, dict):
+        return
+    if not isinstance(target_step.get("properties"), dict):
+        target_step["properties"] = {}
+    t_props = target_step["properties"]
+    o_props = orig_step.get("properties") if isinstance(orig_step.get("properties"), dict) else {}
+
+    for key in ("selector", "android_selector", "ios_selector"):
+        o_val = o_props.get(key) or orig_step.get(key)
+        if o_val:
+            t_props[key] = o_val
+    if flow_type == "mobile":
+        if t_props.get("android_selector") and not t_props.get("selector"):
+            t_props["selector"] = t_props["android_selector"]
+        elif t_props.get("selector") and not t_props.get("android_selector"):
+            t_props["android_selector"] = t_props["selector"]
+
+
+def _reconstruct_complete_e2e_steps(
+    orig_steps: list,
+    new_steps: list,
+    flow_type: str,
+    scenario_name: str = "",
+    matched_orig_id: str = None,
+    orig_edges_list: list = None,
+    orig_card_data: dict = None,
+) -> list:
+    """
+    Guarantees that AI-generated Mobile and Web E2E cards contain a complete, runnable multi-step sequence:
+      1. Setup / Focus steps from the original card (or prepended tap on mobile input before typing),
+      2. The fault-injected / mutated action step with real selectors inherited from the original card,
+      3. The trigger / submit button step (tap/click on Continuar/Confirmar/Entrar from original card or immediate child card),
+      4. A final assert step validating the test requirement with a valid selector and operator.
+    """
+    import copy
+    import uuid
+
+    ft = (flow_type or "e2e").lower()
+    is_mobile = ft == "mobile"
+    click_action = "tap" if is_mobile else "click"
+
+    safe_orig = [copy.deepcopy(s) for s in (orig_steps or []) if isinstance(s, dict)]
+    safe_new = [copy.deepcopy(s) for s in (new_steps or []) if isinstance(s, dict)]
+
+    # Normalize basic structure of safe_new steps first
+    for st in safe_new:
+        if not isinstance(st.get("properties"), dict):
+            st["properties"] = {}
+        pr = st["properties"]
+        for k in ("selector", "android_selector", "ios_selector", "value", "operator", "direction", "distance", "timeout", "url", "clear_first", "hideKeyboard", "hide_keyboard"):
+            if k in st and k not in pr:
+                pr[k] = st.pop(k)
+        st_type = st.get("type")
+        st_act = st.get("action") or pr.get("action")
+        if not st_type or st_type in ("action", "step", "custom", "interaction"):
+            st["type"] = st_act if (st_act and st_act not in ("action", "step", "custom")) else click_action
+
+    # Collect real selectors from orig_steps and immediate child/parent cards
+    real_selectors = set()
+    for ost in safe_orig:
+        sel = _extract_step_selector(ost)
+        if sel:
+            real_selectors.add(sel)
+
+    child_trigger_steps = []
+    parent_focus_steps = []
+    if matched_orig_id and isinstance(orig_edges_list, list) and isinstance(orig_card_data, dict):
+        for oe in orig_edges_list:
+            if not isinstance(oe, dict):
+                continue
+            # Immediate child cards (for trigger/submit button when orig card only had the input step)
+            if str(oe.get("source")) == str(matched_orig_id):
+                cid = str(oe.get("target"))
+                c_card = orig_card_data.get(cid)
+                if isinstance(c_card, dict):
+                    c_steps = c_card.get("e2eSteps") or c_card.get("steps") or []
+                    for cst in c_steps:
+                        if isinstance(cst, dict):
+                            csel = _extract_step_selector(cst)
+                            if csel:
+                                real_selectors.add(csel)
+                            ctype = (cst.get("type") or cst.get("action") or "").lower()
+                            if ctype in ("tap", "click", "keypress", "press_button") and not child_trigger_steps:
+                                child_trigger_steps.append(copy.deepcopy(cst))
+            # Immediate parent card (for focus tap if orig card only had type)
+            if str(oe.get("target")) == str(matched_orig_id):
+                pid = str(oe.get("source"))
+                p_card = orig_card_data.get(pid)
+                if isinstance(p_card, dict):
+                    p_steps = p_card.get("e2eSteps") or p_card.get("steps") or []
+                    for pst in p_steps:
+                        if isinstance(pst, dict):
+                            psel = _extract_step_selector(pst)
+                            if psel:
+                                real_selectors.add(psel)
+                    if p_steps and isinstance(p_steps[-1], dict):
+                        parent_focus_steps.append(copy.deepcopy(p_steps[-1]))
+
+    ai_action_steps = [s for s in safe_new if str(s.get("type", "")).lower() not in ("assert", "verify", "assert_visual")]
+    ai_assert_steps = [s for s in safe_new if str(s.get("type", "")).lower() in ("assert", "verify", "assert_visual")]
+
+    # Identify which original step index is being mutated
+    orig_action_indices = [
+        idx for idx, s in enumerate(safe_orig)
+        if str(s.get("type") or s.get("action") or "").lower() not in ("assert", "verify", "assert_visual")
+    ]
+    orig_type_indices = [
+        idx for idx, s in enumerate(safe_orig)
+        if str(s.get("type") or s.get("action") or "").lower() in ("type", "input", "fill", "clear_field", "mobile_type")
+    ]
+
+    target_idx = None
+    primary_ai_step = None
+    for ast in ai_action_steps:
+        atype = str(ast.get("type", "")).lower()
+        if atype in ("type", "input", "fill", "clear_field", "mobile_type"):
+            primary_ai_step = ast
+            break
+    if not primary_ai_step and ai_action_steps:
+        primary_ai_step = ai_action_steps[0]
+
+    if primary_ai_step and safe_orig:
+        ai_sel = _extract_step_selector(primary_ai_step)
+        # 1. Exact selector match
+        if ai_sel and not _is_placeholder_selector(ai_sel, real_selectors):
+            for idx, ost in enumerate(safe_orig):
+                if _extract_step_selector(ost) == ai_sel and str(ost.get("type") or "").lower() == str(primary_ai_step.get("type") or "").lower():
+                    target_idx = idx
+                    break
+        # 2. Token match on step name + compatible type
+        if target_idx is None:
+            comb_text = f"{scenario_name} {primary_ai_step.get('name', '')}".lower()
+            best_s = -1
+            candidates = orig_type_indices if str(primary_ai_step.get("type", "")).lower() in ("type", "input", "fill", "clear_field") and orig_type_indices else orig_action_indices
+            for idx in candidates:
+                ost = safe_orig[idx]
+                oname = (ost.get("name") or "").lower()
+                osel = _extract_step_selector(ost).lower()
+                sc = sum(3 for tok in re.split(r'\W+', oname) if len(tok) > 2 and tok in comb_text)
+                sc += sum(2 for tok in re.split(r'\W+', osel) if len(tok) > 3 and tok in comb_text)
+                if sc > best_s:
+                    best_s = sc
+                    target_idx = idx
+
+    if target_idx is None and safe_orig:
+        if orig_type_indices:
+            target_idx = orig_type_indices[-1]
+        elif orig_action_indices:
+            target_idx = orig_action_indices[-1]
+        else:
+            target_idx = 0
+
+    # Replace placeholder selectors on all AI action steps where possible
+    for i, ast in enumerate(ai_action_steps):
+        asel = _extract_step_selector(ast)
+        if _is_placeholder_selector(asel, real_selectors) and safe_orig:
+            atype = str(ast.get("type", "")).lower()
+            if atype in ("type", "input", "fill", "clear_field") and target_idx is not None:
+                _copy_selectors_from_orig(ast, safe_orig[target_idx], ft)
+            elif i < len(safe_orig):
+                _copy_selectors_from_orig(ast, safe_orig[i], ft)
+            elif target_idx is not None:
+                _copy_selectors_from_orig(ast, safe_orig[target_idx], ft)
+
+    # Determine if AI provided a complete sequence or if we need to reconstruct from safe_orig
+    has_type_action = any(str(s.get("type", "")).lower() in ("type", "input", "fill", "clear_field") for s in ai_action_steps)
+    last_action_type = str(ai_action_steps[-1].get("type", "")).lower() if ai_action_steps else ""
+    has_trigger_after_type = len(ai_action_steps) >= 2 and has_type_action and last_action_type in ("tap", "click", "keypress", "press_button")
+    has_focus_before_type = len(ai_action_steps) >= 2 and str(ai_action_steps[0].get("type", "")).lower() in ("tap", "click", "browser", "open_url")
+
+    needs_reconstruction = (
+        len(safe_new) < 3
+        or not ai_action_steps
+        or (has_type_action and not has_trigger_after_type)
+        or (is_mobile and has_type_action and not has_focus_before_type)
+        or len(ai_assert_steps) == 0
+    )
+
+    if not needs_reconstruction:
+        # Even when AI returned >=3 steps, ensure assert step has a valid selector and operator
+        reconstructed = ai_action_steps + ai_assert_steps
+    else:
+        reconstructed = []
+
+        # 1. Pre-steps from safe_orig before target_idx
+        if safe_orig and target_idx is not None and target_idx > 0:
+            for pre_st in safe_orig[:target_idx]:
+                if str(pre_st.get("type", "")).lower() not in ("assert", "verify"):
+                    reconstructed.append(copy.deepcopy(pre_st))
+
+        # 2. Mutated Step
+        if primary_ai_step:
+            mutated_step = copy.deepcopy(primary_ai_step)
+            if safe_orig and target_idx is not None:
+                if _is_placeholder_selector(_extract_step_selector(mutated_step), real_selectors):
+                    _copy_selectors_from_orig(mutated_step, safe_orig[target_idx], ft)
+        elif safe_orig and target_idx is not None:
+            mutated_step = copy.deepcopy(safe_orig[target_idx])
+            if not isinstance(mutated_step.get("properties"), dict):
+                mutated_step["properties"] = {}
+            if str(mutated_step.get("type", "")).lower() in ("type", "input", "fill"):
+                scen_low = (scenario_name or "").lower()
+                if "vazio" in scen_low or "branco" in scen_low or "empty" in scen_low:
+                    mutated_step["properties"]["value"] = ""
+                    mutated_step["properties"]["clear_first"] = True
+                else:
+                    mutated_step["properties"]["value"] = "99999_INVALIDO"
+                    mutated_step["properties"]["clear_first"] = True
+                mutated_step["name"] = f"Inserir Dado de Teste ({scenario_name or 'Cenário Alternativo'})"
+        else:
+            mutated_step = {
+                "id": f"ai-step-{uuid.uuid4().hex[:6]}",
+                "name": f"Executar Ação ({scenario_name or 'Teste'})",
+                "type": "type" if is_mobile else "click",
+                "properties": {"selector": "~input_field", "android_selector": "~input_field", "value": "99999"},
+            }
+
+        # On Mobile, if mutated_step is 'type' and the immediately preceding step is NOT a 'tap' on that same selector, prepend a 'tap' to focus the field
+        mut_type = str(mutated_step.get("type", "")).lower()
+        mut_sel = _extract_step_selector(mutated_step)
+        if is_mobile and mut_type in ("type", "input", "fill", "clear_field") and mut_sel:
+            prev_is_same_tap = (
+                len(reconstructed) > 0
+                and str(reconstructed[-1].get("type", "")).lower() == "tap"
+                and _extract_step_selector(reconstructed[-1]) == mut_sel
+            )
+            if not prev_is_same_tap:
+                focus_step = {
+                    "id": f"ai-step-focus-{uuid.uuid4().hex[:6]}",
+                    "name": f"Tocar no Campo para Focar",
+                    "type": "tap",
+                    "properties": {
+                        "selector": mut_sel,
+                        "android_selector": mutated_step.get("properties", {}).get("android_selector") or mut_sel,
+                    },
+                }
+                if mutated_step.get("properties", {}).get("ios_selector"):
+                    focus_step["properties"]["ios_selector"] = mutated_step["properties"]["ios_selector"]
+                reconstructed.append(focus_step)
+
+        if is_mobile and mut_type in ("type", "input", "fill"):
+            mutated_step.setdefault("properties", {})["clear_first"] = True
+            mutated_step["properties"].setdefault("hideKeyboard", True)
+
+        reconstructed.append(mutated_step)
+
+        # 3. Trigger / Submit Step after mutated_step
+        trigger_step = None
+        # Check if AI already provided a post-mutation trigger tap/click with a real selector
+        if len(ai_action_steps) >= 2:
+            for extra_st in ai_action_steps:
+                if extra_st is not primary_ai_step and str(extra_st.get("type", "")).lower() in ("tap", "click", "keypress", "press_button"):
+                    esel = _extract_step_selector(extra_st)
+                    if esel and not _is_placeholder_selector(esel, real_selectors) and esel != mut_sel:
+                        trigger_step = copy.deepcopy(extra_st)
+                        break
+
+        # Otherwise look in safe_orig[target_idx + 1:] for the submit/continue tap/click
+        if not trigger_step and safe_orig and target_idx is not None:
+            for after_idx in range(target_idx + 1, len(safe_orig)):
+                cand = safe_orig[after_idx]
+                cand_type = str(cand.get("type") or cand.get("action") or "").lower()
+                cand_sel = _extract_step_selector(cand)
+                if cand_type in ("hide_keyboard", "wait"):
+                    reconstructed.append(copy.deepcopy(cand))
+                elif cand_type in ("tap", "click", "keypress", "press_button"):
+                    # Check if this tap is just focusing the next EditText (followed immediately by a type on the same selector)
+                    next_is_type_same = (
+                        after_idx + 1 < len(safe_orig)
+                        and str(safe_orig[after_idx + 1].get("type") or "").lower() in ("type", "input", "fill")
+                        and _extract_step_selector(safe_orig[after_idx + 1]) == cand_sel
+                    )
+                    if not next_is_type_same:
+                        trigger_step = copy.deepcopy(cand)
+                        break
+
+        # If safe_orig didn't have a trigger button (e.g. 1-step card), check immediate child card's trigger step
+        if not trigger_step and child_trigger_steps:
+            trigger_step = copy.deepcopy(child_trigger_steps[0])
+
+        if trigger_step:
+            reconstructed.append(trigger_step)
+
+        # 4. Final Assertion Step
+        fallback_assert_sel = _extract_step_selector(trigger_step) if trigger_step else (mut_sel or (next(iter(real_selectors), "")))
+        if ai_assert_steps:
+            assert_step = copy.deepcopy(ai_assert_steps[-1])
+            if not isinstance(assert_step.get("properties"), dict):
+                assert_step["properties"] = {}
+            aprops = assert_step["properties"]
+            asel = _extract_step_selector(assert_step)
+            if _is_placeholder_selector(asel, real_selectors) and fallback_assert_sel:
+                aprops["selector"] = fallback_assert_sel
+                if is_mobile:
+                    aprops["android_selector"] = fallback_assert_sel
+                # When falling back to current-screen element selector on a negative test, verify it remains visible (blocked navigation)
+                if aprops.get("operator") in (None, "", "displayed", "equals", "contains", "text_contains", "text_equals"):
+                    aprops["operator"] = "visible"
+                    aprops.pop("value", None)
+        else:
+            assert_step = {
+                "id": f"ai-step-assert-{uuid.uuid4().hex[:6]}",
+                "name": f"Validar Bloqueio / Tratamento na Tela ({scenario_name or 'Validação'})",
+                "type": "assert",
+                "properties": {
+                    "selector": fallback_assert_sel or "body",
+                    **({"android_selector": fallback_assert_sel} if is_mobile and fallback_assert_sel else {}),
+                    "operator": "visible",
+                },
+            }
+        reconstructed.append(assert_step)
+
+    # Final pass: normalize operators and ensure unique IDs on all reconstructed steps
+    for idx, st in enumerate(reconstructed):
+        st["id"] = f"ai-step-{idx + 1}-{uuid.uuid4().hex[:6]}"
+        pr = st.setdefault("properties", {})
+        if str(st.get("type", "")).lower() == "assert":
+            op = str(pr.get("operator") or "visible").lower()
+            if op == "displayed":
+                pr["operator"] = "visible"
+            asel = _extract_step_selector(st)
+            if _is_placeholder_selector(asel, real_selectors) and real_selectors:
+                fallback_sel = _extract_step_selector(reconstructed[-2]) if len(reconstructed) >= 2 else next(iter(real_selectors))
+                if fallback_sel:
+                    pr["selector"] = fallback_sel
+                    if is_mobile:
+                        pr["android_selector"] = fallback_sel
+                    pr["operator"] = "visible"
+                    pr.pop("value", None)
+
+    return reconstructed
+
 
 
 @router.post("/save-generated-flow")
@@ -791,11 +1248,19 @@ def save_generated_flow(
                         id_mapping["start"] = "start"
                         continue  # Skip adding a duplicate start node
 
-                    if has_valid_explicit_parent:
+                    matched_orig = _find_best_matching_orig_node(
+                        gen_n,
+                        gen_card_data,
+                        orig_custom_nodes,
+                        scenario_name=payload.get("name", ""),
+                        orig_card_data=orig_card_data,
+                    )
+                    if matched_orig:
+                        matched_orig_id = str(matched_orig.get("id"))
+                    elif has_valid_explicit_parent and explicit_parent_id != "start":
                         matched_orig_id = explicit_parent_id
                     else:
-                        matched_orig = _find_best_matching_orig_node(gen_n, gen_card_data, orig_custom_nodes, scenario_name=payload.get("name", ""))
-                        matched_orig_id = str(matched_orig.get("id")) if matched_orig else old_id
+                        matched_orig_id = old_id
 
                     # Assign globally unique ID for each generated node to prevent collisions
                     new_id = f"node_{uuid.uuid4().hex[:8]}"
@@ -804,10 +1269,11 @@ def save_generated_flow(
                     node_to_matched_orig[new_id] = matched_orig_id
 
                     # Compute relative position:
-                    # First node placed relative to matched_orig_id (below existing siblings), subsequent nodes horizontally
+                    # Place relative to explicit_parent_id (if specified) or matched_orig_id
+                    anchor_id = explicit_parent_id if has_valid_explicit_parent else matched_orig_id
                     if i == 0 or len(new_nodes) == 0:
-                        base_pos = orig_node_pos.get(matched_orig_id, {"x": 100, "y": 100})
-                        siblings_count = sum(1 for oe in orig_edges_list if isinstance(oe, dict) and str(oe.get("source")) == matched_orig_id)
+                        base_pos = orig_node_pos.get(anchor_id, orig_node_pos.get(matched_orig_id, {"x": 100, "y": 100}))
+                        siblings_count = sum(1 for oe in orig_edges_list if isinstance(oe, dict) and str(oe.get("source")) == anchor_id)
                         y_offset = (siblings_count + 1) * 140
                         gen_n["position"] = {
                             "x": base_pos.get("x", 100) + 280,
@@ -933,8 +1399,21 @@ def save_generated_flow(
                                 if isinstance(v, dict) and v.get("name") == node_name:
                                     ai_c = v
                                     break
+                        if not ai_c and len(ai_card_data) == 1 and len(new_nodes) == 1:
+                            first_val = next(iter(ai_card_data.values()))
+                            if isinstance(first_val, dict):
+                                ai_c = first_val
                         if not isinstance(ai_c, dict):
                             ai_c = {}
+                        # Recover steps if LLM placed e2eSteps/steps inside node.data instead of cardData
+                        node_data_obj = n.get("data") if isinstance(n.get("data"), dict) else {}
+                        if "e2eSteps" not in ai_c and "steps" not in ai_c:
+                            if isinstance(node_data_obj.get("e2eSteps"), list):
+                                ai_c["e2eSteps"] = node_data_obj.pop("e2eSteps")
+                            elif isinstance(node_data_obj.get("steps"), list):
+                                ai_c["e2eSteps"] = node_data_obj.pop("steps")
+                            elif isinstance(n.get("e2eSteps"), list):
+                                ai_c["e2eSteps"] = n.pop("e2eSteps")
 
                         # Original card data to inherit from
                         orig_c = copy.deepcopy(orig_card_data.get(matched_orig_id, {})) if (matched_orig_id and isinstance(orig_card_data.get(matched_orig_id), dict)) else {}
@@ -979,36 +1458,16 @@ def save_generated_flow(
 
                         orig_steps = orig_c.get("e2eSteps") or orig_c.get("steps") or orig_c.get("e2e_steps") or []
                         new_steps = card.get("e2eSteps") or card.get("steps") or card.get("e2e_steps") or []
-                        
-                        if not new_steps and orig_steps:
-                            card["e2eSteps"] = copy.deepcopy(orig_steps)
-                            new_steps = card["e2eSteps"]
-                        
-                        if isinstance(new_steps, list) and isinstance(orig_steps, list):
-                            for i, n_step in enumerate(new_steps):
-                                if not isinstance(n_step, dict): continue
-                                n_props = n_step.get("properties")
-                                if not isinstance(n_props, dict):
-                                    n_step["properties"] = {}
-                                    n_props = n_step["properties"]
 
-                                if i < len(orig_steps) and isinstance(orig_steps[i], dict):
-                                    o_step = orig_steps[i]
-                                    o_props = o_step.get("properties") or {}
-
-                                    if not n_step.get("type") or n_step.get("type") in ["action", "step", "custom"]:
-                                        n_step["type"] = o_step.get("type") or o_step.get("action") or ("tap" if payload["flow_type"] == "mobile" else "click")
-
-                                    o_selector = o_props.get("selector") if isinstance(o_props, dict) else None
-                                    o_android = o_props.get("android_selector") if isinstance(o_props, dict) else None
-                                    o_ios = o_props.get("ios_selector") if isinstance(o_props, dict) else None
-
-                                    if o_selector and "selector" not in n_step and "selector" not in n_props:
-                                        n_props["selector"] = o_selector
-                                    if o_android and "android_selector" not in n_step and "android_selector" not in n_props:
-                                        n_props["android_selector"] = o_android
-                                    if o_ios and "ios_selector" not in n_step and "ios_selector" not in n_props:
-                                        n_props["ios_selector"] = o_ios
+                        card["e2eSteps"] = _reconstruct_complete_e2e_steps(
+                            orig_steps=orig_steps,
+                            new_steps=new_steps,
+                            flow_type=payload["flow_type"],
+                            scenario_name=payload.get("name") or card.get("name") or "",
+                            matched_orig_id=matched_orig_id,
+                            orig_edges_list=orig_edges_list,
+                            orig_card_data=orig_card_data,
+                        )
 
                     # API Flow Calls
                     elif payload["flow_type"] == "api":

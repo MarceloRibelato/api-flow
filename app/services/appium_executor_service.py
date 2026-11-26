@@ -1380,20 +1380,20 @@ class AppiumExecutorService:
                 expected = props.get('value', '')
                 el = self._find_element(selector, step_data=step_data)
 
-                if operator == 'visible':
+                if operator in ('visible', 'displayed', 'exists'):
                     if not el or not el.is_displayed():
                         raise AssertionError(f"Element '{selector}' is not visible")
-                elif operator == 'not_visible':
+                elif operator in ('not_visible', 'not_displayed', 'not_exists'):
                     if el and el.is_displayed():
                         raise AssertionError(f"Element '{selector}' should not be visible")
-                elif operator == 'contains':
+                elif operator in ('contains', 'text_contains'):
                     if el:
-                        actual = el.text
+                        actual = el.text or el.get_attribute("content-desc") or ""
                         if expected not in actual:
                             raise AssertionError(f"Expected '{expected}' in '{actual}'")
-                elif operator == 'equals':
+                elif operator in ('equals', 'text_equals', 'value_equals'):
                     if el:
-                        actual = el.text
+                        actual = el.text or el.get_attribute("content-desc") or ""
                         if actual != expected:
                             raise AssertionError(f"Expected '{expected}', got '{actual}'")
                 elif operator == 'enabled':

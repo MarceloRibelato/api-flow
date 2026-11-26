@@ -515,11 +515,14 @@ class MCPPlaywrightService:
 
                 target_url = cls._normalize_target_url(target_url)
                 page = await context.new_page()
+                page_loaded_ok = False
                 if target_url and target_url.startswith("http") and target_url not in ("https://", "http://"):
                     try:
-                        await page.goto(target_url, timeout=20000, wait_until="domcontentloaded")
+                        await page.goto(target_url, timeout=8000, wait_until="domcontentloaded")
+                        page_loaded_ok = page.url != "about:blank"
                     except Exception as ge:
                         logger.warning(f"Could not load target_url {target_url} in replay: {ge}")
+                        page_loaded_ok = False
                 
                 for idx, node_dict in enumerate(nodes):
                     node_id = str(node_dict.get("id") or f"node_{idx + 1}")
@@ -533,25 +536,27 @@ class MCPPlaywrightService:
                     
                     prev_url = page.url
                     
-                    # Execute interactive steps of this node
-                    for s in node_steps:
-                        stype = str(s.get("type") or s.get("action") or "").lower()
-                        props = s.get("properties") or {}
-                        sel = props.get("selector") or s.get("selector") or ""
-                        val = props.get("value") or s.get("value") or ""
-                        
-                        try:
-                            if stype in ["type", "fill"] and sel and val:
-                                await page.locator(sel).first.fill(str(val), timeout=1500)
-                            elif stype in ["click", "tap"] and sel:
-                                await page.locator(sel).first.click(timeout=1500)
-                        except Exception as step_err:
-                            logger.debug(f"Audit replay step error on node {node_id} ({stype} {sel}): {step_err}")
+                    # Only execute interactive steps if the target page actually loaded
+                    if page_loaded_ok:
+                        for s in node_steps:
+                            stype = str(s.get("type") or s.get("action") or "").lower()
+                            props = s.get("properties") or {}
+                            sel = props.get("selector") or s.get("selector") or ""
+                            val = props.get("value") or s.get("value") or ""
+                            
+                            try:
+                                if stype in ["type", "fill"] and sel and val:
+                                    await page.locator(sel).first.fill(str(val), timeout=800)
+                                elif stype in ["click", "tap"] and sel:
+                                    await page.locator(sel).first.click(timeout=800)
+                            except Exception as step_err:
+                                logger.debug(f"Audit replay step error on node {node_id} ({stype} {sel}): {step_err}")
+                                break
 
-                    try:
-                        await page.wait_for_timeout(400)
-                    except Exception:
-                        pass
+                        try:
+                            await page.wait_for_timeout(200)
+                        except Exception:
+                            pass
                         
                     curr_url = page.url
                     

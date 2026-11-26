@@ -613,6 +613,38 @@ class AnalysisService:
             merged_card_data.update(suggested_data.get("cardData", {}))
             
             # Normalize AI generated headers/params and legacy DB data to match Pydantic ApiCallSchema (List of Dicts)
+            from app.routes.skill_routes import _find_best_matching_orig_node, _reconstruct_complete_e2e_steps, _normalize_card_data
+            orig_custom_nodes = [
+                n for n in (original_flow_data.get("nodes") or [])
+                if isinstance(n, dict) and n.get("type", "custom") != "startNode" and n.get("id") != "start"
+            ]
+            orig_cards_snapshot = copy.deepcopy(original_flow_data.get("cardData") or {})
+            orig_edges_snapshot = original_flow_data.get("edges") or []
+
+            for ai_node in suggested_data.get("nodes", []):
+                if not isinstance(ai_node, dict):
+                    continue
+                nid = str(ai_node.get("id"))
+                card_data = merged_card_data.get(nid)
+                if isinstance(card_data, dict) and effective_flow_type in ["mobile", "e2e"]:
+                    matched_orig = _find_best_matching_orig_node(
+                        ai_node, merged_card_data, orig_custom_nodes, scenario_name=scenario_title, orig_card_data=orig_cards_snapshot
+                    )
+                    matched_orig_id = str(matched_orig.get("id")) if matched_orig else None
+                    orig_c = orig_cards_snapshot.get(matched_orig_id, {}) if matched_orig_id else {}
+                    orig_steps = orig_c.get("e2eSteps") or orig_c.get("steps") or []
+                    new_steps = card_data.get("e2eSteps") or card_data.get("steps") or card_data.get("e2e_steps") or []
+                    card_data["e2eSteps"] = _reconstruct_complete_e2e_steps(
+                        orig_steps=orig_steps,
+                        new_steps=new_steps,
+                        flow_type=effective_flow_type,
+                        scenario_name=scenario_title,
+                        matched_orig_id=matched_orig_id,
+                        orig_edges_list=orig_edges_snapshot,
+                        orig_card_data=orig_cards_snapshot,
+                    )
+            _normalize_card_data(merged_card_data)
+
             for card_id, card_data in merged_card_data.items():
                 if isinstance(card_data, dict):
                     card_data["nodeType"] = card_data.get("nodeType") or effective_flow_type

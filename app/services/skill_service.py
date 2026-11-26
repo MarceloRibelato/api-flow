@@ -274,14 +274,18 @@ class SkillService:
                 continue
             data = node.get("data") or {}
             node_type = data.get("nodeType") or flow_type
+            p_node_data = {
+                "name": data.get("name") or data.get("label") or data.get("title") or str(node.get("id")),
+                "nodeType": node_type,
+                "isMainFlow": data.get("isMainFlow", False),
+            }
+            for ctrl_key in ("conditionConfig", "loopConfig", "tryCatchConfig"):
+                if data.get(ctrl_key):
+                    p_node_data[ctrl_key] = data[ctrl_key]
             p_node = {
                 "id": str(node.get("id")),
                 "type": node.get("type"),
-                "data": {
-                    "name": data.get("name") or data.get("label") or data.get("title") or str(node.get("id")),
-                    "nodeType": node_type,
-                    "isMainFlow": data.get("isMainFlow", False)
-                }
+                "data": p_node_data,
             }
             pruned_nodes.append(p_node)
 
@@ -295,6 +299,11 @@ class SkillService:
                 "nodeType": card_type,
                 "description": card.get("description")
             }
+            for ctrl_key in ("conditionConfig", "loopConfig", "tryCatchConfig"):
+                if card.get(ctrl_key):
+                    p_card[ctrl_key] = card[ctrl_key]
+                elif isinstance(card.get("envData"), dict) and card["envData"].get(f"__{ctrl_key}"):
+                    p_card[ctrl_key] = card["envData"][f"__{ctrl_key}"]
             
             # API Calls
             if "apiCalls" in card and isinstance(card["apiCalls"], list):
@@ -339,15 +348,35 @@ class SkillService:
                         })
                 p_card["e2eSteps"] = pruned_steps
 
-            if "dbQueries" in card:
-                p_card["dbQueries"] = card["dbQueries"]
+            db_queries = card.get("dbQueries") or card.get("db_queries") or card.get("dbSteps")
+            if db_queries:
+                p_card["dbQueries"] = db_queries
+
+            message_queues = card.get("messageQueues") or card.get("message_queues")
+            if message_queues:
+                p_card["messageQueues"] = message_queues
 
             pruned_card_data[str(card_id)] = p_card
+
+        pruned_edges = []
+        for edge in flow_data.get("edges", []):
+            if not isinstance(edge, dict):
+                continue
+            p_edge = {
+                "id": edge.get("id"),
+                "source": edge.get("source"),
+                "target": edge.get("target"),
+            }
+            if edge.get("sourceHandle"):
+                p_edge["sourceHandle"] = edge.get("sourceHandle")
+            if edge.get("label"):
+                p_edge["label"] = edge.get("label")
+            pruned_edges.append(p_edge)
 
         return {
             "flow_type": flow_type,
             "nodes": pruned_nodes,
-            "edges": flow_data.get("edges", []),
+            "edges": pruned_edges,
             "cardData": pruned_card_data
         }
 
@@ -455,7 +484,65 @@ class SkillService:
                 alternatives = alternatives["alternatives"]
             elif isinstance(alternatives, dict):
                 alternatives = [alternatives]
-                
+
+            # Post-process E2E / Mobile alternatives so every suggested card already has the complete runnable step sequence
+            if isinstance(alternatives, list) and flow.flow_type in ("mobile", "e2e", "web"):
+                try:
+                    from app.routes.skill_routes import _find_best_matching_orig_node, _reconstruct_complete_e2e_steps, _normalize_card_data
+                    orig_nodes = [
+                        n for n in (flow_data.get("nodes") or [])
+                        if isinstance(n, dict) and n.get("type", "custom") != "startNode" and n.get("id") != "start"
+                    ]
+                    orig_edges = flow_data.get("edges") or []
+                    orig_cards = flow_data.get("cardData") or {}
+
+                    for alt in alternatives:
+                        if not isinstance(alt, dict):
+                            continue
+                        alt_nodes = alt.get("nodes") or []
+                        alt_cards = alt.get("cardData") or {}
+                        if not isinstance(alt_cards, dict):
+                            alt_cards = {}
+                            alt["cardData"] = alt_cards
+
+                        for gn in alt_nodes:
+                            if not isinstance(gn, dict):
+                                continue
+                            gid = str(gn.get("id"))
+                            matched_orig = _find_best_matching_orig_node(
+                                gn, alt_cards, orig_nodes, scenario_name=alt.get("name", ""), orig_card_data=orig_cards
+                            )
+                            matched_orig_id = str(matched_orig.get("id")) if matched_orig else None
+                            if matched_orig_id:
+                                gn.setdefault("data", {})["target_orig_node_id"] = matched_orig_id
+
+                            ai_c = alt_cards.get(gid)
+                            if not isinstance(ai_c, dict):
+                                ai_c = next(iter(alt_cards.values()), {}) if len(alt_cards) == 1 else {}
+                                if not isinstance(ai_c, dict):
+                                    ai_c = {}
+                                alt_cards[gid] = ai_c
+
+                            g_data = gn.get("data") if isinstance(gn.get("data"), dict) else {}
+                            if "e2eSteps" not in ai_c and isinstance(g_data.get("e2eSteps"), list):
+                                ai_c["e2eSteps"] = g_data.pop("e2eSteps")
+
+                            orig_c = orig_cards.get(matched_orig_id, {}) if (matched_orig_id and isinstance(orig_cards.get(matched_orig_id), dict)) else {}
+                            orig_steps = orig_c.get("e2eSteps") or orig_c.get("steps") or []
+                            new_steps = ai_c.get("e2eSteps") or ai_c.get("steps") or []
+                            ai_c["e2eSteps"] = _reconstruct_complete_e2e_steps(
+                                orig_steps=orig_steps,
+                                new_steps=new_steps,
+                                flow_type=flow.flow_type,
+                                scenario_name=alt.get("name") or ai_c.get("name") or "",
+                                matched_orig_id=matched_orig_id,
+                                orig_edges_list=orig_edges,
+                                orig_card_data=orig_cards,
+                            )
+                        _normalize_card_data(alt_cards)
+                except Exception as post_err:
+                    logger.warning(f"Could not post-process alternative steps: {post_err}")
+
             return alternatives
         except Exception as e:
             logger.error(f"Failed to parse alternatives from generation skill: {e}\nContent: {alternatives_raw}")
