@@ -123,15 +123,28 @@ def get_history_batches(
 
 @router.get("/averages")
 def get_history_averages(
-    schedule_id: Optional[int] = None,
+    schedule_id: Optional[Union[int, str]] = None,
     flow_id: Optional[Union[int, str]] = None,
     api_id: Optional[int] = None,
+    execution_type: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
     """Retorna a média de execução e taxa de sucesso dos steps com base em filtros"""
     try:
-        stats = HistoryService.get_history_averages(db, schedule_id=schedule_id, flow_id=flow_id, api_id=api_id)
+        parsed_schedule_id = None
+        if schedule_id is not None:
+            try:
+                parsed_schedule_id = int(schedule_id)
+            except (ValueError, TypeError):
+                parsed_schedule_id = None
+        stats = HistoryService.get_history_averages(
+            db,
+            schedule_id=parsed_schedule_id,
+            flow_id=flow_id,
+            api_id=api_id,
+            execution_type=execution_type,
+        )
         return {"stats": stats}
     except Exception as e:
         logging.error(f"❌ Error getting averages: {str(e)}", exc_info=True)

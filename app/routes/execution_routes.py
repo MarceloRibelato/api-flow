@@ -205,6 +205,9 @@ def get_execution_pdf(
         headers={"Content-Disposition": f"attachment; filename=report_{schedule_id}.pdf"}
     )
 
+class E2EPdfExportPayload(BaseModel):
+    flow_tree_image: Optional[str] = None
+
 @router.get("/{schedule_id}/e2e-pdf")
 def get_e2e_execution_pdf(
     schedule_id: int, 
@@ -221,6 +224,36 @@ def get_e2e_execution_pdf(
     if not pdf_bytes:
         raise HTTPException(status_code=404, detail="E2E Execution not found or no data")
         
+    return Response(
+        content=bytes(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=e2e_report_{schedule_id}.pdf"}
+    )
+
+@router.post("/{schedule_id}/e2e-pdf")
+def post_e2e_execution_pdf(
+    schedule_id: int,
+    payload: Optional[E2EPdfExportPayload] = None,
+    batch_id: Optional[str] = None,
+    execution_type: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    """
+    Generates and returns an E2E/Mobile-specific PDF report with the exact captured Flow Tree image from the UI.
+    """
+    tree_img = payload.flow_tree_image if payload else None
+    pdf_bytes = PDFService.generate_e2e_report(
+        db,
+        schedule_id,
+        batch_id=batch_id,
+        execution_type=execution_type,
+        flow_tree_image=tree_img
+    )
+
+    if not pdf_bytes:
+        raise HTTPException(status_code=404, detail="E2E Execution not found or no data")
+
     return Response(
         content=bytes(pdf_bytes),
         media_type="application/pdf",

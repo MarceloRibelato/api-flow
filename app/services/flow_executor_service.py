@@ -890,7 +890,22 @@ class FlowExecutorService:
 
                         logger.info(f"➡️  [Step] Processing Node: {current_id} (Target Failed: {is_target_failed})")
                         
-                            # Execute Card for this Node
+                        # Skip non-executable start node if present in cardData
+                        node_obj_meta = node_map.get(current_id) or {}
+                        node_obj_data = node_obj_meta.get('data') if isinstance(node_obj_meta.get('data'), dict) else {}
+                        card_candidate = cards.get(current_id) if cards else None
+                        cand_name = str((card_candidate.get('name') if isinstance(card_candidate, dict) else None) or node_obj_data.get('name') or '').strip().lower()
+                        if (
+                            str(current_id).strip().lower() in ('start', 'node_start', 'startnode')
+                            or node_obj_meta.get('type') == 'startNode'
+                            or node_obj_data.get('nodeType') == 'start'
+                            or (isinstance(card_candidate, dict) and card_candidate.get('nodeType') == 'start')
+                            or cand_name in ('start', 'início', 'inicio')
+                        ):
+                            logger.debug(f"⏭️ Skipping start node '{current_id}' during step execution.")
+                            continue
+
+                        # Execute Card for this Node
                         card = cards.get(current_id)
                         if card:
                             api_calls = card.get('apiCalls', [])

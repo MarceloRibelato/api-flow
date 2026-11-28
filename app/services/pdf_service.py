@@ -21,7 +21,334 @@ class PDFService:
         return ascii_approx.encode('latin-1', 'replace').decode('latin-1')
 
     @staticmethod
+    def _draw_flow_tree_diagram(pdf: FPDF, db: Session, history: list, schedule=None, flow_tree_image: str = None):
+        """
+        Draws the visual Flow Tree diagram into the FPDF document.
+        If flow_tree_image (base64 PNG data URL captured directly from the report UI) is provided,
+        embeds the exact Flow Tree image; otherwise draws a clean vector fallback matching the UI light theme.
+        """
+        if flow_tree_image and isinstance(flow_tree_image, str):
+            try:
+                import base64, tempfile, os
+                b64_data = flow_tree_image.split(',', 1)[1] if ',' in flow_tree_image else flow_tree_image
+                img_bytes = base64.b64decode(b64_data)
+                if img_bytes:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
+                        tmp_img.write(img_bytes)
+                        tmp_path = tmp_img.name
+                    try:
+                        if pdf.get_y() + 65 > 270:
+                            pdf.add_page()
+                        pdf.set_font('Arial', 'B', 10)
+                        pdf.set_text_color(30, 41, 59)
+                        pdf.cell(0, 7, PDFService._s('Flow Tree'), ln=True)
+                        pdf.image(tmp_path, x=12, w=186)
+                        pdf.ln(5)
+                        return
+                    finally:
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        if not history:
+            return
+
+        import re
+        from collections import OrderedDict
+        from app.models.flow_models import FlowDB, FlowNodeDB, FlowEdgeDB
+
+        def clean_step_name(raw):
+            return re.sub(r':::RETRIES:::\d+', '', str(raw or 'Step'), flags=re.IGNORECASE).strip()
+
+        def norm_key(text):
+            return PDFService._s(text or '').lower().strip()
+
+        def is_start_node_entry(nid_val, name_val, ntype_val=''):
+            id_k = norm_key(nid_val)
+            nm_k = norm_key(name_val)
+            tp_k = norm_key(ntype_val)
+            return (
+                id_k in ('start', 'node_start', 'startnode')
+                or tp_k in ('start', 'startnode')
+                or nm_k in ('start', 'inicio')
+            )
+
+        node_map = OrderedDict()
+        edge_set = set()
+        edges = []
+
+        def add_edge(src, tgt):
+            if not src or not tgt or src == tgt:
+                return
+            k = f"{src}->{tgt}"
+            if k not in edge_set:
+                edge_set.add(k)
+                edges.append((str(src), str(tgt)))
+
+        # Attempt to load Flow topology from database if flow_id or project_id is available
+        first_item = history[0]
+        raw_flow_id = getattr(first_item, 'flow_id', None)
+        raw_project_id = getattr(first_item, 'project_id', None) or (getattr(schedule, 'target_id', None) if schedule else None)
+        flow_record = None
+        try:
+            if raw_flow_id and str(raw_flow_id).isdigit():
+                flow_record = db.query(FlowDB).filter(FlowDB.id == int(raw_flow_id)).first()
+                if not flow_record:
+                    flow_record = db.query(FlowDB).filter(FlowDB.project_id == int(raw_flow_id)).first()
+            if not flow_record and raw_project_id and str(raw_project_id).isdigit():
+                flow_record = db.query(FlowDB).filter(FlowDB.project_id == int(raw_project_id)).first()
+        except Exception:
+            flow_record = None
+
+        if flow_record:
+            try:
+                db_nodes = db.query(FlowNodeDB).filter(FlowNodeDB.flow_id == flow_record.id).all()
+                db_edges = db.query(FlowEdgeDB).filter(FlowEdgeDB.flow_id == flow_record.id).all()
+                for n in db_nodes:
+                    cid = str(n.client_id or '')
+                    ndata = n.data if isinstance(n.data, dict) else {}
+                    nname = clean_step_name(ndata.get('name') or ndata.get('label') or cid)
+                    if not cid or is_start_node_entry(cid, nname, n.type or ndata.get('nodeType')):
+                        continue
+                    node_map[cid] = {
+                        'id': cid,
+                        'name': nname,
+                        'norm': norm_key(nname),
+                        'passed': 0,
+                        'failed': 0,
+                        'duration_ms': 0,
+                        'failed_step': '',
+                    }
+                for e in db_edges:
+                    src = 'start' if e.source == 'start' else str(e.source or '')
+                    tgt = str(e.target or '')
+                    if (src == 'start' or src in node_map) and tgt in node_map:
+                        add_edge(src, tgt)
+            except Exception:
+                pass
+
+        def resolve_node(item):
+            raw_id = str(getattr(item, 'node_id', '') or '')
+            raw_name = clean_step_name(getattr(item, 'node_name', None) or getattr(item, 'feature_name', None) or 'Fluxo Principal')
+            if raw_id and raw_id in node_map:
+                return node_map[raw_id]
+            n_norm = norm_key(raw_name)
+            for n_obj in node_map.values():
+                if n_obj['norm'] == n_norm:
+                    return n_obj
+            fallback_id = raw_id if raw_id else f"hist_{n_norm or 'main'}"
+            if fallback_id not in node_map:
+                node_map[fallback_id] = {
+                    'id': fallback_id,
+                    'name': raw_name,
+                    'norm': n_norm,
+                    'passed': 0,
+                    'failed': 0,
+                    'duration_ms': 0,
+                    'failed_step': '',
+                }
+            return node_map[fallback_id]
+
+        path_seq_by_batch = OrderedDict()
+        for item in history:
+            step_name = clean_step_name(getattr(item, 'api_name', None) or 'Step')
+            if step_name.startswith('[BG]'):
+                continue
+            raw_item_nid = str(getattr(item, 'node_id', '') or '')
+            raw_item_nname = clean_step_name(getattr(item, 'node_name', None) or getattr(item, 'feature_name', None) or '')
+            if is_start_node_entry(raw_item_nid, raw_item_nname):
+                continue
+            n_obj = resolve_node(item)
+            status_code = getattr(item, 'status_code', 200)
+            err_msg = getattr(item, 'error_message', None)
+            is_ok = (status_code is None or (200 <= status_code < 400)) and not err_msg
+            if is_ok:
+                n_obj['passed'] += 1
+            else:
+                n_obj['failed'] += 1
+                if not n_obj['failed_step']:
+                    n_obj['failed_step'] = step_name
+            n_obj['duration_ms'] += int(getattr(item, 'response_time', 0) or 0)
+
+            b_key = str(getattr(item, 'batch_id', None) or 'default')
+            if b_key not in path_seq_by_batch:
+                path_seq_by_batch[b_key] = []
+            seq = path_seq_by_batch[b_key]
+            if not seq or seq[-1] != n_obj['id']:
+                seq.append(n_obj['id'])
+
+        if not node_map:
+            return
+
+        linked_targets = {t for _, t in edges}
+        for seq in path_seq_by_batch.values():
+            if not seq:
+                continue
+            if seq[0] not in linked_targets:
+                add_edge('start', seq[0])
+                linked_targets.add(seq[0])
+            for idx in range(len(seq) - 1):
+                if seq[idx + 1] not in linked_targets or not edges:
+                    add_edge(seq[idx], seq[idx + 1])
+                    linked_targets.add(seq[idx + 1])
+
+        for nid in node_map.keys():
+            if nid not in linked_targets:
+                add_edge('start', nid)
+                linked_targets.add(nid)
+
+        # BFS depth assignment
+        depth_map = {'start': 0}
+        children_map = {}
+        for src, tgt in edges:
+            children_map.setdefault(src, []).append(tgt)
+        queue = ['start']
+        while queue:
+            curr = queue.pop(0)
+            d = depth_map.get(curr, 0)
+            for ch in children_map.get(curr, []):
+                if ch not in depth_map:
+                    depth_map[ch] = d + 1
+                    queue.append(ch)
+        for nid in node_map.keys():
+            if nid not in depth_map:
+                depth_map[nid] = 1
+
+        max_depth = max(depth_map.values()) if depth_map else 1
+        levels = [[] for _ in range(max_depth + 1)]
+        levels[0].append({'id': 'start', 'is_start': True})
+        for nid, n_obj in node_map.items():
+            d = min(max_depth, depth_map.get(nid, 1))
+            levels[d].append(n_obj)
+        active_levels = [lvl for lvl in levels if lvl]
+
+        max_rows = max(len(lvl) for lvl in active_levels)
+        node_h = 15
+        row_gap = 4
+        box_h = max(28, max_rows * (node_h + row_gap) + 10)
+
+        if pdf.get_y() + box_h + 15 > 272:
+            pdf.add_page()
+
+        pdf.set_font('Arial', 'B', 11)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(0, 7, PDFService._s('Arvore do Fluxo (Flow Tree)'), ln=True)
+
+        box_x = 12
+        box_y = pdf.get_y() + 1
+        box_w = 186
+
+        # Clean light canvas container matching report UI
+        pdf.set_fill_color(248, 250, 252)
+        pdf.set_draw_color(203, 213, 225)
+        pdf.rect(box_x, box_y, box_w, box_h, 'FD')
+
+        total_cols = len(active_levels)
+        avail_w = box_w - 14
+        col_step = min(46.0, avail_w / max(1, total_cols))
+        node_w = min(38.0, max(22.0, col_step - 7.0))
+
+        coords = {}
+        for c_idx, lvl in enumerate(active_levels):
+            x = box_x + 7 + c_idx * col_step
+            lvl_h = len(lvl) * node_h + max(0, len(lvl) - 1) * row_gap
+            top_y = box_y + (box_h - lvl_h) / 2.0
+            for r_idx, n_obj in enumerate(lvl):
+                if n_obj.get('is_start'):
+                    sy = box_y + (box_h - 8.0) / 2.0
+                    coords['start'] = {'x': x, 'y': sy, 'w': 8.0, 'h': 8.0, 'cy': box_y + box_h / 2.0, 'node': n_obj}
+                else:
+                    ny = top_y + r_idx * (node_h + row_gap)
+                    coords[n_obj['id']] = {'x': x, 'y': ny, 'w': node_w, 'h': node_h, 'cy': ny + node_h / 2.0, 'node': n_obj}
+
+        # Draw Connector Lines
+        for src, tgt in edges:
+            s_pos = coords.get(src)
+            t_pos = coords.get(tgt)
+            if not s_pos or not t_pos:
+                continue
+            t_node = t_pos['node']
+            is_fail = t_node.get('failed', 0) > 0
+            is_pass = not is_fail and t_node.get('passed', 0) > 0
+            if is_fail:
+                pdf.set_draw_color(239, 68, 68)
+            elif is_pass:
+                pdf.set_draw_color(16, 185, 129)
+            else:
+                pdf.set_draw_color(100, 116, 139)
+            pdf.set_line_width(0.6 if is_fail else 0.45)
+            pdf.line(s_pos['x'] + s_pos['w'], s_pos['cy'], t_pos['x'], t_pos['cy'])
+
+        # Draw Node Boxes
+        for nid, pos in coords.items():
+            n_obj = pos['node']
+            if n_obj.get('is_start'):
+                pdf.set_fill_color(16, 185, 129)
+                pdf.set_draw_color(5, 150, 105)
+                pdf.rect(pos['x'], pos['y'], pos['w'], pos['h'], 'FD')
+                pdf.set_font('Arial', 'B', 6)
+                pdf.set_text_color(255, 255, 255)
+                pdf.set_xy(pos['x'], pos['y'] + 1.8)
+                pdf.cell(pos['w'], 4, '>', align='C')
+                continue
+
+            is_fail = n_obj.get('failed', 0) > 0
+            is_pass = not is_fail and n_obj.get('passed', 0) > 0
+            total_steps = n_obj.get('passed', 0) + n_obj.get('failed', 0)
+
+            if is_fail:
+                pdf.set_fill_color(254, 242, 242)
+                pdf.set_draw_color(239, 68, 68)
+                pdf.set_line_width(0.65)
+            elif is_pass:
+                pdf.set_fill_color(236, 253, 245)
+                pdf.set_draw_color(16, 185, 129)
+                pdf.set_line_width(0.45)
+            else:
+                pdf.set_fill_color(255, 255, 255)
+                pdf.set_draw_color(148, 163, 184)
+                pdf.set_line_width(0.35)
+
+            pdf.rect(pos['x'], pos['y'], pos['w'], pos['h'], 'FD')
+
+            # Node Title
+            max_chars = max(10, int(pos['w'] * 0.52))
+            raw_title = PDFService._s(n_obj.get('name', 'Node'))
+            title = (raw_title[:max_chars - 2] + '..') if len(raw_title) > max_chars else raw_title
+            pdf.set_font('Arial', 'B', 6.5)
+            pdf.set_text_color(15, 23, 42)
+            pdf.set_xy(pos['x'] + 1.5, pos['y'] + 1.5)
+            pdf.cell(pos['w'] - 3, 4, title, ln=False)
+
+            # Node Status Subtitle
+            pdf.set_font('Arial', '', 5.5)
+            if total_steps > 0:
+                status_line = f"{n_obj['passed']}/{total_steps} steps OK ({n_obj['duration_ms']/1000:.2f}s)"
+            else:
+                status_line = "Nao executado"
+            pdf.set_text_color(71, 85, 105)
+            pdf.set_xy(pos['x'] + 1.5, pos['y'] + 5.6)
+            pdf.cell(pos['w'] - 3, 3.5, PDFService._s(status_line[:max_chars + 4]), ln=False)
+
+            # Failed Step Badge inside Node
+            if is_fail and n_obj.get('failed_step'):
+                f_step = PDFService._s(f"X {n_obj['failed_step']}")
+                if len(f_step) > max_chars + 2:
+                    f_step = f_step[:max_chars] + '..'
+                pdf.set_font('Arial', 'B', 5.5)
+                pdf.set_text_color(220, 38, 38)
+                pdf.set_xy(pos['x'] + 1.5, pos['y'] + 9.8)
+                pdf.cell(pos['w'] - 3, 3.5, f_step, ln=False)
+
+        pdf.set_line_width(0.2)
+        pdf.set_y(box_y + box_h + 6)
+
+    @staticmethod
     def generate_execution_report(db: Session, schedule_id: int):
+
         # Fetch Data
         schedule = db.query(ScheduleModel).filter(ScheduleModel.id == schedule_id).first()
         if not schedule:
@@ -88,7 +415,10 @@ class PDFService:
         pdf.set_text_color(0, 0, 0)
         for d in data:
             pdf.cell(col_width, 8, d, border=1, align='C')
-        pdf.ln(15)
+        pdf.ln(12)
+
+        # --- 2.5 Visual Flow Tree Diagram ---
+        PDFService._draw_flow_tree_diagram(pdf, db, history, schedule=schedule)
         
         # --- 3. Detailed Results (Grouped) ---
         
@@ -338,7 +668,7 @@ class PDFService:
 
     @staticmethod
     @staticmethod
-    def generate_e2e_report(db: Session, schedule_id: int, batch_id: str = None, execution_type: str = None):
+    def generate_e2e_report(db: Session, schedule_id: int, batch_id: str = None, execution_type: str = None, flow_tree_image: str = None):
         """
         Premium Web/Mobile E2E PDF report with embedded screenshots and scenario grouping.
         """
@@ -465,6 +795,9 @@ class PDFService:
 
         # spacing after summary cards
         pdf.set_y(90)
+
+        # Visual Flow Tree Diagram on Cover Page
+        PDFService._draw_flow_tree_diagram(pdf, db, history, schedule=schedule, flow_tree_image=flow_tree_image)
         
         # Top 5 Demoras (Performance Bottlenecks)
         pdf.set_font('Arial', 'B', 10)

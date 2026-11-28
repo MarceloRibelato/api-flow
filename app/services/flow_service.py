@@ -1097,12 +1097,18 @@ class FlowService:
             query = query.filter(FlowDB.company_id == company_id)
 
         flow = query.first()
-        if not flow and project_id and not flow_id and not flow_type:
-            # Fallback only when flow_type is not specified: get latest flow for this project_id regardless of flow_type
-            fallback_query = db.query(FlowDB).filter(FlowDB.project_id == project_id)
+        if not flow and project_id and not flow_id:
+            # Fallback: try matching FlowDB.id == project_id first (when caller passed flow.id in the path),
+            # then fall back to latest flow for this project_id regardless of flow_type
+            by_id_query = db.query(FlowDB).filter(FlowDB.id == project_id)
             if company_id:
-                fallback_query = fallback_query.filter(FlowDB.company_id == company_id)
-            flow = fallback_query.order_by(FlowDB.updated_at.desc()).first()
+                by_id_query = by_id_query.filter(FlowDB.company_id == company_id)
+            flow = by_id_query.first()
+            if not flow:
+                fallback_query = db.query(FlowDB).filter(FlowDB.project_id == project_id)
+                if company_id:
+                    fallback_query = fallback_query.filter(FlowDB.company_id == company_id)
+                flow = fallback_query.order_by(FlowDB.updated_at.desc()).first()
 
         if not flow:
             return {"project_id": project_id, "nodes": [], "edges": [], "cardData": {}, "flow_type": flow_type or "api"}

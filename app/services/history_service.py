@@ -621,11 +621,11 @@ class HistoryService:
 
         filters = []
         if schedule_id:
-            filters.append(ModelClass.schedule_id == schedule_id)
+            filters.append(ModelClass.schedule_id == int(schedule_id))
         elif flow_id:
-            filters.append(ModelClass.flow_id == flow_id)
+            filters.append(ModelClass.flow_id == str(flow_id))
         elif api_id:
-            filters.append(ModelClass.api_id == api_id)
+            filters.append(ModelClass.api_id == str(api_id))
 
         query = db.query(
             ModelClass.feature_name, ModelClass.node_name, ModelClass.api_name, ModelClass.url,
